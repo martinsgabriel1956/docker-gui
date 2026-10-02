@@ -46,3 +46,17 @@ jobs:
       - run: python -m unittest -v
         env:
           DOCKER_GUI_E2E: "1"
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - name: Sintaxe do JS
+        run: node --check src/format.js && node --check src/app.js
+      - name: Testes do JS
+        run: node --test tests/format.test.js
+      - name: docker_gui.py em dia com src/ (HTML, JS e CSS do Tailwind)
+        run: python3 build.py --css --check
