@@ -235,14 +235,25 @@ function status(c) {
 }
 
 // "0.0.0.0:5432->5432/tcp, [::]:5432->5432/tcp" -> [["5432","5432","tcp"]]
-const ports = p => [...new Set([...p.matchAll(/:(\d+)->(\d+)\/(\w+)/g)].map(m => m.slice(1).join(':')))].map(s => s.split(':'));
+// o docker junta 4+ portas seguidas numa faixa ("0.0.0.0:3000-3003->3000-3003/tcp"): faixa curta vira uma
+// entrada por porta (cada uma clicável); faixa longa (mídia RTP, FTP passivo...) fica numa entrada só, "h1-h2"
+const MAX_EXPAND = 8;
+const ports = p => {
+  const out = [];
+  for (const [, h1, h2 = h1, c1, c2 = c1, proto] of p.matchAll(/:(\d+)(?:-(\d+))?->(\d+)(?:-(\d+))?\/(\w+)/g)) {
+    const n = h2 - h1;
+    if (n === c2 - c1 && n < MAX_EXPAND) for (let i = 0; i <= n; i++) out.push([`${+h1 + i}`, `${+c1 + i}`, proto]);
+    else out.push([h1 === h2 ? h1 : `${h1}-${h2}`, c1 === c2 ? c1 : `${c1}-${c2}`, proto]);
+  }
+  return [...new Set(out.map(x => x.join(':')))].map(s => s.split(':'));
+};
 
 // "ghcr.io/acme/api:1.4" -> "acme/api:1.4": o host do registry raramente importa; a tag sim
 const shortImage = img => img.replace(/^[^/]+[.:][^/]*\//, '');
 const hasHealth = c => /\((un)?healthy\)|health: starting/.test(c.Status);
 // no navegador não existe module; no Node os testes importam daqui
 if (typeof module === 'object') {
-  module.exports = {esc, EXIT, restartCode, tone, bucket, isProblem, project, dur, status, ports, shortImage, hasHealth};
+  module.exports = {esc, EXIT, restartCode, tone, bucket, isProblem, project, dur, status, ports, MAX_EXPAND, shortImage, hasHealth};
 }
 const $ = s => document.querySelector(s);
 // token da execução: chega no #t=... do link que o servidor abre/imprime. Fica no localStorage desta origem
@@ -364,6 +375,9 @@ function copyAddr(h) {
 function portChip(c, [h, p, proto]) {
   const label = `${h}→${p}${proto === 'tcp' ? '' : '/' + proto}`, svg = 'aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" class="inline size-3 ml-1 -mt-0.5"';
   const base = 'whitespace-nowrap font-mono text-xs px-1.5 py-0.5 max-lg:text-xs max-lg:px-3 max-lg:py-3.5 rounded ring-1 focus-visible:outline-2 focus-visible:outline-accent';
+  // faixa longa: não há um endereço para abrir ou copiar, então o chip só informa
+  if (h.includes('-')) return `<span title="Faixa de portas: ${h} do host → ${p} do container"
+    class="${base} bg-hover/60 text-fg-soft ring-line-strong">${label}</span>`;
   return c.State === 'running' && proto === 'tcp' && !NOT_HTTP.has(+p)
     ? `<a href="http://localhost:${h}" target="_blank" rel="noopener" aria-label="Abrir localhost:${h} em nova aba (porta ${p} do container)"
         title="Abrir no navegador" class="${base} bg-accent/10 text-accent-fg ring-accent/20 hover:bg-accent/20">${label}<svg ${svg}><path d="M6 3h7v7M13 3 4 12"/></svg></a>`
