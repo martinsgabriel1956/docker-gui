@@ -58,6 +58,22 @@ Se você mudar classes no `PAGE` ou os tokens, regenere o CSS embutido (precisa 
 python3 docker_gui.py --css
 ```
 
+## Testes
+
+Os testes usam só a biblioteca padrão. O `docker` é trocado por mock, então não precisa de daemon:
+
+```bash
+python3 -m unittest
+```
+
+Para rodar também o fluxo completo contra o Docker de verdade (cria e remove um container `busybox`):
+
+```bash
+DOCKER_GUI_E2E=1 python3 -m unittest
+```
+
+O CI roda o lint (`ruff check`), os testes em Python 3.7 a 3.14 e o E2E com Docker real em cada pull request e em cada push na `main` e na `develop`.
+
 ## Licença
 
 [MIT](LICENSE)
