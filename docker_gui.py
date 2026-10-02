@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Gerenciador de containers Docker no navegador. Só stdlib + docker CLI."""
+import argparse
+import errno
 import hmac
 import json
 import re
@@ -9,16 +11,22 @@ import sys
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-PORT = 8765
+PORT = 8765  # padrão; se estiver ocupada, serve() tenta as próximas
 # segredo por execução: sem ele a API não responde. Fecha a porta para o que roda na máquina
 # sem ser o seu navegador (container com network_mode: host, outros usuários, outros processos).
 TOKEN = secrets.token_urlsafe(24)
-ACTIONS = {"start": ["start"], "stop": ["stop"], "restart": ["restart"],
+ACTIONS = {"start": ["start"], "stop": ["stop"], "restart": ["restart"], "pause": ["pause"],
            "unpause": ["unpause"], "remove": ["rm", "-f"]}
+# leitura (ps, logs, inspect) é rápida; stop/restart esperam o stop_grace_period do container
+READ_TIMEOUT, ACTION_TIMEOUT = 15, 120
 
 
-def docker(*args):
-    return subprocess.run(["docker", *args], capture_output=True, text=True)
+def docker(*args, timeout=READ_TIMEOUT):
+    # sem timeout, um daemon travado prende uma thread por poll (a cada 2s, por aba) para sempre
+    try:
+        return subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(args, 124, "", f"docker {args[0]} não respondeu em {timeout}s. O daemon está travado?")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -32,7 +40,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def host_ok(self):
         # bloqueia DNS rebinding: só aceita acesso via localhost
-        return self.headers.get("Host") in (f"127.0.0.1:{PORT}", f"localhost:{PORT}")
+        port = self.server.server_address[1]
+        return self.headers.get("Host") in (f"127.0.0.1:{port}", f"localhost:{port}")
 
     def token_ok(self):
         # vem num header (não em cookie: cookie não separa porta e vazaria para outros servidores em localhost).
@@ -69,7 +78,7 @@ class Handler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/(\w+)/([0-9a-f]{12,64})", self.path)
         if not m or m[1] not in ACTIONS:
             return self.send(404, '"not found"')
-        r = docker(*ACTIONS[m[1]], m[2])
+        r = docker(*ACTIONS[m[1]], m[2], timeout=ACTION_TIMEOUT)
         self.send(500 if r.returncode else 200, json.dumps(r.stderr.strip()))
 
     def log_message(self, *args):
@@ -247,9 +256,9 @@ const TOKEN = (() => {
 })();
 const api = (path, opts = {}) => fetch(path, {...opts, headers: {...opts.headers, 'X-Docker-GUI-Token': TOKEN}});
 const esc = s => String(s).replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
-const LABEL = {start: 'Iniciar', stop: 'Parar', restart: 'Reiniciar', unpause: 'Retomar', logs: 'Logs', remove: 'Remover'};
-const VERB = {start: 'Iniciando…', stop: 'Parando…', restart: 'Reiniciando…', unpause: 'Retomando…', remove: 'Removendo…'};
-const DONE = {start: 'iniciado', stop: 'parado', restart: 'reiniciado', unpause: 'retomado', remove: 'removido'};
+const LABEL = {start: 'Iniciar', stop: 'Parar', restart: 'Reiniciar', pause: 'Pausar', unpause: 'Retomar', logs: 'Logs', remove: 'Remover'};
+const VERB = {start: 'Iniciando…', stop: 'Parando…', restart: 'Reiniciando…', pause: 'Pausando…', unpause: 'Retomando…', remove: 'Removendo…'};
+const DONE = {start: 'iniciado', stop: 'parado', restart: 'reiniciado', pause: 'pausado', unpause: 'retomado', remove: 'removido'};
 // cada estado tem posições fixas de botão, assim Logs fica sempre no mesmo lugar (dead não inicia, só remove)
 const PRIMARY = {running: 'stop', restarting: 'stop', paused: 'unpause', exited: 'start', created: 'start'};
 const SECONDARY = {running: 'restart', paused: 'stop'};
@@ -454,8 +463,9 @@ function rowHtml(c, withProject) {
   const btn = (a, cls = 'text-fg hover:bg-hover', text = LABEL[a], aria = `${LABEL[a]} ${esc(c.Names)}`) =>
     `<button data-id="${c.ID}" data-a="${a}" ${b && a !== 'logs' ? 'aria-disabled="true"' : ''}
       aria-label="${aria}" aria-describedby="st-${c.ID}" onclick="act('${a}','${c.ID}')" class="lg:w-20 shrink-0 ${BTN} ${cls}">${text}</button>`;
-  // ações raras (reiniciar, remover, exec) ficam no "⋯": a linha mostra só a ação principal e Logs
-  const more = [SECONDARY[c.State] && [SECONDARY[c.State], LABEL[SECONDARY[c.State]]], c.State === 'running' && ['exec', 'Copiar docker exec'],
+  // ações raras (reiniciar, pausar, remover, exec) ficam no "⋯": a linha mostra só a ação principal e Logs
+  const more = [SECONDARY[c.State] && [SECONDARY[c.State], LABEL[SECONDARY[c.State]]], c.State === 'running' && ['pause', 'Pausar'],
+                c.State === 'running' && ['exec', 'Copiar docker exec'],
                 removable(c) && ['remove', 'Remover…']].filter(Boolean);
   const item = 'block w-full text-left px-3 py-2 max-lg:py-3 rounded-md text-sm hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent';
   const menu = !more.length ? slot('lg:w-9') : `<details data-keep="menu" class="shrink-0" ontoggle="placeMenu(this)">
@@ -636,7 +646,8 @@ async function act(a, id) {
   $('#shown').textContent = `${VERB[a]} ${c.Names}`;
   if (!(await done)) { toast(`Não deu para ${LABEL[a].toLowerCase()} ${c.Names}. O erro ficou na linha.`); return load(); }
   if (!UP.includes(a)) {
-    toast(`${c.Names} ${DONE[a]}.`, true);
+    // pausado parece "ligado" na lista; o desfazer evita esquecer o container congelado
+    toast(`${c.Names} ${DONE[a]}.`, true, a === 'pause' ? ['Retomar', () => act('unpause', id)] : null);
     await load();
     if (a === 'remove') (document.querySelector(`[data-id="${near}"][data-a="logs"]`) || $('#q')).focus();
     return;
@@ -777,12 +788,29 @@ readHash(); render(); load(); setInterval(() => document.hidden || load(), 2000)
 PAGE_TEMPLATE = PAGE
 PAGE = PAGE.replace("/*CSS*/", CSS)
 
+
+def serve(port):
+    """Escuta na porta pedida; sem --port, cai para as próximas se a padrão estiver ocupada."""
+    for p in [port] if port is not None else range(PORT, PORT + 10):
+        try:
+            return ThreadingHTTPServer(("127.0.0.1", p), Handler)
+        except OSError as e:
+            if e.errno != errno.EADDRINUSE:
+                raise
+    sys.exit(f"Porta {port} ocupada. Escolha outra com --port." if port is not None
+             else f"Portas {PORT}-{PORT + 9} ocupadas. Escolha uma com --port.")
+
+
 if __name__ == "__main__":
-    if sys.argv[1:] == ["--css"]:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--port", type=int, help=f"porta local (padrão: {PORT}, ou a próxima livre)")
+    ap.add_argument("--css", action="store_true", help="regenera o CSS embutido (precisa de Node/npm)")
+    args = ap.parse_args()
+    if args.css:
         sys.exit(build_css())
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    server = serve(args.port)
     # o token vai no #fragmento: não é enviado ao servidor nem fica em log; a página guarda e o tira da URL
-    url = f"http://localhost:{PORT}/#t={TOKEN}"
+    url = f"http://localhost:{server.server_address[1]}/#t={TOKEN}"
     print(f"Docker GUI em {url}  (Ctrl+C para sair)")
     webbrowser.open(url)
     try:

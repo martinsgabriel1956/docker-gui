@@ -6,14 +6,18 @@ Gerenciador de containers Docker no navegador, num arquivo Python só. Usa apena
 python3 docker_gui.py
 ```
 
-O comando abre o navegador em `http://localhost:8765` com um token de acesso. O link também aparece no terminal.
+O comando abre o navegador em `http://localhost:8765` com um token de acesso. O link também aparece no terminal. Se a 8765 estiver ocupada, ele usa a próxima porta livre (até a 8774). Para escolher a porta, use `--port`:
+
+```bash
+python3 docker_gui.py --port 9000
+```
 
 ## O que faz
 
 - **Lista ao vivo** de todos os containers, atualizada a cada 2s. Só as linhas que mudaram são redesenhadas, e o poll pausa quando a aba fica escondida.
 - **Faixa "Precisa de atenção"** com o que está quebrado: healthcheck falhando, loop de reinício e saída com código diferente de zero. O status vem traduzido, por exemplo "Saiu com código 137 · morto à força ou sem memória (OOM)".
 - **Agrupamento por projeto do compose** (`com.docker.compose.project`), com **Iniciar / Reiniciar / Parar tudo** e "Iniciar de novo" para desfazer.
-- **Ações por container:** iniciar, parar, reiniciar, retomar e remover (com confirmação em 2 passos). Depois de iniciar, a ferramenta confere se o container ficou de pé.
+- **Ações por container:** iniciar, parar, reiniciar, pausar, retomar e remover (com confirmação em 2 passos). Depois de iniciar, a ferramenta confere se o container ficou de pé. Depois de pausar, o aviso oferece "Retomar" (atalho `Z`).
 - **Logs** com acompanhamento ao vivo, botão de copiar e ações no próprio modal. Mostra também a saída do último healthcheck.
 - **Portas:** as HTTP abrem no navegador; as outras (Postgres, Redis…) copiam `localhost:porta`.
 - **Copiar `docker exec -it <nome> sh`** pelo menu "⋯".
@@ -38,6 +42,7 @@ O servidor só escuta em `127.0.0.1` e foi pensado para uso local em máquina de
 | Cabeçalho próprio, sem CORS | Sites maliciosos chamando a API pelo seu navegador (CSRF) |
 | Validação do cabeçalho `Host` | DNS rebinding |
 | IDs só em hex, lista fixa de ações e nenhum shell | Injeção de comando |
+| Timeout em toda chamada ao `docker` (15 s para leitura, 120 s para ações) | Daemon travado acumulando threads presas |
 
 O token chega à página pelo `#fragmento` do link: o fragmento não é enviado ao servidor e sai da URL assim que a página carrega. Ele fica no `localStorage`, que é isolado por porta, e não em cookie, que vazaria para outros servidores em `localhost`. Cada execução gera um token novo. Se a página mostrar "sem token", abra o link impresso no terminal.
 
