@@ -172,7 +172,7 @@ class ActionsTest(ServerTest):
 class IdValidationTest(ServerTest):
     """O ID vai direto para o argv do docker: só hex, de 12 a 64 caracteres."""
 
-    BAD_IDS = ["0123456789a",                       # curto demais
+    BAD_IDS = ("0123456789a",                       # curto demais
                "0" * 65,                            # longo demais
                "0123456789AB",                      # maiúsculas
                "my-container",                      # nome em vez de ID
@@ -181,7 +181,7 @@ class IdValidationTest(ServerTest):
                "../0123456789ab",
                "0123456789ab/../../x",
                "0123456789ab?x=1",
-               "--help0123456789"]
+               "--help0123456789")
 
     def test_bad_ids_never_reach_docker(self):
         for bad in self.BAD_IDS:
@@ -206,7 +206,7 @@ class DockerCallTest(unittest.TestCase):
         with mock.patch.object(subprocess, "run", return_value=ok("x")) as run:
             self.assertEqual(docker_gui.docker("ps", "-a").stdout, "x")
         run.assert_called_once_with(["docker", "ps", "-a"], capture_output=True, text=True,
-                                    timeout=docker_gui.READ_TIMEOUT)
+                                    timeout=docker_gui.READ_TIMEOUT, check=False)
 
     def test_custom_timeout(self):
         with mock.patch.object(subprocess, "run", return_value=ok()) as run:
@@ -278,17 +278,17 @@ class ServeTest(unittest.TestCase):
 
     def test_all_default_ports_busy_exits(self):
         err = OSError(errno.EADDRINUSE, "Address already in use")
-        with mock.patch.object(docker_gui, "ThreadingHTTPServer", side_effect=err) as srv:
-            with self.assertRaises(SystemExit) as cm:
-                docker_gui.serve(None)
+        with mock.patch.object(docker_gui, "ThreadingHTTPServer", side_effect=err) as srv, \
+                self.assertRaises(SystemExit) as cm:
+            docker_gui.serve(None)
         self.assertEqual(srv.call_count, 10)
         self.assertIn(f"Portas {docker_gui.PORT}-{docker_gui.PORT + 9} ocupadas", str(cm.exception.code))
 
     def test_other_bind_errors_propagate(self):
         err = OSError(errno.EACCES, "Permission denied")
-        with mock.patch.object(docker_gui, "ThreadingHTTPServer", side_effect=err) as srv:
-            with self.assertRaises(OSError):
-                docker_gui.serve(None)
+        with mock.patch.object(docker_gui, "ThreadingHTTPServer", side_effect=err) as srv, \
+                self.assertRaises(OSError):
+            docker_gui.serve(None)
         self.assertEqual(srv.call_count, 1)  # não mascara erro de permissão tentando outras portas
 
 
@@ -304,7 +304,7 @@ class RealDockerTest(ServerTest):
     def setUpClass(cls):
         # sem "docker pull": o run só baixa se faltar a imagem, o que poupa o rate limit do Docker Hub
         r = subprocess.run(["docker", "run", "-d", "--stop-timeout", "1", "--label", "docker-gui-test=1",
-                            cls.IMAGE, "sleep", "300"], capture_output=True, text=True)
+                            cls.IMAGE, "sleep", "300"], capture_output=True, text=True, check=False)
         if r.returncode:
             raise RuntimeError(f"não consegui criar o container de teste: {r.stderr.strip()}")
         cls.cid = r.stdout.strip()
@@ -312,7 +312,7 @@ class RealDockerTest(ServerTest):
 
     @classmethod
     def tearDownClass(cls):
-        subprocess.run(["docker", "rm", "-f", cls.cid], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", cls.cid], capture_output=True, check=False)
         super().tearDownClass()
 
     def state(self):

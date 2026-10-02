@@ -24,7 +24,7 @@ READ_TIMEOUT, ACTION_TIMEOUT = 15, 120
 def docker(*args, timeout=READ_TIMEOUT):
     # sem timeout, um daemon travado prende uma thread por poll (a cada 2s, por aba) para sempre
     try:
-        return subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout)
+        return subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout, check=False)
     except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(args, 124, "", f"docker {args[0]} não respondeu em {timeout}s. O daemon está travado?")
 
