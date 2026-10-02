@@ -161,7 +161,8 @@ CSS = r"""/*! tailwindcss v4.3.3 | MIT License | https://tailwindcss.com */
 
 def build_css():
     """Regenera o CSS com o Tailwind CLI e reescreve o bloco CSS deste arquivo."""
-    import pathlib, tempfile
+    import pathlib
+    import tempfile
     with tempfile.TemporaryDirectory() as d:
         pathlib.Path(d, "page.html").write_text(PAGE_TEMPLATE)
         pathlib.Path(d, "in.css").write_text(TW_INPUT)
