@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Node (só se alguém rodar o Tailwind fora do `--css`, que usa uma pasta temporária)
+node_modules/
+
+# Editores e sistema
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Relatórios locais de design (impeccable)
+.impeccable/
