@@ -85,98 +85,38 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-# CSS do Tailwind v4 gerado a partir do PAGE e embutido aqui (sem CDN: funciona offline, sem flash sem estilo).
-# Mudou classes no PAGE ou os tokens abaixo? Rode: python3 docker_gui.py --css   (precisa de Node/npm)
-TW_INPUT = r"""@import "tailwindcss";
-@source "./page.html";
+def serve(port):
+    """Escuta na porta pedida; sem --port, cai para as próximas se a padrão estiver ocupada."""
+    for p in [port] if port is not None else range(PORT, PORT + 10):
+        try:
+            return ThreadingHTTPServer(("127.0.0.1", p), Handler)
+        except OSError as e:
+            if e.errno != errno.EADDRINUSE:
+                raise
+    sys.exit(f"Porta {port} ocupada. Escolha outra com --port." if port is not None
+             else f"Portas {PORT}-{PORT + 9} ocupadas. Escolha uma com --port.")
 
-/* tokens semânticos: o HTML só usa estes nomes (bg-canvas, text-muted, bg-ok...), nunca a paleta crua */
-@theme {
-  --color-canvas: oklch(14.1% 0.005 285.823);  /* zinc-950 */
-  --color-raised: oklch(21% 0.006 285.885);  /* zinc-900 */
-  --color-hover: oklch(27.4% 0.006 286.033);  /* zinc-800 */
-  --color-line: oklch(27.4% 0.006 286.033);  /* zinc-800 */
-  --color-line-strong: oklch(37% 0.013 285.805);  /* zinc-700 */
-  --color-dim: oklch(55.2% 0.016 285.938);  /* zinc-500 */
-  --color-muted: oklch(70.5% 0.015 286.067);  /* zinc-400 */
-  --color-fg-soft: oklch(87.1% 0.006 286.286);  /* zinc-300 */
-  --color-fg: oklch(92% 0.004 286.32);  /* zinc-200 */
-  --color-fg-strong: oklch(96.7% 0.001 286.375);  /* zinc-100 */
-  --color-ok: oklch(76.5% 0.177 163.223);  /* emerald-400 */
-  --color-ok-fg: oklch(84.5% 0.143 164.978);  /* emerald-300 */
-  --color-ok-soft: oklch(90.5% 0.093 164.15);  /* emerald-200 */
-  --color-warn: oklch(82.8% 0.189 84.429);  /* amber-400 */
-  --color-warn-fg: oklch(87.9% 0.169 91.605);  /* amber-300 */
-  --color-warn-soft: oklch(92.4% 0.12 95.746);  /* amber-200 */
-  --color-warn-strong: oklch(96.2% 0.059 95.617);  /* amber-100 */
-  --color-bad: oklch(70.4% 0.191 22.216);  /* red-400 */
-  --color-bad-fg: oklch(80.8% 0.114 19.571);  /* red-300 */
-  --color-bad-soft: oklch(88.5% 0.062 18.334);  /* red-200 */
-  --color-danger: oklch(50.5% 0.213 27.518);  /* red-700 */
-  --color-danger-hover: oklch(44.4% 0.177 26.899);  /* red-800 */
-  --color-pause: oklch(70.2% 0.183 293.541);  /* violet-400 */
-  --color-pause-fg: oklch(81.1% 0.111 293.571);  /* violet-300 */
-  --color-accent: oklch(74.6% 0.16 232.661);  /* sky-400 */
-  --color-accent-fg: oklch(82.8% 0.111 230.318);  /* sky-300 */
-  --color-accent-soft: oklch(90.1% 0.058 230.902);  /* sky-200 */
-}
 
-/* tema claro: mesmos tokens, outros valores */
-@media (prefers-color-scheme: light) {
-  :root {
-    --color-canvas: oklch(98.5% 0 none);  /* zinc-50 */
-    --color-raised: #fff;  /* white */
-    --color-hover: oklch(96.7% 0.001 286.375);  /* zinc-100 */
-    --color-line: oklch(92% 0.004 286.32);  /* zinc-200 */
-    --color-line-strong: oklch(87.1% 0.006 286.286);  /* zinc-300 */
-    --color-dim: oklch(70.5% 0.015 286.067);  /* zinc-400 */
-    --color-muted: oklch(44.2% 0.017 285.786);  /* zinc-600 */
-    --color-fg-soft: oklch(37% 0.013 285.805);  /* zinc-700 */
-    --color-fg: oklch(27.4% 0.006 286.033);  /* zinc-800 */
-    --color-fg-strong: oklch(14.1% 0.005 285.823);  /* zinc-950 */
-    --color-ok: oklch(69.6% 0.17 162.48);  /* emerald-500 */
-    --color-ok-fg: oklch(50.8% 0.118 165.612);  /* emerald-700 */
-    --color-ok-soft: oklch(43.2% 0.095 166.913);  /* emerald-800 */
-    --color-warn: oklch(76.9% 0.188 70.08);  /* amber-500 */
-    --color-warn-fg: oklch(55.5% 0.163 48.998);  /* amber-700 */
-    --color-warn-soft: oklch(47.3% 0.137 46.201);  /* amber-800 */
-    --color-warn-strong: oklch(41.4% 0.112 45.904);  /* amber-900 */
-    --color-bad: oklch(63.7% 0.237 25.331);  /* red-500 */
-    --color-bad-fg: oklch(50.5% 0.213 27.518);  /* red-700 */
-    --color-bad-soft: oklch(44.4% 0.177 26.899);  /* red-800 */
-    --color-danger: oklch(50.5% 0.213 27.518);  /* red-700 */
-    --color-danger-hover: oklch(44.4% 0.177 26.899);  /* red-800 */
-    --color-pause: oklch(60.6% 0.25 292.717);  /* violet-500 */
-    --color-pause-fg: oklch(49.1% 0.27 292.581);  /* violet-700 */
-    --color-accent: oklch(58.8% 0.158 241.966);  /* sky-600 */
-    --color-accent-fg: oklch(50% 0.134 242.749);  /* sky-700 */
-    --color-accent-soft: oklch(44.3% 0.11 240.79);  /* sky-800 */
-  }
-}
-"""
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--port", type=int, help=f"porta local (padrão: {PORT}, ou a próxima livre)")
+    args = ap.parse_args()
+    server = serve(args.port)
+    # o token vai no #fragmento: não é enviado ao servidor nem fica em log; a página guarda e o tira da URL
+    url = f"http://localhost:{server.server_address[1]}/#t={TOKEN}"
+    print(f"Docker GUI em {url}  (Ctrl+C para sair)")
+    webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
 
+
+# Front (HTML, JS e o CSS do Tailwind) embutido: sem CDN, funciona offline e não pisca sem estilo.
+# A fonte fica em src/; para mudar o visual ou o comportamento da página, veja o README.
+# >>> gerado por build.py a partir de src/: não edite à mão, mude src/ e rode python3 build.py
 CSS = r"""/*! tailwindcss v4.3.3 | MIT License | https://tailwindcss.com */
 @layer properties{@supports (((-webkit-hyphens:none)) and (not (margin-trim:inline))) or ((-moz-orient:inline) and (not (color:rgb(from red r g b)))){*,:before,:after,::backdrop{--tw-space-y-reverse:0;--tw-border-style:solid;--tw-leading:initial;--tw-font-weight:initial;--tw-tracking:initial;--tw-shadow:0 0 #0000;--tw-shadow-color:initial;--tw-shadow-alpha:100%;--tw-inset-shadow:0 0 #0000;--tw-inset-shadow-color:initial;--tw-inset-shadow-alpha:100%;--tw-ring-color:initial;--tw-ring-shadow:0 0 #0000;--tw-inset-ring-color:initial;--tw-inset-ring-shadow:0 0 #0000;--tw-ring-inset:initial;--tw-ring-offset-width:0px;--tw-ring-offset-color:#fff;--tw-ring-offset-shadow:0 0 #0000;--tw-blur:initial;--tw-brightness:initial;--tw-contrast:initial;--tw-grayscale:initial;--tw-hue-rotate:initial;--tw-invert:initial;--tw-opacity:initial;--tw-saturate:initial;--tw-sepia:initial;--tw-drop-shadow:initial;--tw-drop-shadow-color:initial;--tw-drop-shadow-alpha:100%;--tw-drop-shadow-size:initial;--tw-outline-style:solid}}}@layer theme{:root,:host{--font-sans:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";--font-mono:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;--color-black:#000;--color-white:#fff;--spacing:.25rem;--container-md:28rem;--container-7xl:80rem;--text-xs:.75rem;--text-xs--line-height:calc(1 / .75);--text-sm:.875rem;--text-sm--line-height:calc(1.25 / .875);--text-lg:1.125rem;--text-lg--line-height:calc(1.75 / 1.125);--text-2xl:1.5rem;--text-2xl--line-height:calc(2 / 1.5);--font-weight-normal:400;--font-weight-medium:500;--font-weight-semibold:600;--tracking-tight:-.025em;--tracking-normal:0em;--tracking-wider:.05em;--leading-relaxed:1.625;--radius-md:.375rem;--radius-lg:.5rem;--radius-xl:.75rem;--animate-pulse:pulse 2s cubic-bezier(.4, 0, .6, 1) infinite;--default-transition-duration:.15s;--default-transition-timing-function:cubic-bezier(.4, 0, .2, 1);--default-font-family:var(--font-sans);--default-mono-font-family:var(--font-mono);--color-canvas:oklch(14.1% .005 285.823);--color-raised:oklch(21% .006 285.885);--color-hover:oklch(27.4% .006 286.033);--color-line:oklch(27.4% .006 286.033);--color-line-strong:oklch(37% .013 285.805);--color-dim:oklch(55.2% .016 285.938);--color-muted:oklch(70.5% .015 286.067);--color-fg-soft:oklch(87.1% .006 286.286);--color-fg:oklch(92% .004 286.32);--color-fg-strong:oklch(96.7% .001 286.375);--color-ok:oklch(76.5% .177 163.223);--color-ok-fg:oklch(84.5% .143 164.978);--color-ok-soft:oklch(90.5% .093 164.15);--color-warn:oklch(82.8% .189 84.429);--color-warn-fg:oklch(87.9% .169 91.605);--color-warn-soft:oklch(92.4% .12 95.746);--color-warn-strong:oklch(96.2% .059 95.617);--color-bad:oklch(70.4% .191 22.216);--color-bad-fg:oklch(80.8% .114 19.571);--color-bad-soft:oklch(88.5% .062 18.334);--color-danger:oklch(50.5% .213 27.518);--color-danger-hover:oklch(44.4% .177 26.899);--color-pause:oklch(70.2% .183 293.541);--color-pause-fg:oklch(81.1% .111 293.571);--color-accent:oklch(74.6% .16 232.661);--color-accent-fg:oklch(82.8% .111 230.318);--color-accent-soft:oklch(90.1% .058 230.902)}}@layer base{*,:after,:before,::backdrop{box-sizing:border-box;border:0 solid;margin:0;padding:0}::file-selector-button{box-sizing:border-box;border:0 solid;margin:0;padding:0}html,:host{-webkit-text-size-adjust:100%;tab-size:4;line-height:1.5;font-family:var(--default-font-family,-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji");font-feature-settings:var(--default-font-feature-settings,normal);font-variation-settings:var(--default-font-variation-settings,normal);-webkit-tap-highlight-color:transparent}hr{height:0;color:inherit;border-top-width:1px}abbr:where([title]){-webkit-text-decoration:underline dotted;text-decoration:underline dotted}h1,h2,h3,h4,h5,h6{font-size:inherit;font-weight:inherit}a{color:inherit;-webkit-text-decoration:inherit;-webkit-text-decoration:inherit;-webkit-text-decoration:inherit;text-decoration:inherit}b,strong{font-weight:bolder}code,kbd,samp,pre{font-family:var(--default-mono-font-family,ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);font-feature-settings:var(--default-mono-font-feature-settings,normal);font-variation-settings:var(--default-mono-font-variation-settings,normal);font-size:1em}small{font-size:80%}sub,sup{vertical-align:baseline;font-size:75%;line-height:0;position:relative}sub{bottom:-.25em}sup{top:-.5em}table{text-indent:0;border-color:inherit;border-collapse:collapse}:-moz-focusring:where(:not(iframe)){outline:auto}progress{vertical-align:baseline}summary{display:list-item}ol,ul,menu{list-style:none}img,svg,video,canvas,audio,iframe,embed,object{vertical-align:middle;display:block}img,video{max-width:100%;height:auto}button,input,select,optgroup,textarea{font:inherit;font-feature-settings:inherit;font-variation-settings:inherit;letter-spacing:inherit;color:inherit;opacity:1;background-color:#0000;border-radius:0}::file-selector-button{font:inherit;font-feature-settings:inherit;font-variation-settings:inherit;letter-spacing:inherit;color:inherit;opacity:1;background-color:#0000;border-radius:0}:where(select:is([multiple],[size])) optgroup{font-weight:bolder}:where(select:is([multiple],[size])) optgroup option{padding-inline-start:20px}::file-selector-button{margin-inline-end:4px}::placeholder{opacity:1}@supports (not ((-webkit-appearance:-apple-pay-button))) or (contain-intrinsic-size:1px){::placeholder{color:currentColor}@supports (color:color-mix(in lab, red, red)){::placeholder{color:color-mix(in oklab, currentcolor 50%, transparent)}}}textarea{resize:vertical}::-webkit-search-decoration{-webkit-appearance:none}::-webkit-date-and-time-value{min-height:1lh;text-align:inherit}::-webkit-datetime-edit{display:inline-flex}::-webkit-datetime-edit-fields-wrapper{padding:0}::-webkit-datetime-edit{padding-block:0}::-webkit-datetime-edit-year-field{padding-block:0}::-webkit-datetime-edit-month-field{padding-block:0}::-webkit-datetime-edit-day-field{padding-block:0}::-webkit-datetime-edit-hour-field{padding-block:0}::-webkit-datetime-edit-minute-field{padding-block:0}::-webkit-datetime-edit-second-field{padding-block:0}::-webkit-datetime-edit-millisecond-field{padding-block:0}::-webkit-datetime-edit-meridiem-field{padding-block:0}::-webkit-calendar-picker-indicator{line-height:1}:-moz-ui-invalid{box-shadow:none}button,input:where([type=button],[type=reset],[type=submit]){appearance:button}::file-selector-button{appearance:button}::-webkit-inner-spin-button{height:auto}::-webkit-outer-spin-button{height:auto}[hidden]:where(:not([hidden=until-found])){display:none!important}}@layer components;@layer utilities{.sr-only{clip-path:inset(50%);white-space:nowrap;border-width:0;width:1px;height:1px;margin:-1px;padding:0;position:absolute;overflow:hidden}.fixed{position:fixed}.right-4{right:calc(var(--spacing) * 4)}.bottom-4{bottom:calc(var(--spacing) * 4)}.z-30{z-index:30}.container{width:100%}@media (min-width:40rem){.container{max-width:40rem}}@media (min-width:48rem){.container{max-width:48rem}}@media (min-width:64rem){.container{max-width:64rem}}@media (min-width:80rem){.container{max-width:80rem}}@media (min-width:96rem){.container{max-width:96rem}}.m-auto{margin:auto}.mx-1{margin-inline:var(--spacing)}.mx-auto{margin-inline:auto}.-mt-0\.5{margin-top:calc(var(--spacing) * -.5)}.mt-0\.5{margin-top:calc(var(--spacing) * .5)}.mt-1{margin-top:var(--spacing)}.mt-1\.5{margin-top:calc(var(--spacing) * 1.5)}.mt-2{margin-top:calc(var(--spacing) * 2)}.mr-1\.5{margin-right:calc(var(--spacing) * 1.5)}.mr-auto{margin-right:auto}.mb-4{margin-bottom:calc(var(--spacing) * 4)}.mb-6{margin-bottom:calc(var(--spacing) * 6)}.ml-1{margin-left:var(--spacing)}.ml-auto{margin-left:auto}.block{display:block}.contents{display:contents}.flex{display:flex}.grid{display:grid}.hidden{display:none}.inline{display:inline}.table{display:table}.size-1\.5{width:calc(var(--spacing) * 1.5);height:calc(var(--spacing) * 1.5)}.size-2{width:calc(var(--spacing) * 2);height:calc(var(--spacing) * 2)}.size-3{width:calc(var(--spacing) * 3);height:calc(var(--spacing) * 3)}.size-4{width:calc(var(--spacing) * 4);height:calc(var(--spacing) * 4)}.size-6{width:calc(var(--spacing) * 6);height:calc(var(--spacing) * 6)}.size-8{width:calc(var(--spacing) * 8);height:calc(var(--spacing) * 8)}.h-5{height:calc(var(--spacing) * 5)}.h-\[65vh\]{height:65vh}.min-h-screen{min-height:100vh}.w-\[min\(1100px\,95vw\)\]{width:min(1100px,95vw)}.w-fit{width:fit-content}.w-full{width:100%}.w-px{width:1px}.max-w-7xl{max-width:var(--container-7xl)}.max-w-md{max-width:var(--container-md)}.min-w-0{min-width:0}.min-w-48{min-width:calc(var(--spacing) * 48)}.shrink-0{flex-shrink:0}.animate-pulse{animation:var(--animate-pulse)}.cursor-pointer{cursor:pointer}.resize{resize:both}.list-none{list-style-type:none}.flex-wrap{flex-wrap:wrap}.place-items-center{place-items:center}.items-center{align-items:center}.items-start{align-items:flex-start}.justify-between{justify-content:space-between}.justify-end{justify-content:flex-end}.gap-1{gap:var(--spacing)}.gap-1\.5{gap:calc(var(--spacing) * 1.5)}.gap-2{gap:calc(var(--spacing) * 2)}.gap-2\.5{gap:calc(var(--spacing) * 2.5)}.gap-3{gap:calc(var(--spacing) * 3)}.gap-4{gap:calc(var(--spacing) * 4)}:where(.space-y-3>:not(:last-child)){--tw-space-y-reverse:0;margin-block-start:calc(calc(var(--spacing) * 3) * var(--tw-space-y-reverse));margin-block-end:calc(calc(var(--spacing) * 3) * calc(1 - var(--tw-space-y-reverse)))}.gap-x-3{column-gap:calc(var(--spacing) * 3)}.gap-y-2{row-gap:calc(var(--spacing) * 2)}.truncate{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.overflow-auto{overflow:auto}.overflow-x-auto{overflow-x:auto}.rounded{border-radius:.25rem}.rounded-full{border-radius:3.40282e38px}.rounded-lg{border-radius:var(--radius-lg)}.rounded-md{border-radius:var(--radius-md)}.rounded-xl{border-radius:var(--radius-xl)}.border-t{border-top-style:var(--tw-border-style);border-top-width:1px}.border-b{border-bottom-style:var(--tw-border-style);border-bottom-width:1px}.border-line{border-color:var(--color-line)}.border-line\/70{border-color:#27272ab3}@supports (color:color-mix(in lab, red, red)){.border-line\/70{border-color:color-mix(in oklab, var(--color-line) 70%, transparent)}}.bg-accent{background-color:var(--color-accent)}.bg-accent\/10{background-color:#00bcfe1a}@supports (color:color-mix(in lab, red, red)){.bg-accent\/10{background-color:color-mix(in oklab, var(--color-accent) 10%, transparent)}}.bg-bad{background-color:var(--color-bad)}.bg-bad\/5{background-color:#ff65680d}@supports (color:color-mix(in lab, red, red)){.bg-bad\/5{background-color:color-mix(in oklab, var(--color-bad) 5%, transparent)}}.bg-bad\/10{background-color:#ff65681a}@supports (color:color-mix(in lab, red, red)){.bg-bad\/10{background-color:color-mix(in oklab, var(--color-bad) 10%, transparent)}}.bg-canvas{background-color:var(--color-canvas)}.bg-danger{background-color:var(--color-danger)}.bg-dim{background-color:var(--color-dim)}.bg-fg{background-color:var(--color-fg)}.bg-hover{background-color:var(--color-hover)}.bg-hover\/60{background-color:#27272a99}@supports (color:color-mix(in lab, red, red)){.bg-hover\/60{background-color:color-mix(in oklab, var(--color-hover) 60%, transparent)}}.bg-ok{background-color:var(--color-ok)}.bg-ok\/10{background-color:#00d2941a}@supports (color:color-mix(in lab, red, red)){.bg-ok\/10{background-color:color-mix(in oklab, var(--color-ok) 10%, transparent)}}.bg-ok\/40{background-color:#00d29466}@supports (color:color-mix(in lab, red, red)){.bg-ok\/40{background-color:color-mix(in oklab, var(--color-ok) 40%, transparent)}}.bg-pause{background-color:var(--color-pause)}.bg-raised{background-color:var(--color-raised)}.bg-raised\/40{background-color:#18181b66}@supports (color:color-mix(in lab, red, red)){.bg-raised\/40{background-color:color-mix(in oklab, var(--color-raised) 40%, transparent)}}.bg-warn{background-color:var(--color-warn)}.bg-warn\/10{background-color:#fcbb001a}@supports (color:color-mix(in lab, red, red)){.bg-warn\/10{background-color:color-mix(in oklab, var(--color-warn) 10%, transparent)}}.p-0{padding:0}.p-1{padding:var(--spacing)}.p-4{padding:calc(var(--spacing) * 4)}.px-1{padding-inline:var(--spacing)}.px-1\.5{padding-inline:calc(var(--spacing) * 1.5)}.px-2{padding-inline:calc(var(--spacing) * 2)}.px-2\.5{padding-inline:calc(var(--spacing) * 2.5)}.px-3{padding-inline:calc(var(--spacing) * 3)}.px-4{padding-inline:calc(var(--spacing) * 4)}.py-0\.5{padding-block:calc(var(--spacing) * .5)}.py-1{padding-block:var(--spacing)}.py-2{padding-block:calc(var(--spacing) * 2)}.py-3{padding-block:calc(var(--spacing) * 3)}.py-8{padding-block:calc(var(--spacing) * 8)}.py-16{padding-block:calc(var(--spacing) * 16)}.pt-4{padding-top:calc(var(--spacing) * 4)}.pt-5{padding-top:calc(var(--spacing) * 5)}.pr-4{padding-right:calc(var(--spacing) * 4)}.pr-6{padding-right:calc(var(--spacing) * 6)}.pb-2{padding-bottom:calc(var(--spacing) * 2)}.pl-4{padding-left:calc(var(--spacing) * 4)}.text-center{text-align:center}.text-left{text-align:left}.align-middle{vertical-align:middle}.font-mono{font-family:var(--font-mono)}.font-sans{font-family:var(--font-sans)}.text-2xl{font-size:var(--text-2xl);line-height:var(--tw-leading,var(--text-2xl--line-height))}.text-lg{font-size:var(--text-lg);line-height:var(--tw-leading,var(--text-lg--line-height))}.text-sm{font-size:var(--text-sm);line-height:var(--tw-leading,var(--text-sm--line-height))}.text-xs{font-size:var(--text-xs);line-height:var(--tw-leading,var(--text-xs--line-height))}.leading-relaxed{--tw-leading:var(--leading-relaxed);line-height:var(--leading-relaxed)}.font-medium{--tw-font-weight:var(--font-weight-medium);font-weight:var(--font-weight-medium)}.font-normal{--tw-font-weight:var(--font-weight-normal);font-weight:var(--font-weight-normal)}.font-semibold{--tw-font-weight:var(--font-weight-semibold);font-weight:var(--font-weight-semibold)}.tracking-normal{--tw-tracking:var(--tracking-normal);letter-spacing:var(--tracking-normal)}.tracking-tight{--tw-tracking:var(--tracking-tight);letter-spacing:var(--tracking-tight)}.tracking-wider{--tw-tracking:var(--tracking-wider);letter-spacing:var(--tracking-wider)}.\[overflow-wrap\:anywhere\]{overflow-wrap:anywhere}.whitespace-nowrap{white-space:nowrap}.whitespace-pre-wrap{white-space:pre-wrap}.text-accent{color:var(--color-accent)}.text-accent-fg{color:var(--color-accent-fg)}.text-bad-fg{color:var(--color-bad-fg)}.text-bad-soft{color:var(--color-bad-soft)}.text-fg{color:var(--color-fg)}.text-fg-soft{color:var(--color-fg-soft)}.text-fg-strong{color:var(--color-fg-strong)}.text-muted{color:var(--color-muted)}.text-ok-fg{color:var(--color-ok-fg)}.text-ok-soft{color:var(--color-ok-soft)}.text-pause-fg{color:var(--color-pause-fg)}.text-warn-fg{color:var(--color-warn-fg)}.text-warn-soft{color:var(--color-warn-soft)}.text-warn-strong{color:var(--color-warn-strong)}.text-white{color:var(--color-white)}.normal-case{text-transform:none}.uppercase{text-transform:uppercase}.underline{text-decoration-line:underline}.underline-offset-4{text-underline-offset:4px}.antialiased{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}.opacity-40{opacity:.4}.opacity-70{opacity:.7}.shadow-lg{--tw-shadow:0 10px 15px -3px var(--tw-shadow-color,#0000001a), 0 4px 6px -4px var(--tw-shadow-color,#0000001a);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}.ring-1{--tw-ring-shadow:var(--tw-ring-inset,) 0 0 0 calc(1px + var(--tw-ring-offset-width)) var(--tw-ring-color,currentcolor);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}.shadow-black\/40{--tw-shadow-color:#0006}@supports (color:color-mix(in lab, red, red)){.shadow-black\/40{--tw-shadow-color:color-mix(in oklab, color-mix(in oklab, var(--color-black) 40%, transparent) var(--tw-shadow-alpha), transparent)}}.ring-accent\/20{--tw-ring-color:#00bcfe33}@supports (color:color-mix(in lab, red, red)){.ring-accent\/20{--tw-ring-color:color-mix(in oklab, var(--color-accent) 20%, transparent)}}.ring-bad\/40{--tw-ring-color:#ff656866}@supports (color:color-mix(in lab, red, red)){.ring-bad\/40{--tw-ring-color:color-mix(in oklab, var(--color-bad) 40%, transparent)}}.ring-current{--tw-ring-color:currentcolor}.ring-danger{--tw-ring-color:var(--color-danger)}.ring-line{--tw-ring-color:var(--color-line)}.ring-line-strong{--tw-ring-color:var(--color-line-strong)}.ring-line-strong\/80{--tw-ring-color:#3f3f46cc}@supports (color:color-mix(in lab, red, red)){.ring-line-strong\/80{--tw-ring-color:color-mix(in oklab, var(--color-line-strong) 80%, transparent)}}.ring-ok\/40{--tw-ring-color:#00d29466}@supports (color:color-mix(in lab, red, red)){.ring-ok\/40{--tw-ring-color:color-mix(in oklab, var(--color-ok) 40%, transparent)}}.ring-warn\/30{--tw-ring-color:#fcbb004d}@supports (color:color-mix(in lab, red, red)){.ring-warn\/30{--tw-ring-color:color-mix(in oklab, var(--color-warn) 30%, transparent)}}.filter{filter:var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,)}.transition{transition-property:color,background-color,border-color,outline-color,text-decoration-color,fill,stroke,--tw-gradient-from,--tw-gradient-via,--tw-gradient-to,opacity,box-shadow,transform,translate,scale,rotate,filter,-webkit-backdrop-filter,backdrop-filter,display,content-visibility,overlay,pointer-events;transition-timing-function:var(--tw-ease,var(--default-transition-timing-function));transition-duration:var(--tw-duration,var(--default-transition-duration))}.transition-opacity{transition-property:opacity;transition-timing-function:var(--tw-ease,var(--default-transition-timing-function));transition-duration:var(--tw-duration,var(--default-transition-duration))}.group-aria-pressed\:inline-block:is(:where(.group)[aria-pressed=true] *){display:inline-block}.selection\:bg-accent\/30 ::selection{background-color:#00bcfe4d}@supports (color:color-mix(in lab, red, red)){.selection\:bg-accent\/30 ::selection{background-color:color-mix(in oklab, var(--color-accent) 30%, transparent)}}.selection\:bg-accent\/30::selection{background-color:#00bcfe4d}@supports (color:color-mix(in lab, red, red)){.selection\:bg-accent\/30::selection{background-color:color-mix(in oklab, var(--color-accent) 30%, transparent)}}.placeholder\:text-muted::placeholder{color:var(--color-muted)}.backdrop\:bg-black\/70::backdrop{background-color:#000000b3}@supports (color:color-mix(in lab, red, red)){.backdrop\:bg-black\/70::backdrop{background-color:color-mix(in oklab, var(--color-black) 70%, transparent)}}.empty\:hidden:empty{display:none}@media (hover:hover){.hover\:bg-accent\/20:hover{background-color:#00bcfe33}@supports (color:color-mix(in lab, red, red)){.hover\:bg-accent\/20:hover{background-color:color-mix(in oklab, var(--color-accent) 20%, transparent)}}.hover\:bg-danger-hover:hover{background-color:var(--color-danger-hover)}.hover\:bg-hover:hover{background-color:var(--color-hover)}.hover\:bg-ok\/10:hover{background-color:#00d2941a}@supports (color:color-mix(in lab, red, red)){.hover\:bg-ok\/10:hover{background-color:color-mix(in oklab, var(--color-ok) 10%, transparent)}}.hover\:bg-raised\/70:hover{background-color:#18181bb3}@supports (color:color-mix(in lab, red, red)){.hover\:bg-raised\/70:hover{background-color:color-mix(in oklab, var(--color-raised) 70%, transparent)}}.hover\:text-accent-soft:hover{color:var(--color-accent-soft)}.hover\:text-fg:hover{color:var(--color-fg)}.hover\:text-fg-strong:hover{color:var(--color-fg-strong)}}.focus\:not-sr-only:focus{clip-path:none;white-space:normal;width:auto;height:auto;margin:0;padding:0;position:static;overflow:visible}.focus\:fixed:focus{position:fixed}.focus\:top-3:focus{top:calc(var(--spacing) * 3)}.focus\:left-3:focus{left:calc(var(--spacing) * 3)}.focus\:z-50:focus{z-index:50}.focus\:rounded-md:focus{border-radius:var(--radius-md)}.focus\:bg-fg-strong:focus{background-color:var(--color-fg-strong)}.focus\:px-3:focus{padding-inline:calc(var(--spacing) * 3)}.focus\:py-2:focus{padding-block:calc(var(--spacing) * 2)}.focus\:text-sm:focus{font-size:var(--text-sm);line-height:var(--tw-leading,var(--text-sm--line-height))}.focus\:text-canvas:focus{color:var(--color-canvas)}.focus\:ring-accent:focus{--tw-ring-color:var(--color-accent)}.focus\:outline-none:focus{--tw-outline-style:none;outline-style:none}.focus-visible\:outline-2:focus-visible{outline-style:var(--tw-outline-style);outline-width:2px}.focus-visible\:-outline-offset-2:focus-visible{outline-offset:calc(2px * -1)}.focus-visible\:outline-offset-2:focus-visible{outline-offset:2px}.focus-visible\:outline-accent:focus-visible{outline-color:var(--color-accent)}.aria-disabled\:cursor-wait[aria-disabled=true]{cursor:wait}.aria-disabled\:opacity-40[aria-disabled=true]{opacity:.4}.aria-pressed\:bg-accent\/15[aria-pressed=true]{background-color:#00bcfe26}@supports (color:color-mix(in lab, red, red)){.aria-pressed\:bg-accent\/15[aria-pressed=true]{background-color:color-mix(in oklab, var(--color-accent) 15%, transparent)}}.aria-pressed\:bg-fg-strong[aria-pressed=true]{background-color:var(--color-fg-strong)}.aria-pressed\:text-accent-soft[aria-pressed=true]{color:var(--color-accent-soft)}.aria-pressed\:text-canvas[aria-pressed=true]{color:var(--color-canvas)}.aria-pressed\:ring-accent\/40[aria-pressed=true]{--tw-ring-color:#00bcfe66}@supports (color:color-mix(in lab, red, red)){.aria-pressed\:ring-accent\/40[aria-pressed=true]{--tw-ring-color:color-mix(in oklab, var(--color-accent) 40%, transparent)}}.aria-pressed\:ring-fg-strong[aria-pressed=true]{--tw-ring-color:var(--color-fg-strong)}@media (prefers-reduced-motion:reduce){.motion-reduce\:animate-none{animation:none}.motion-reduce\:transition-none{transition-property:none}}@media not all and (min-width:64rem){.max-lg\:block{display:block}.max-lg\:hidden{display:none}.max-lg\:size-11{width:calc(var(--spacing) * 11);height:calc(var(--spacing) * 11)}.max-lg\:min-h-11{min-height:calc(var(--spacing) * 11)}.max-lg\:w-11{width:calc(var(--spacing) * 11)}.max-lg\:justify-start{justify-content:flex-start}.max-lg\:gap-2{gap:calc(var(--spacing) * 2)}:where(.max-lg\:space-y-1\.5>:not(:last-child)){--tw-space-y-reverse:0;margin-block-start:calc(calc(var(--spacing) * 1.5) * var(--tw-space-y-reverse));margin-block-end:calc(calc(var(--spacing) * 1.5) * calc(1 - var(--tw-space-y-reverse)))}.max-lg\:p-0{padding:0}.max-lg\:px-3{padding-inline:calc(var(--spacing) * 3)}.max-lg\:px-4{padding-inline:calc(var(--spacing) * 4)}.max-lg\:py-3{padding-block:calc(var(--spacing) * 3)}.max-lg\:py-3\.5{padding-block:calc(var(--spacing) * 3.5)}.max-lg\:py-4{padding-block:calc(var(--spacing) * 4)}.max-lg\:pt-1{padding-top:var(--spacing)}.max-lg\:pt-2{padding-top:calc(var(--spacing) * 2)}.max-lg\:pl-5{padding-left:calc(var(--spacing) * 5)}.max-lg\:text-sm{font-size:var(--text-sm);line-height:var(--tw-leading,var(--text-sm--line-height))}.max-lg\:text-xs{font-size:var(--text-xs);line-height:var(--tw-leading,var(--text-xs--line-height))}.max-lg\:has-\[div\]\:block:has(:is(div)){display:block}}@media (min-width:40rem){.sm\:w-72{width:calc(var(--spacing) * 72)}}@media (min-width:64rem){.lg\:hidden{display:none}.lg\:w-9{width:calc(var(--spacing) * 9)}.lg\:w-20{width:calc(var(--spacing) * 20)}.lg\:max-w-\[24ch\]{max-width:24ch}.lg\:min-w-\[24ch\]{min-width:24ch}.lg\:truncate{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.lg\:text-left{text-align:left}.lg\:text-right{text-align:right}.lg\:\[direction\:rtl\]{direction:rtl}}.\[\&\:\:-webkit-details-marker\]\:hidden::-webkit-details-marker{display:none}}@media (prefers-color-scheme:light){:root{--color-canvas:oklch(98.5% 0 none);--color-raised:#fff;--color-hover:oklch(96.7% .001 286.375);--color-line:oklch(92% .004 286.32);--color-line-strong:oklch(87.1% .006 286.286);--color-dim:oklch(70.5% .015 286.067);--color-muted:oklch(44.2% .017 285.786);--color-fg-soft:oklch(37% .013 285.805);--color-fg:oklch(27.4% .006 286.033);--color-fg-strong:oklch(14.1% .005 285.823);--color-ok:oklch(69.6% .17 162.48);--color-ok-fg:oklch(50.8% .118 165.612);--color-ok-soft:oklch(43.2% .095 166.913);--color-warn:oklch(76.9% .188 70.08);--color-warn-fg:oklch(55.5% .163 48.998);--color-warn-soft:oklch(47.3% .137 46.201);--color-warn-strong:oklch(41.4% .112 45.904);--color-bad:oklch(63.7% .237 25.331);--color-bad-fg:oklch(50.5% .213 27.518);--color-bad-soft:oklch(44.4% .177 26.899);--color-danger:oklch(50.5% .213 27.518);--color-danger-hover:oklch(44.4% .177 26.899);--color-pause:oklch(60.6% .25 292.717);--color-pause-fg:oklch(49.1% .27 292.581);--color-accent:oklch(58.8% .158 241.966);--color-accent-fg:oklch(50% .134 242.749);--color-accent-soft:oklch(44.3% .11 240.79)}}@property --tw-space-y-reverse{syntax:"*";inherits:false;initial-value:0}@property --tw-border-style{syntax:"*";inherits:false;initial-value:solid}@property --tw-leading{syntax:"*";inherits:false}@property --tw-font-weight{syntax:"*";inherits:false}@property --tw-tracking{syntax:"*";inherits:false}@property --tw-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-shadow-color{syntax:"*";inherits:false}@property --tw-shadow-alpha{syntax:"<percentage>";inherits:false;initial-value:100%}@property --tw-inset-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-inset-shadow-color{syntax:"*";inherits:false}@property --tw-inset-shadow-alpha{syntax:"<percentage>";inherits:false;initial-value:100%}@property --tw-ring-color{syntax:"*";inherits:false}@property --tw-ring-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-inset-ring-color{syntax:"*";inherits:false}@property --tw-inset-ring-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-ring-inset{syntax:"*";inherits:false}@property --tw-ring-offset-width{syntax:"<length>";inherits:false;initial-value:0}@property --tw-ring-offset-color{syntax:"*";inherits:false;initial-value:#fff}@property --tw-ring-offset-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-blur{syntax:"*";inherits:false}@property --tw-brightness{syntax:"*";inherits:false}@property --tw-contrast{syntax:"*";inherits:false}@property --tw-grayscale{syntax:"*";inherits:false}@property --tw-hue-rotate{syntax:"*";inherits:false}@property --tw-invert{syntax:"*";inherits:false}@property --tw-opacity{syntax:"*";inherits:false}@property --tw-saturate{syntax:"*";inherits:false}@property --tw-sepia{syntax:"*";inherits:false}@property --tw-drop-shadow{syntax:"*";inherits:false}@property --tw-drop-shadow-color{syntax:"*";inherits:false}@property --tw-drop-shadow-alpha{syntax:"<percentage>";inherits:false;initial-value:100%}@property --tw-drop-shadow-size{syntax:"*";inherits:false}@property --tw-outline-style{syntax:"*";inherits:false;initial-value:solid}@keyframes pulse{50%{opacity:.5}}"""
-
-
-def build_css():
-    """Regenera o CSS com o Tailwind CLI e reescreve o bloco CSS deste arquivo."""
-    import pathlib
-    import tempfile
-    with tempfile.TemporaryDirectory() as d:
-        pathlib.Path(d, "page.html").write_text(PAGE_TEMPLATE)
-        pathlib.Path(d, "in.css").write_text(TW_INPUT)
-        subprocess.run(["npm", "install", "--silent", "tailwindcss@4", "@tailwindcss/cli@4"], cwd=d, check=True)
-        subprocess.run(["npx", "tailwindcss", "-i", "in.css", "-o", "out.css", "--minify"], cwd=d, check=True)
-        css = pathlib.Path(d, "out.css").read_text()
-    assert '"""' not in css
-    me = pathlib.Path(__file__)
-    text = me.read_text()
-    a = text.index('CSS = r"""') + len('CSS = r"""')
-    me.write_text(text[:a] + css + text[text.index('"""', a):])
-    print(f"CSS regenerado: {len(css) // 1024} KB")
-
-
 PAGE = r"""<!doctype html>
 <html lang="pt-BR" class="bg-canvas">
 <head>
@@ -247,43 +187,14 @@ PAGE = r"""<!doctype html>
 <div id="toast" role="status" aria-live="polite" class="fixed bottom-4 right-4 max-w-md"></div>
 
 <script>
-const $ = s => document.querySelector(s);
-// token da execução: chega no #t=... do link que o servidor abre/imprime. Fica no localStorage desta origem
-// (que inclui a porta, ao contrário de cookie) para novas abas funcionarem, e sai da URL no primeiro render.
-const TOKEN = (() => {
-  const t = new URLSearchParams(location.hash.slice(1)).get('t');
-  try { if (t) localStorage.setItem('docker-gui-token', t); return t || localStorage.getItem('docker-gui-token') || ''; }
-  catch { return t || ''; }
-})();
-const api = (path, opts = {}) => fetch(path, {...opts, headers: {...opts.headers, 'X-Docker-GUI-Token': TOKEN}});
+// Funções puras que traduzem a saída do docker para a tela. Não tocam no DOM: o build as
+// concatena antes do app.js no mesmo <script>, e os testes (tests/format.test.js) as carregam no Node.
 const esc = s => String(s).replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
-const LABEL = {start: 'Iniciar', stop: 'Parar', restart: 'Reiniciar', pause: 'Pausar', unpause: 'Retomar', logs: 'Logs', remove: 'Remover'};
-const VERB = {start: 'Iniciando…', stop: 'Parando…', restart: 'Reiniciando…', pause: 'Pausando…', unpause: 'Retomando…', remove: 'Removendo…'};
-const DONE = {start: 'iniciado', stop: 'parado', restart: 'reiniciado', pause: 'pausado', unpause: 'retomado', remove: 'removido'};
-// cada estado tem posições fixas de botão, assim Logs fica sempre no mesmo lugar (dead não inicia, só remove)
-const PRIMARY = {running: 'stop', restarting: 'stop', paused: 'unpause', exited: 'start', created: 'start'};
-const SECONDARY = {running: 'restart', paused: 'stop'};
-const STOPPABLE = ['running', 'paused', 'restarting'];
-const removable = c => !STOPPABLE.includes(c.State);
-// pulso só para o que está mudando agora (ação em andamento, reinício); "verificando saúde" é estável
-const TONE = {ok: ['bg-ok', 'text-ok-fg'], check: ['bg-ok/40', 'text-ok-soft'],
-              warn: ['bg-warn', 'text-warn-fg'], busy: ['bg-fg animate-pulse motion-reduce:animate-none', 'text-fg-strong'],
-              bad: ['bg-bad', 'text-bad-fg'], pause: ['bg-pause', 'text-pause-fg'], off: ['bg-dim', 'text-muted']};
-// ponytail: lista fixa de portas (do container) que não são HTTP; o resto vira link
-const NOT_HTTP = new Set([21, 22, 25, 53, 110, 143, 465, 587, 993, 995, 1025, 1433, 1521, 2181, 3306, 4222,
-                          5432, 5672, 6379, 9042, 9092, 11211, 27017]);
-const BUCKETS = [['problema', 'com problema', 'com problema', 'text-bad-fg'], ['rodando', 'rodando bem', 'rodando bem', 'text-fg'],
-                 ['pausado', 'pausado', 'pausados', 'text-fg'], ['reiniciando', 'reiniciando', 'reiniciando', 'text-fg'],
-                 ['parado', 'parado', 'parados', 'text-fg']];
+
 const EXIT = {1: 'erro da aplicação', 125: 'falha do próprio docker run', 126: 'comando sem permissão de execução',
               127: 'comando não encontrado', 137: 'morto à força ou sem memória (OOM)', 139: 'falha de segmentação',
               143: 'encerrado por SIGTERM'};
 const UNIT = {second: 's', minute: 'min', hour: 'h', day: 'd', week: 'sem', month: 'mês', year: 'ano'};
-const TOUCH = matchMedia('(pointer: coarse)').matches;
-const PROBLEM_TXT = {docker: 'Docker fora do ar', perm: 'sem acesso ao Docker', server: 'sem conexão', auth: 'sem token'};
-const BTN = 'px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 transition motion-reduce:transition-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent aria-disabled:opacity-40 aria-disabled:cursor-wait';
-let data = [], busy = new Map(), errors = new Map(), lastOk = null, problem = '', problemKind = '', only = '',
-    toastTimer, logId = null, follow = null, arming = null, lastSay = '', dirty = false;
 
 const restartCode = c => +(c.Status.match(/^Restarting \((\d+)\)/)?.[1] ?? 0);
 function tone(c) {
@@ -322,6 +233,49 @@ function status(c) {
   const code = +(s.match(/^Exited \((\d+)\)/)?.[1] ?? 0);
   return code ? [`Saiu com código ${code} há ${t}`, EXIT[code]] : [`Parado há ${t}`];
 }
+
+// "0.0.0.0:5432->5432/tcp, [::]:5432->5432/tcp" -> [["5432","5432","tcp"]]
+const ports = p => [...new Set([...p.matchAll(/:(\d+)->(\d+)\/(\w+)/g)].map(m => m.slice(1).join(':')))].map(s => s.split(':'));
+
+// "ghcr.io/acme/api:1.4" -> "acme/api:1.4": o host do registry raramente importa; a tag sim
+const shortImage = img => img.replace(/^[^/]+[.:][^/]*\//, '');
+const hasHealth = c => /\((un)?healthy\)|health: starting/.test(c.Status);
+// no navegador não existe module; no Node os testes importam daqui
+if (typeof module === 'object') {
+  module.exports = {esc, EXIT, restartCode, tone, bucket, isProblem, project, dur, status, ports, shortImage, hasHealth};
+}
+const $ = s => document.querySelector(s);
+// token da execução: chega no #t=... do link que o servidor abre/imprime. Fica no localStorage desta origem
+// (que inclui a porta, ao contrário de cookie) para novas abas funcionarem, e sai da URL no primeiro render.
+const TOKEN = (() => {
+  const t = new URLSearchParams(location.hash.slice(1)).get('t');
+  try { if (t) localStorage.setItem('docker-gui-token', t); return t || localStorage.getItem('docker-gui-token') || ''; }
+  catch { return t || ''; }
+})();
+const api = (path, opts = {}) => fetch(path, {...opts, headers: {...opts.headers, 'X-Docker-GUI-Token': TOKEN}});
+const LABEL = {start: 'Iniciar', stop: 'Parar', restart: 'Reiniciar', pause: 'Pausar', unpause: 'Retomar', logs: 'Logs', remove: 'Remover'};
+const VERB = {start: 'Iniciando…', stop: 'Parando…', restart: 'Reiniciando…', pause: 'Pausando…', unpause: 'Retomando…', remove: 'Removendo…'};
+const DONE = {start: 'iniciado', stop: 'parado', restart: 'reiniciado', pause: 'pausado', unpause: 'retomado', remove: 'removido'};
+// cada estado tem posições fixas de botão, assim Logs fica sempre no mesmo lugar (dead não inicia, só remove)
+const PRIMARY = {running: 'stop', restarting: 'stop', paused: 'unpause', exited: 'start', created: 'start'};
+const SECONDARY = {running: 'restart', paused: 'stop'};
+const STOPPABLE = ['running', 'paused', 'restarting'];
+const removable = c => !STOPPABLE.includes(c.State);
+// pulso só para o que está mudando agora (ação em andamento, reinício); "verificando saúde" é estável
+const TONE = {ok: ['bg-ok', 'text-ok-fg'], check: ['bg-ok/40', 'text-ok-soft'],
+              warn: ['bg-warn', 'text-warn-fg'], busy: ['bg-fg animate-pulse motion-reduce:animate-none', 'text-fg-strong'],
+              bad: ['bg-bad', 'text-bad-fg'], pause: ['bg-pause', 'text-pause-fg'], off: ['bg-dim', 'text-muted']};
+// ponytail: lista fixa de portas (do container) que não são HTTP; o resto vira link
+const NOT_HTTP = new Set([21, 22, 25, 53, 110, 143, 465, 587, 993, 995, 1025, 1433, 1521, 2181, 3306, 4222,
+                          5432, 5672, 6379, 9042, 9092, 11211, 27017]);
+const BUCKETS = [['problema', 'com problema', 'com problema', 'text-bad-fg'], ['rodando', 'rodando bem', 'rodando bem', 'text-fg'],
+                 ['pausado', 'pausado', 'pausados', 'text-fg'], ['reiniciando', 'reiniciando', 'reiniciando', 'text-fg'],
+                 ['parado', 'parado', 'parados', 'text-fg']];
+const TOUCH = matchMedia('(pointer: coarse)').matches;
+const PROBLEM_TXT = {docker: 'Docker fora do ar', perm: 'sem acesso ao Docker', server: 'sem conexão', auth: 'sem token'};
+const BTN = 'px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 transition motion-reduce:transition-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent aria-disabled:opacity-40 aria-disabled:cursor-wait';
+let data = [], busy = new Map(), errors = new Map(), lastOk = null, problem = '', problemKind = '', only = '',
+    toastTimer, logId = null, follow = null, arming = null, lastSay = '', dirty = false;
 
 let toastFn = null;
 function toast(msg, ok, action) {  // action = [rótulo, função]
@@ -407,9 +361,6 @@ function copyAddr(h) {
   navigator.clipboard.writeText(`localhost:${h}`).then(() => toast(`Copiado: localhost:${h}`, true), () => toast('Não consegui copiar.'));
 }
 
-// "0.0.0.0:5432->5432/tcp, [::]:5432->5432/tcp" -> [["5432","5432","tcp"]]
-const ports = p => [...new Set([...p.matchAll(/:(\d+)->(\d+)\/(\w+)/g)].map(m => m.slice(1).join(':')))].map(s => s.split(':'));
-
 function portChip(c, [h, p, proto]) {
   const label = `${h}→${p}${proto === 'tcp' ? '' : '/' + proto}`, svg = 'aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" class="inline size-3 ml-1 -mt-0.5"';
   const base = 'whitespace-nowrap font-mono text-xs px-1.5 py-0.5 max-lg:text-xs max-lg:px-3 max-lg:py-3.5 rounded ring-1 focus-visible:outline-2 focus-visible:outline-accent';
@@ -429,9 +380,6 @@ function errHtml(c) {
     <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-bad-soft">${esc(e.msg)}</pre></details>`;
 }
 
-// "ghcr.io/acme/api:1.4" -> "acme/api:1.4": o host do registry raramente importa; a tag sim
-const shortImage = img => img.replace(/^[^/]+[.:][^/]*\//, '');
-const hasHealth = c => /\((un)?healthy\)|health: starting/.test(c.Status);
 const health = {};  // ID+Status -> texto do último probe (o cache vence quando o Status muda)
 
 async function loadHealth(id) {
@@ -786,35 +734,8 @@ readHash(); render(); load(); setInterval(() => document.hidden || load(), 2000)
 </body>
 </html>
 """
-PAGE_TEMPLATE = PAGE
+# <<< fim do gerado
 PAGE = PAGE.replace("/*CSS*/", CSS)
 
-
-def serve(port):
-    """Escuta na porta pedida; sem --port, cai para as próximas se a padrão estiver ocupada."""
-    for p in [port] if port is not None else range(PORT, PORT + 10):
-        try:
-            return ThreadingHTTPServer(("127.0.0.1", p), Handler)
-        except OSError as e:
-            if e.errno != errno.EADDRINUSE:
-                raise
-    sys.exit(f"Porta {port} ocupada. Escolha outra com --port." if port is not None
-             else f"Portas {PORT}-{PORT + 9} ocupadas. Escolha uma com --port.")
-
-
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--port", type=int, help=f"porta local (padrão: {PORT}, ou a próxima livre)")
-    ap.add_argument("--css", action="store_true", help="regenera o CSS embutido (precisa de Node/npm)")
-    args = ap.parse_args()
-    if args.css:
-        sys.exit(build_css())
-    server = serve(args.port)
-    # o token vai no #fragmento: não é enviado ao servidor nem fica em log; a página guarda e o tira da URL
-    url = f"http://localhost:{server.server_address[1]}/#t={TOKEN}"
-    print(f"Docker GUI em {url}  (Ctrl+C para sair)")
-    webbrowser.open(url)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
+    main()

@@ -48,19 +48,30 @@ O token chega à página pelo `#fragmento` do link: o fragmento não é enviado 
 
 > Quem consegue rodar `docker` na sua máquina já tem poder equivalente ao de root. O token impede que a GUI amplie esse acesso, mas não substitui o cuidado com quem está no grupo `docker`.
 
-## Mudando o visual
+## Desenvolvimento
 
-O HTML usa classes do [Tailwind CSS v4](https://tailwindcss.com) com **tokens semânticos** (`bg-canvas`, `text-muted`, `bg-ok`, `text-bad-fg`, `bg-accent`…). Os valores dos dois temas ficam em `TW_INPUT`, no topo do arquivo.
+Quem usa baixa só o `docker_gui.py`. Para desenvolver, o front fica em arquivos próprios em `src/`, e o `build.py` embute tudo no `docker_gui.py`:
 
-Se você mudar classes no `PAGE` ou os tokens, regenere o CSS embutido (precisa de Node/npm):
+| Arquivo | O que tem |
+|---|---|
+| `docker_gui.py` | Servidor (Python, editado à mão) + bloco gerado no fim, com HTML, JS e CSS |
+| `src/page.html` | Estrutura da página |
+| `src/format.js` | Funções puras que traduzem a saída do `docker` (status, portas, projeto…) |
+| `src/app.js` | Renderização, ações e eventos |
+| `src/theme.css` | Entrada do [Tailwind CSS v4](https://tailwindcss.com) com os **tokens semânticos** dos dois temas (`bg-canvas`, `text-muted`, `bg-ok`, `text-bad-fg`, `bg-accent`…) |
+
+Depois de mudar algo em `src/`, rode o build. Se você usou uma classe do Tailwind nova ou mexeu nos tokens, regenere também o CSS (precisa de Node/npm):
 
 ```bash
-python3 docker_gui.py --css
+python3 build.py         # HTML e JS
+python3 build.py --css   # HTML, JS e CSS
 ```
+
+Não edite o bloco gerado do `docker_gui.py` à mão: o CI confere se ele bate com `src/`.
 
 ## Testes
 
-Os testes usam só a biblioteca padrão. O `docker` é trocado por mock, então não precisa de daemon:
+Os testes do backend usam só a biblioteca padrão. O `docker` é trocado por mock, então não precisa de daemon:
 
 ```bash
 python3 -m unittest
@@ -72,7 +83,13 @@ Para rodar também o fluxo completo contra o Docker de verdade (cria e remove um
 DOCKER_GUI_E2E=1 python3 -m unittest
 ```
 
-O CI roda o lint (`ruff check`), os testes em Python 3.7 a 3.14 e o E2E com Docker real em cada pull request e em cada push na `main` e na `develop`.
+As funções de `src/format.js` têm testes próprios, que rodam no Node sem dependências:
+
+```bash
+node --test tests/format.test.js
+```
+
+O CI roda tudo isso em cada pull request e em cada push na `main` e na `develop`: lint (`ruff check`), testes em Python 3.7 a 3.14, E2E com Docker real, sintaxe e testes do JS, e a conferência de que o `docker_gui.py` está em dia com `src/`, CSS incluído.
 
 ## Licença
 
