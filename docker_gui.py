@@ -62,7 +62,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, "[" + ",".join(r.stdout.splitlines()) + "]")
         m = re.fullmatch(r"/api/logs/([0-9a-f]{12,64})", self.path)
         if m:
-            r = docker("logs", "--tail", "500", m[1])
+            r = docker("logs", "--timestamps", "--tail", "500", m[1])
             return self.send(500 if r.returncode else 200, json.dumps(r.stdout + r.stderr))
         m = re.fullmatch(r"/api/health/([0-9a-f]{12,64})", self.path)
         if m:  # saída dos probes do healthcheck (não aparece em docker logs)
@@ -177,6 +177,7 @@ PAGE = r"""<!doctype html>
       <button id="refresh" onclick="refreshLogs()" class="px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover aria-disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Atualizar</button>
       <button id="follow" aria-pressed="false" onclick="toggleFollow()" class="group px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover aria-pressed:bg-accent/15 aria-pressed:text-accent-soft aria-pressed:ring-accent/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"><span aria-hidden="true" class="hidden group-aria-pressed:inline-block size-1.5 mr-1.5 align-middle rounded-full bg-accent animate-pulse motion-reduce:animate-none"></span>Acompanhar ao vivo</button>
       <button onclick="copyLogs()" class="px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Copiar</button>
+      <button onclick="downloadLogs()" class="px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Baixar .log</button>
       <span id="lmeta" class="ml-auto text-xs text-muted">Últimas 500 linhas</span>
     </div>
     <div id="dlg-msg" role="status" aria-live="polite" class="empty:hidden"></div>
@@ -756,6 +757,13 @@ PAGE = r"""<!doctype html>
   function copyLogs() {
     navigator.clipboard.writeText($("#lb").textContent ?? "").then(() => toast("Logs copiados.", true), () => toast("Não consegui copiar."));
   }
+  function downloadLogs() {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([$("#lb").textContent ?? ""], { type: "text/plain" }));
+    a.download = `${$("#lt").textContent}.log`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href));
+  }
   function afterClose() {
     toggleFollow(false);
     document.querySelector(`[data-id="${logId}"][data-a="logs"]`)?.focus();
@@ -767,6 +775,7 @@ PAGE = r"""<!doctype html>
     copyAddr,
     copyExec,
     copyLogs,
+    downloadLogs,
     filterBy,
     loadHealth,
     menuPick,

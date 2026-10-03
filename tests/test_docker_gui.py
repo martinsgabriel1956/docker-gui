@@ -125,7 +125,7 @@ class LogsAndHealthTest(ServerTest):
     def test_logs_join_stdout_and_stderr(self):
         self.docker.return_value = ok("out\n", "err\n")
         self.assertEqual(self.request("GET", f"/api/logs/{HEX_ID}"), (200, "out\nerr\n"))
-        self.docker.assert_called_once_with("logs", "--tail", "500", HEX_ID)
+        self.docker.assert_called_once_with("logs", "--timestamps", "--tail", "500", HEX_ID)
 
     def test_logs_error(self):
         self.docker.return_value = fail("No such container")
