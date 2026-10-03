@@ -45,6 +45,10 @@ const BUCKET_OF_STATE: Partial<Record<ContainerState, Bucket>> = {running: 'roda
 export const bucket = (c: Container): Bucket =>
   ['bad', 'warn'].includes(tone(c)) ? 'problema' : BUCKET_OF_STATE[c.State] || 'parado';
 export const isProblem = (c: Container): boolean => bucket(c) === 'problema';
+// quem entrou na faixa de atenção desde a leitura anterior (IDs que já estavam nela); null = primeira leitura,
+// que só serve de base: o que já estava com problema ao abrir a página não vira notificação
+export const newProblems = (before: Set<string> | null, cs: Container[]): Container[] =>
+  before ? cs.filter(c => isProblem(c) && !before.has(c.ID)) : [];
 // depends_on tem vírgulas no valor, então não dá para fazer split nos Labels; regex só no project
 export const project = (c: Pick<Container, 'Labels'>): string =>
   (c.Labels || '').match(/(?:^|,)com\.docker\.compose\.project=([^,]*)/)?.[1] || '';
