@@ -1,8 +1,9 @@
 // Testes das funções puras do front: node --test tests/format.test.js
+// O Node (22.18+) remove os tipos do .ts sozinho, então não há build antes do teste.
 // Os Status abaixo são strings reais do `docker ps`; se o formato do CLI mudar, é aqui que quebra.
-const test = require('node:test');
-const assert = require('node:assert/strict');
-const f = require('../src/format.js');
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import * as f from '../src/format.ts';
 
 const c = (State, Status, extra = {}) => ({State, Status, ...extra});
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Embute o front de src/ no docker_gui.py, que continua sendo um arquivo único para quem usa.
 
-    python3 build.py            HTML + JS de src/ (só Python)
-    python3 build.py --css      também regenera o CSS com o Tailwind (precisa de Node/npm)
+    python3 build.py            HTML + JS (o esbuild compila src/app.ts; precisa de `npm ci` antes)
+    python3 build.py --css      também regenera o CSS com o Tailwind
     python3 build.py --check    não escreve; sai com 1 se o docker_gui.py estiver desatualizado
 """
 import argparse
@@ -14,7 +14,8 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parent
 SRC = ROOT / "src"
 TARGET = ROOT / "docker_gui.py"
-SCRIPTS = ["format.js", "app.js"]  # concatenados nesta ordem num único <script>
+ENTRY = SRC / "app.ts"  # o esbuild segue os imports a partir daqui e gera um único <script>
+ESBUILD = ROOT / "node_modules" / ".bin" / "esbuild"  # versão fixa no package-lock.json: saída reproduzível
 TAILWIND = "4.3.3"  # versão fixa: outra versão gera CSS diferente e o --check acusaria sem mudança real
 BEGIN = "# >>> gerado por build.py a partir de src/: não edite à mão, mude src/ e rode python3 build.py\n"
 END = "# <<< fim do gerado\n"
@@ -27,12 +28,22 @@ def raw(name, text):
     return f'{name} = r"""{text}"""\n'
 
 
+def bundle():
+    """TypeScript -> um JS só, em IIFE: os tipos somem e os imports viram um arquivo. Não checa tipos (é o tsc)."""
+    if not ESBUILD.exists():
+        sys.exit("esbuild não encontrado: rode npm ci")
+    r = subprocess.run([str(ESBUILD), str(ENTRY), "--bundle", "--format=iife", "--target=es2022", "--charset=utf8",
+                        "--log-level=warning"], cwd=ROOT, capture_output=True, text=True, check=False)
+    if r.returncode:
+        sys.exit(r.stderr)
+    return r.stdout
+
+
 def page():
     html = (SRC / "page.html").read_text()
-    js = "".join((SRC / f).read_text() for f in SCRIPTS)
     if html.count("/*JS*/\n") != 1:
         sys.exit("src/page.html precisa ter exatamente um /*JS*/ numa linha própria")
-    return html.replace("/*JS*/\n", js)
+    return html.replace("/*JS*/\n", bundle())
 
 
 def css():

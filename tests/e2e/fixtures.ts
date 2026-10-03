@@ -3,9 +3,11 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = path.resolve(__dirname, '../..');
-const FAKE_BIN = path.join(__dirname, 'fake-docker');
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.resolve(HERE, '../..');
+const FAKE_BIN = path.join(HERE, 'fake-docker');
 
 type Action = 'start' | 'stop' | 'restart' | 'pause' | 'unpause' | 'remove';
 
