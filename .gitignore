@@ -4,8 +4,12 @@ __pycache__/
 .venv/
 venv/
 
-# Node (só se alguém rodar o Tailwind fora do `--css`, que usa uma pasta temporária)
+# Node (npm install: Playwright dos testes de UI)
 node_modules/
+
+# Playwright
+test-results/
+playwright-report/
 
 # Editores e sistema
 .vscode/

@@ -1,0 +1,17 @@
+{
+  "name": "docker-gui-dev",
+  "private": true,
+  "type": "module",
+  "description": "Ferramentas de desenvolvimento. Quem só usa o docker_gui.py não precisa de nada disto.",
+  "scripts": {
+    "typecheck": "tsc -p .",
+    "build": "python3 build.py",
+    "test:js": "node --test tests/format.test.js",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2"
+  }
+}

@@ -1,0 +1,67 @@
+@import "tailwindcss";
+@source "./page.html";
+@source "./*.ts";
+
+/* tokens semânticos: o HTML só usa estes nomes (bg-canvas, text-muted, bg-ok...), nunca a paleta crua */
+@theme {
+  --color-canvas: oklch(14.1% 0.005 285.823);  /* zinc-950 */
+  --color-raised: oklch(21% 0.006 285.885);  /* zinc-900 */
+  --color-hover: oklch(27.4% 0.006 286.033);  /* zinc-800 */
+  --color-line: oklch(27.4% 0.006 286.033);  /* zinc-800 */
+  --color-line-strong: oklch(37% 0.013 285.805);  /* zinc-700 */
+  --color-dim: oklch(55.2% 0.016 285.938);  /* zinc-500 */
+  --color-muted: oklch(70.5% 0.015 286.067);  /* zinc-400 */
+  --color-fg-soft: oklch(87.1% 0.006 286.286);  /* zinc-300 */
+  --color-fg: oklch(92% 0.004 286.32);  /* zinc-200 */
+  --color-fg-strong: oklch(96.7% 0.001 286.375);  /* zinc-100 */
+  --color-ok: oklch(76.5% 0.177 163.223);  /* emerald-400 */
+  --color-ok-fg: oklch(84.5% 0.143 164.978);  /* emerald-300 */
+  --color-ok-soft: oklch(90.5% 0.093 164.15);  /* emerald-200 */
+  --color-warn: oklch(82.8% 0.189 84.429);  /* amber-400 */
+  --color-warn-fg: oklch(87.9% 0.169 91.605);  /* amber-300 */
+  --color-warn-soft: oklch(92.4% 0.12 95.746);  /* amber-200 */
+  --color-warn-strong: oklch(96.2% 0.059 95.617);  /* amber-100 */
+  --color-bad: oklch(70.4% 0.191 22.216);  /* red-400 */
+  --color-bad-fg: oklch(80.8% 0.114 19.571);  /* red-300 */
+  --color-bad-soft: oklch(88.5% 0.062 18.334);  /* red-200 */
+  --color-danger: oklch(50.5% 0.213 27.518);  /* red-700 */
+  --color-danger-hover: oklch(44.4% 0.177 26.899);  /* red-800 */
+  --color-pause: oklch(70.2% 0.183 293.541);  /* violet-400 */
+  --color-pause-fg: oklch(81.1% 0.111 293.571);  /* violet-300 */
+  --color-accent: oklch(74.6% 0.16 232.661);  /* sky-400 */
+  --color-accent-fg: oklch(82.8% 0.111 230.318);  /* sky-300 */
+  --color-accent-soft: oklch(90.1% 0.058 230.902);  /* sky-200 */
+}
+
+/* tema claro: mesmos tokens, outros valores */
+@media (prefers-color-scheme: light) {
+  :root {
+    --color-canvas: oklch(98.5% 0 none);  /* zinc-50 */
+    --color-raised: #fff;  /* white */
+    --color-hover: oklch(96.7% 0.001 286.375);  /* zinc-100 */
+    --color-line: oklch(92% 0.004 286.32);  /* zinc-200 */
+    --color-line-strong: oklch(87.1% 0.006 286.286);  /* zinc-300 */
+    --color-dim: oklch(70.5% 0.015 286.067);  /* zinc-400 */
+    --color-muted: oklch(44.2% 0.017 285.786);  /* zinc-600 */
+    --color-fg-soft: oklch(37% 0.013 285.805);  /* zinc-700 */
+    --color-fg: oklch(27.4% 0.006 286.033);  /* zinc-800 */
+    --color-fg-strong: oklch(14.1% 0.005 285.823);  /* zinc-950 */
+    --color-ok: oklch(69.6% 0.17 162.48);  /* emerald-500 */
+    --color-ok-fg: oklch(50.8% 0.118 165.612);  /* emerald-700 */
+    --color-ok-soft: oklch(43.2% 0.095 166.913);  /* emerald-800 */
+    --color-warn: oklch(76.9% 0.188 70.08);  /* amber-500 */
+    --color-warn-fg: oklch(55.5% 0.163 48.998);  /* amber-700 */
+    --color-warn-soft: oklch(47.3% 0.137 46.201);  /* amber-800 */
+    --color-warn-strong: oklch(41.4% 0.112 45.904);  /* amber-900 */
+    --color-bad: oklch(63.7% 0.237 25.331);  /* red-500 */
+    --color-bad-fg: oklch(50.5% 0.213 27.518);  /* red-700 */
+    --color-bad-soft: oklch(44.4% 0.177 26.899);  /* red-800 */
+    --color-danger: oklch(50.5% 0.213 27.518);  /* red-700 */
+    --color-danger-hover: oklch(44.4% 0.177 26.899);  /* red-800 */
+    --color-pause: oklch(60.6% 0.25 292.717);  /* violet-500 */
+    --color-pause-fg: oklch(49.1% 0.27 292.581);  /* violet-700 */
+    --color-accent: oklch(58.8% 0.158 241.966);  /* sky-600 */
+    --color-accent-fg: oklch(50% 0.134 242.749);  /* sky-700 */
+    --color-accent-soft: oklch(44.3% 0.11 240.79);  /* sky-800 */
+  }
+}

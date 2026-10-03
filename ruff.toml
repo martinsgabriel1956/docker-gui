@@ -1,0 +1,2 @@
+# lint só (sem formatter): o arquivo único tem HTML/JS em strings longas
+target-version = "py37"
