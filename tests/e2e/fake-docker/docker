@@ -5,6 +5,7 @@ Cenários que o Docker de verdade não reproduz sob demanda (healthcheck falhand
 ação que falha ou demora) viram dados. Campos extras por container, fora do formato do `docker ps`:
   logs    texto do `docker logs`
   health  objeto do `inspect --format {{json .State.Health}}`
+  inspect objeto do `inspect --format {{json .}}` (HostConfig, NetworkSettings, Mounts, Config...)
   fail    {ação: stderr}: a ação falha com essa mensagem
   delay   {ação: segundos}: a ação demora (para ver o estado "ocupado" na tela)
   after   {ação: {State, Status}}: estado depois da ação, no lugar do padrão (ex.: start que cai)
@@ -71,7 +72,8 @@ def main(args):
         elif cmd == "logs":
             sys.stdout.write(find(state, ref).get("logs", ""))
         elif cmd == "inspect":
-            print(json.dumps(find(state, ref).get("health")))
+            c = find(state, ref)
+            print(json.dumps(c.get("health") if ".State.Health" in args[-2] else c.get("inspect", {})))
         else:
             c = find(state, ref)
             if action in c.get("fail", {}):
