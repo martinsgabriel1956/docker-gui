@@ -149,3 +149,8 @@ test('esc neutraliza HTML', () => {
 test('todo código de saída explicado tem texto', () => {
   for (const [code, txt] of Object.entries(f.EXIT)) assert.ok(txt.length > 3, code);
 });
+
+test('usage mostra CPU e a memória usada; o limite fica no title', () => {
+  assert.deepEqual(f.usage({ID: 'a', CPUPerc: '0.52%', MemUsage: '10.5MiB / 1.944GiB', MemPerc: '0.53%'}),
+                   ['CPU 0.52% · RAM 10.5MiB', 'Memória: 10.5MiB / 1.944GiB (0.53%)']);
+});

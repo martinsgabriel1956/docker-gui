@@ -1,6 +1,6 @@
 import {
-  type Bucket, type Container, type ContainerState, type Port, type Tone,
-  bucket, esc, hasHealth, isProblem, ports, project, shortImage, status, tone, workingDir,
+  type Bucket, type Container, type ContainerState, type DiskUsage, type Port, type Stats, type Tone,
+  bucket, esc, hasHealth, isProblem, ports, project, shortImage, status, tone, usage, workingDir,
 } from './format';
 
 // a página é estática: todo seletor usado aqui existe no page.html
@@ -25,8 +25,9 @@ type Problem = [title: string, hint: string, detail: unknown, kind: ProblemKind]
 type ToastAction = [label: string, fn: () => unknown];
 type RowError = {msg: string; state: ContainerState; what: string};
 type ComposeAction = 'up' | 'down' | 'pull';
-// confirmação em 2 passos: remover um container ou derrubar um projeto (id = "stack-<projeto>")
-type Arming = {id: string; name: string; a: 'remove' | 'down'; at: number; timer: number};
+// confirmação em 2 passos pendente: remover um container, derrubar um projeto (id = "stack-<projeto>") ou limpar
+// uma categoria do disco; a é o data-a do botão e note vai para o leitor de tela
+type Arming = {id: string; name: string; a: 'remove' | 'down' | 'prune'; note: string; at: number; timer: number};
 type Health = {Log?: {ExitCode: number; Output: string}[]} | null;
 // linha da tabela com o HTML que a gerou, para o patchRows saber se mudou
 type Row = HTMLElement & {_html?: string};
@@ -118,6 +119,21 @@ async function load() {
   }
 }
 
+// CPU e memória vêm à parte e mais devagar que a lista: o docker stats leva ~2 s para medir
+let stats: Record<string, Stats> = {};
+async function loadStats() {
+  let next: Record<string, Stats> = {};
+  try {
+    const r = await api('/api/stats');
+    if (r.ok) next = Object.fromEntries((await r.json() as Stats[]).map(s => [s.ID, s]));
+  } catch { /* sem conexão: o banner do load() já avisa */ }
+  if (JSON.stringify(next) === JSON.stringify(stats)) return;
+  stats = next;
+  if (selectingRows()) dirty = true; else render();
+}
+// setTimeout encadeado em vez de setInterval: um docker lento não empilha consultas
+async function statsLoop() { if (!document.hidden) await loadStats(); setTimeout(statsLoop, 5000); }
+
 function renderCount() {
   const n = (k: Bucket) => data.filter(c => bucket(c) === k).length, running = data.filter(c => c.State === 'running').length;
   const problemTxt = problemKind ? PROBLEM_TXT[problemKind] : '';
@@ -195,7 +211,7 @@ async function loadHealth(id: string) {
 
 const rowCache = new Map<string, {sig: string; html: string}>();
 function row(c: Container, withProject = false) {
-  const sig = JSON.stringify([c, withProject, busy.get(c.ID), arming?.id === c.ID, errors.get(c.ID), health[c.ID + c.Status], TOUCH]);
+  const sig = JSON.stringify([c, withProject, busy.get(c.ID), arming?.id === c.ID, errors.get(c.ID), health[c.ID + c.Status], stats[c.ID], TOUCH]);
   const hit = rowCache.get(c.ID);
   if (hit?.sig === sig) return hit.html;
   const html = rowHtml(c, withProject);
@@ -206,6 +222,7 @@ function row(c: Container, withProject = false) {
 function rowHtml(c: Container, withProject: boolean) {
   const b = busy.get(c.ID), t = TONE[b ? 'busy' : tone(c)], st = status(c), pp = ports(c.Ports), p = project(c);
   const armed = arming?.id === c.ID, prim = PRIMARY[c.State], sec = SECONDARY[c.State];
+  const u = c.State === 'running' && !b && stats[c.ID] ? usage(stats[c.ID]) : null;
   const slot = (w = 'lg:w-20') => `<span aria-hidden="true" class="${w} shrink-0 max-lg:hidden"></span>`;
   const btn = (a: RowAction, cls = 'text-fg hover:bg-hover', text = LABEL[a], aria = `${LABEL[a]} ${esc(c.Names)}`) =>
     `<button data-id="${c.ID}" data-a="${a}" ${b && a !== 'logs' ? 'aria-disabled="true"' : ''}
@@ -234,7 +251,8 @@ function rowHtml(c: Container, withProject: boolean) {
     <td role="cell" class="font-mono text-xs text-muted pr-4 max-lg:block max-lg:p-0 max-lg:pl-5 [overflow-wrap:anywhere]">
       <span class="sr-only lg:hidden">Imagem: </span><div class="lg:truncate lg:max-w-[24ch] lg:[direction:rtl] lg:text-left" title="${esc(c.Image)}"><bdi dir="ltr">${esc(shortImage(c.Image))}</bdi></div></td>
     <td role="cell" class="text-sm pr-4 lg:min-w-[24ch] max-lg:block max-lg:p-0 max-lg:pl-5" title="${esc(c.Status)}">
-      <span id="st-${c.ID}" class="${t[1]}">${b ? VERB[b] : esc(st[0])}${st[1] && !b ? `<span class="block text-xs text-muted">${st[1]}</span>` : ''}</span>${b ? '' : errHtml(c) + healthBox}</td>
+      <span id="st-${c.ID}" class="${t[1]}">${b ? VERB[b] : esc(st[0])}${st[1] && !b ? `<span class="block text-xs text-muted">${st[1]}</span>` : ''}</span>${
+      u ? `<span id="us-${c.ID}" class="block text-xs font-mono text-muted" title="${esc(u[1])}">${esc(u[0])}</span>` : ''}${b ? '' : errHtml(c) + healthBox}</td>
     <td role="cell" class="pr-4 max-lg:hidden max-lg:has-[div]:block max-lg:p-0 max-lg:pl-5 max-lg:pt-1">${pp.length
       ? `<div class="flex flex-wrap gap-1 max-lg:gap-2">${pp.map(x => portChip(c, x)).join('')}</div>` : ''}</td>
     <td role="cell" class="pr-4 max-lg:block max-lg:p-0 max-lg:pt-2"><div class="flex justify-end max-lg:justify-start items-center gap-1.5 max-lg:gap-2">
@@ -318,12 +336,12 @@ function render() {
   dirty = false;
   renderCount();
   renderDlg();
+  renderDisk();
   if (f?.id) refocus(f.id, f.a);
   saveHash();
   // só escreve na região viva quando a mensagem muda, para não apagar o anúncio de uma ação em andamento
-  const say = arming ? `${arming.a === 'down'
-    ? `Clique em Confirmar down para derrubar o projeto ${arming.name}. Os volumes ficam; o projeto some da lista e só volta com up.`
-    : `Clique em Confirmar para apagar ${arming.name} de vez. Os volumes não são afetados.`} ${TOUCH ? 'Cancela sozinho em 8 segundos.' : 'Esc cancela.'}`
+  const say = arming ? `${arming.a === 'down' ? `Clique em Confirmar down para derrubar o projeto ${arming.name}.`
+    : `Clique em Confirmar para apagar ${arming.name} de vez.`} ${arming.note} ${TOUCH ? 'Cancela sozinho em 8 segundos.' : 'Esc cancela.'}`
             : q || only ? `${rows.length} de ${data.length} containers` : '';
   if (say !== lastSay) $('#shown').textContent = lastSay = say;
 }
@@ -394,7 +412,7 @@ async function act(a: RowAction, id: string) {
   if (a === 'logs') return logs(id);
   const c = data.find(c => c.ID === id);
   if (!c || busy.has(id)) return;
-  if (a === 'remove' && !confirmed(id, c.Names, 'remove')) return;
+  if (a === 'remove' && !confirmed(id, c.Names, 'remove', 'Os volumes não são afetados.')) return;
   const trs = [...document.querySelectorAll<HTMLElement>('#rows tr[data-row]')], i = trs.findIndex(tr => tr.dataset.key === 'c:' + id);
   const near = (trs[i + 1] || trs[i - 1])?.dataset.key?.slice(2);
   const done = run(a, c);
@@ -446,14 +464,14 @@ async function stackAct(a: Action, p: string, ids?: string[]) {
   load();
 }
 
-// 1º clique só arma (e devolve false); o 2º confirma. Duplo clique não pode virar confirmação
-function confirmed(id: string, name: string, a: Arming['a']) {
+// 1º clique só arma (e desarma o que estiver armado); o 2º confirma. Devolve true quando é para executar
+function confirmed(id: string, name: string, a: Arming['a'], note: string): boolean {
   if (arming?.id !== id || arming.a !== a) {
     disarm(false);
-    arming = {id, name, a, at: Date.now(), timer: setTimeout(armTick, 8000)}; render();
+    arming = {id, name, a, note, at: Date.now(), timer: setTimeout(armTick, 8000)}; render();
     return false;
   }
-  if (Date.now() - arming.at < 600) return false;
+  if (Date.now() - arming.at < 600) return false;  // duplo clique não pode virar confirmação
   disarm(false);
   return true;
 }
@@ -462,7 +480,7 @@ function confirmed(id: string, name: string, a: Arming['a']) {
 async function composeAct(a: ComposeAction, p: string) {
   const c = data.find(c => project(c) === p);
   if (!c || composing.has(p) || data.some(c => project(c) === p && busy.has(c.ID))) return;
-  if (a === 'down' && !confirmed(`stack-${p}`, p, 'down')) return;
+  if (a === 'down' && !confirmed(`stack-${p}`, p, 'down', 'Os volumes ficam; o projeto some da lista e só volta com up.')) return;
   composing.set(p, a); render();
   $('#shown').textContent = `${COMPOSE_VERB[a]} ${p}`;
   try {
@@ -563,6 +581,14 @@ function copyLogs() {
   navigator.clipboard.writeText($('#lb').textContent ?? '').then(() => toast('Logs copiados.', true), () => toast('Não consegui copiar.'));
 }
 
+// baixa o que está na tela (com os timestamps do docker), sem ir de novo ao servidor
+function downloadLogs() {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([$('#lb').textContent ?? ''], {type: 'text/plain'}));
+  a.download = `${$('#lt').textContent}.log`;
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href));
+}
+
 // roda no × direto e também no evento close (Esc); chamar duas vezes não faz mal
 function afterClose() {
   toggleFollow(false);
@@ -570,15 +596,67 @@ function afterClose() {
   document.querySelector<HTMLElement>(`[data-id="${logId}"][data-a="logs"]`)?.focus();
 }
 
+type DiskKind = 'images' | 'volumes' | 'buildcache';
+// [Type do docker system df, categoria da API de prune, rótulo, o que o prune apaga, aviso]; Containers fica de fora:
+// parado se remove na lista. Volumes sem -a no servidor: no Docker 23+ só os anônimos saem
+const DISK: [string, DiskKind, string, string, string][] = [
+  ['Images', 'images', 'Imagens', 'as imagens que nenhum container usa', 'Dá para baixar de novo.'],
+  ['Local Volumes', 'volumes', 'Volumes', 'os volumes que nenhum container usa', 'Os dados deles se perdem.'],
+  ['Build Cache', 'buildcache', 'Build cache', 'o cache de build', 'O próximo build fica mais lento.']];
+let disk: DiskUsage[] | string | null = null, diskBusy: DiskKind | '' = '', diskHtml = '';  // string = erro
+
+async function loadDisk() {
+  try {
+    const r = await api('/api/df'), j: unknown = await r.json();
+    disk = r.ok ? j as DiskUsage[] : `Não consegui ler o uso de disco: ${j}`;
+  } catch { disk = 'Não consegui ler o uso de disco. O servidor do Docker GUI está rodando?'; }
+  render();
+}
+
+function renderDisk() {
+  const html = disk === null ? '<p class="py-3 text-muted">Carregando…</p>'
+    : typeof disk === 'string' ? `<p class="py-3 text-bad-fg">${esc(disk)}</p>`
+    : DISK.map(([type, k, label, what, note]) => {
+      const d = (disk as DiskUsage[]).find(d => d.Type === type), id = 'df-' + k, armed = arming?.id === id;
+      if (!d) return '';
+      const cls = armed ? 'bg-danger text-white ring-danger hover:bg-danger-hover' : 'text-fg hover:bg-hover';
+      return `<div class="flex flex-wrap items-center gap-x-3 gap-y-2 py-3 border-t border-line/70">
+        <div class="mr-auto min-w-0"><div class="font-medium text-fg-strong">${label}</div>
+          <div class="text-xs text-muted">${esc(d.Size)} no total · ${esc(d.Reclaimable)} liberável · ${esc(d.TotalCount)} ${d.TotalCount === '1' ? 'item' : 'itens'}, ${esc(d.Active)} em uso</div></div>
+        <button data-id="${id}" data-a="prune" ${diskBusy ? 'aria-disabled="true"' : ''} onclick="prune('${k}')"
+          aria-label="${armed ? `Confirmar limpeza de ${label.toLowerCase()}` : `Limpar ${label.toLowerCase()}`}" class="${BTN} ${cls}">${
+          diskBusy === k ? 'Limpando…' : armed ? 'Confirmar' : 'Limpar…'}</button>
+        ${armed ? `<p aria-hidden="true" class="w-full text-xs text-bad-soft lg:text-right">Apagar ${what}? ${note} ${TOUCH ? 'Cancela sozinho em 8 s.' : 'Esc cancela.'}</p>` : ''}
+      </div>`;
+    }).join('');
+  if (html !== diskHtml) $('#df').innerHTML = diskHtml = html;  // o render roda a cada poll: só troca se mudou
+}
+
+async function prune(k: DiskKind) {
+  const [, , label, what, note] = DISK.find(d => d[1] === k)!;
+  if (diskBusy || !confirmed('df-' + k, what, 'prune', note)) return;
+  diskBusy = k; render();
+  $('#shown').textContent = `Limpando ${label.toLowerCase()}…`;
+  try {
+    const r = await api('/api/prune/' + k, {method: 'POST'}), msg: string = await r.json();
+    // image/volume prune terminam em "Total reclaimed space: 1.2GB"; builder prune, em "Total: 1.2GB"
+    const freed = msg.match(/Total(?: reclaimed space)?:\s*(\S+)/)?.[1];
+    if (r.ok) toast(`${label}: ${freed ? `${freed} liberados` : 'limpeza feita'}.`, true);
+    else toast(`Não deu para limpar ${label.toLowerCase()}: ${msg || 'erro sem mensagem'}`);
+  } catch { toast('Sem resposta do servidor do Docker GUI.'); }
+  diskBusy = '';
+  await loadDisk();
+}
+
 // o HTML gerado chama estas funções pelo nome (onclick="act(...)"); com módulos nada é global, então
 // esta lista é a interface completa entre o HTML e o código
 Object.assign(window, {
-  act, afterClose, clearFilters, composeAct, copyAddr, copyExec, copyLogs, filterBy, loadHealth, menuPick, placeMenu,
-  refreshLogs, runToastAction, stackAct, toggleFollow,
+  act, afterClose, clearFilters, composeAct, copyAddr, copyExec, copyLogs, downloadLogs, filterBy, loadDisk, loadHealth,
+  menuPick, placeMenu, prune, refreshLogs, runToastAction, stackAct, toggleFollow,
 });
 
 $('#dlg').addEventListener('close', afterClose);
 $<HTMLInputElement>('#q').oninput = render;
 // aba escondida não consulta o docker; ao voltar, atualiza na hora
 document.addEventListener('visibilitychange', () => document.hidden || load());
-readHash(); render(); load(); setInterval(() => document.hidden || load(), 2000);
+readHash(); render(); load(); setInterval(() => document.hidden || load(), 2000); statsLoop();
