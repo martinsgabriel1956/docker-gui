@@ -21,7 +21,8 @@ export type Container = {
   after?: Partial<Record<Action, { State: string; Status: string }>>;
   stats?: { CPUPerc: string; MemUsage: string; MemPerc: string };
 };
-export type DockerState = { containers: Container[]; ps_error?: string };
+export type DiskUsage = { Type: string; TotalCount: string; Active: string; Size: string; Reclaimable: string };
+export type DockerState = { containers: Container[]; ps_error?: string; df?: DiskUsage[]; pruned?: string[] };
 
 // ID estável por nome: o mesmo container tem o mesmo ID em todo teste
 export const id = (name: string) => createHash('sha256').update(name).digest('hex').slice(0, 12);

@@ -40,6 +40,12 @@
       <tbody id="rows" role="rowgroup" class="max-lg:block"></tbody>
     </table>
   </div>
+
+  <!-- o docker system df é caro (soma os volumes): só roda ao abrir, nunca no poll -->
+  <details id="disk" ontoggle="this.open && loadDisk()" class="mt-4 rounded-xl ring-1 ring-line bg-raised/40">
+    <summary class="cursor-pointer px-4 py-3 max-lg:py-4 rounded-xl text-sm font-medium text-fg-strong focus-visible:outline-2 focus-visible:outline-accent">Uso de disco</summary>
+    <div id="df" class="px-4 pb-1 text-sm"></div>
+  </details>
 </main>
 
 <dialog id="dlg" aria-labelledby="dlg-title" class="m-auto w-[min(1100px,95vw)] rounded-xl bg-raised text-fg-soft ring-1 ring-line-strong backdrop:bg-black/70 p-0">

@@ -93,7 +93,8 @@ class TokenTest(ServerTest):
     def test_api_requires_token(self):
         for token in (None, "", "errado", docker_gui.TOKEN[:-1], docker_gui.TOKEN + "x"):
             for method, path in (("GET", "/api/containers"), ("GET", "/api/stats"), ("GET", f"/api/logs/{HEX_ID}"),
-                                 ("GET", f"/api/health/{HEX_ID}"), ("POST", f"/api/stop/{HEX_ID}")):
+                                 ("GET", f"/api/health/{HEX_ID}"), ("POST", f"/api/stop/{HEX_ID}"),
+                                 ("GET", "/api/df"), ("POST", "/api/prune/images")):
                 status, _ = self.request(method, path, token=token)
                 self.assertEqual(status, 401, (token, method, path))
         self.docker.assert_not_called()
@@ -178,6 +179,47 @@ class ActionsTest(ServerTest):
 
     def test_get_does_not_run_actions(self):
         status, _ = self.request("GET", f"/api/stop/{HEX_ID}")
+        self.assertEqual(status, 404)
+        self.docker.assert_not_called()
+
+
+class DiskTest(ServerTest):
+
+    def test_df_lines_become_json_array(self):
+        rows = [{"Type": "Images", "TotalCount": "10", "Active": "7", "Size": "4.01GB", "Reclaimable": "1.2GB (29%)"},
+                {"Type": "Build Cache", "TotalCount": "2", "Active": "0", "Size": "16.38kB", "Reclaimable": "16.38kB"}]
+        self.docker.return_value = ok("\n".join(json.dumps(r) for r in rows) + "\n")
+        self.assertEqual(self.request("GET", "/api/df"), (200, rows))
+        self.docker.assert_called_once_with("system", "df", "--format", "{{json .}}", timeout=docker_gui.ACTION_TIMEOUT)
+
+    def test_df_error(self):
+        self.docker.return_value = fail("Cannot connect to the Docker daemon\n")
+        self.assertEqual(self.request("GET", "/api/df"), (500, "Cannot connect to the Docker daemon"))
+
+    def test_each_prune_runs_expected_command(self):
+        expected = {"images": ["image", "prune", "-a", "-f"], "volumes": ["volume", "prune", "-f"],
+                    "buildcache": ["builder", "prune", "-a", "-f"]}
+        self.assertEqual(docker_gui.PRUNE, expected)  # mudou a allowlist? reveja o teste e o aviso na página
+        self.docker.return_value = ok("Deleted Images:\nx\n\nTotal reclaimed space: 1.2GB\n")
+        for kind, args in expected.items():
+            self.docker.reset_mock()
+            self.assertEqual(self.request("POST", f"/api/prune/{kind}"),
+                             (200, "Deleted Images:\nx\n\nTotal reclaimed space: 1.2GB"), kind)
+            self.docker.assert_called_once_with(*args, timeout=docker_gui.ACTION_TIMEOUT)
+
+    def test_prune_error_is_500_with_stderr(self):
+        self.docker.return_value = fail("Error response from daemon: a prune operation is already running\n")
+        self.assertEqual(self.request("POST", "/api/prune/volumes"),
+                         (500, "Error response from daemon: a prune operation is already running"))
+
+    def test_unknown_prune_kind(self):
+        for kind in ("system", "containers", "all", "Images", "images/x", HEX_ID):
+            status, _ = self.request("POST", f"/api/prune/{kind}")
+            self.assertEqual(status, 404, kind)
+        self.docker.assert_not_called()
+
+    def test_get_does_not_prune(self):
+        status, _ = self.request("GET", "/api/prune/images")
         self.assertEqual(status, 404)
         self.docker.assert_not_called()
 
@@ -360,6 +402,14 @@ class RealDockerTest(ServerTest):
         self.assertEqual(self.request("POST", f"/api/remove/{short}"), (200, ""))
         _, rows = self.request("GET", "/api/containers")
         self.assertFalse(any(self.cid.startswith(r["ID"]) for r in rows))
+
+    def test_df(self):
+        # só lê: prune nunca roda contra o Docker de verdade
+        status, rows = self.request("GET", "/api/df")
+        self.assertEqual(status, 200)
+        self.assertTrue({"Images", "Local Volumes", "Build Cache"} <= {r["Type"] for r in rows})
+        for field in ("TotalCount", "Active", "Size", "Reclaimable"):
+            self.assertIn(field, rows[0])  # campos que a página lê
 
     def test_action_on_missing_container(self):
         status, err = self.request("POST", f"/api/stop/{'0' * 64}")
