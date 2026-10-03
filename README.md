@@ -18,7 +18,7 @@ python3 docker_gui.py --port 9000
 - **Faixa "Precisa de atenção"** com o que está quebrado: healthcheck falhando, loop de reinício e saída com código diferente de zero. O status vem traduzido, por exemplo "Saiu com código 137 · morto à força ou sem memória (OOM)".
 - **Agrupamento por projeto do compose** (`com.docker.compose.project`), com **Iniciar / Reiniciar / Parar tudo** e "Iniciar de novo" para desfazer.
 - **Ações por container:** iniciar, parar, reiniciar, pausar, retomar e remover (com confirmação em 2 passos). Depois de iniciar, a ferramenta confere se o container ficou de pé. Depois de pausar, o aviso oferece "Retomar" (atalho `Z`).
-- **Logs** com acompanhamento ao vivo, botão de copiar e ações no próprio modal. Mostra também a saída do último healthcheck.
+- **Logs** com timestamps, acompanhamento ao vivo, botões de copiar e de baixar (.log) e ações no próprio modal. Mostra também a saída do último healthcheck.
 - **Portas:** as HTTP abrem no navegador; as outras (Postgres, Redis…) copiam `localhost:porta`.
 - **Copiar `docker exec -it <nome> sh`** pelo menu "⋯".
 - **Teclado:** `/` vai para a busca, `↑` `↓` andam entre os botões Logs e `Z` aciona o "desfazer". Os filtros ficam na URL.

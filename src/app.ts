@@ -525,6 +525,14 @@ function copyLogs() {
   navigator.clipboard.writeText($('#lb').textContent ?? '').then(() => toast('Logs copiados.', true), () => toast('Não consegui copiar.'));
 }
 
+// baixa o que está na tela (com os timestamps do docker), sem ir de novo ao servidor
+function downloadLogs() {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([$('#lb').textContent ?? ''], {type: 'text/plain'}));
+  a.download = `${$('#lt').textContent}.log`;
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href));
+}
+
 // roda no × direto e também no evento close (Esc); chamar duas vezes não faz mal
 function afterClose() {
   toggleFollow(false);
@@ -535,7 +543,7 @@ function afterClose() {
 // o HTML gerado chama estas funções pelo nome (onclick="act(...)"); com módulos nada é global, então
 // esta lista é a interface completa entre o HTML e o código
 Object.assign(window, {
-  act, afterClose, clearFilters, copyAddr, copyExec, copyLogs, filterBy, loadHealth, menuPick, placeMenu,
+  act, afterClose, clearFilters, copyAddr, copyExec, copyLogs, downloadLogs, filterBy, loadHealth, menuPick, placeMenu,
   refreshLogs, runToastAction, stackAct, toggleFollow,
 });
 
