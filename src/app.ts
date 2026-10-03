@@ -1,6 +1,6 @@
 import {
-  type Bucket, type Container, type ContainerState, type Port, type Tone,
-  bucket, esc, hasHealth, isProblem, ports, project, shortImage, status, tone,
+  type Bucket, type Container, type ContainerState, type Port, type Stats, type Tone,
+  bucket, esc, hasHealth, isProblem, ports, project, shortImage, status, tone, usage,
 } from './format';
 
 // a página é estática: todo seletor usado aqui existe no page.html
@@ -115,6 +115,21 @@ async function load() {
   }
 }
 
+// CPU e memória vêm à parte e mais devagar que a lista: o docker stats leva ~2 s para medir
+let stats: Record<string, Stats> = {};
+async function loadStats() {
+  let next: Record<string, Stats> = {};
+  try {
+    const r = await api('/api/stats');
+    if (r.ok) next = Object.fromEntries((await r.json() as Stats[]).map(s => [s.ID, s]));
+  } catch { /* sem conexão: o banner do load() já avisa */ }
+  if (JSON.stringify(next) === JSON.stringify(stats)) return;
+  stats = next;
+  if (selectingRows()) dirty = true; else render();
+}
+// setTimeout encadeado em vez de setInterval: um docker lento não empilha consultas
+async function statsLoop() { if (!document.hidden) await loadStats(); setTimeout(statsLoop, 5000); }
+
 function renderCount() {
   const n = (k: Bucket) => data.filter(c => bucket(c) === k).length, running = data.filter(c => c.State === 'running').length;
   const problemTxt = problemKind ? PROBLEM_TXT[problemKind] : '';
@@ -192,7 +207,7 @@ async function loadHealth(id: string) {
 
 const rowCache = new Map<string, {sig: string; html: string}>();
 function row(c: Container, withProject = false) {
-  const sig = JSON.stringify([c, withProject, busy.get(c.ID), arming?.id === c.ID, errors.get(c.ID), health[c.ID + c.Status], TOUCH]);
+  const sig = JSON.stringify([c, withProject, busy.get(c.ID), arming?.id === c.ID, errors.get(c.ID), health[c.ID + c.Status], stats[c.ID], TOUCH]);
   const hit = rowCache.get(c.ID);
   if (hit?.sig === sig) return hit.html;
   const html = rowHtml(c, withProject);
@@ -203,6 +218,7 @@ function row(c: Container, withProject = false) {
 function rowHtml(c: Container, withProject: boolean) {
   const b = busy.get(c.ID), t = TONE[b ? 'busy' : tone(c)], st = status(c), pp = ports(c.Ports), p = project(c);
   const armed = arming?.id === c.ID, prim = PRIMARY[c.State], sec = SECONDARY[c.State];
+  const u = c.State === 'running' && !b && stats[c.ID] ? usage(stats[c.ID]) : null;
   const slot = (w = 'lg:w-20') => `<span aria-hidden="true" class="${w} shrink-0 max-lg:hidden"></span>`;
   const btn = (a: RowAction, cls = 'text-fg hover:bg-hover', text = LABEL[a], aria = `${LABEL[a]} ${esc(c.Names)}`) =>
     `<button data-id="${c.ID}" data-a="${a}" ${b && a !== 'logs' ? 'aria-disabled="true"' : ''}
@@ -231,7 +247,8 @@ function rowHtml(c: Container, withProject: boolean) {
     <td role="cell" class="font-mono text-xs text-muted pr-4 max-lg:block max-lg:p-0 max-lg:pl-5 [overflow-wrap:anywhere]">
       <span class="sr-only lg:hidden">Imagem: </span><div class="lg:truncate lg:max-w-[24ch] lg:[direction:rtl] lg:text-left" title="${esc(c.Image)}"><bdi dir="ltr">${esc(shortImage(c.Image))}</bdi></div></td>
     <td role="cell" class="text-sm pr-4 lg:min-w-[24ch] max-lg:block max-lg:p-0 max-lg:pl-5" title="${esc(c.Status)}">
-      <span id="st-${c.ID}" class="${t[1]}">${b ? VERB[b] : esc(st[0])}${st[1] && !b ? `<span class="block text-xs text-muted">${st[1]}</span>` : ''}</span>${b ? '' : errHtml(c) + healthBox}</td>
+      <span id="st-${c.ID}" class="${t[1]}">${b ? VERB[b] : esc(st[0])}${st[1] && !b ? `<span class="block text-xs text-muted">${st[1]}</span>` : ''}</span>${
+      u ? `<span id="us-${c.ID}" class="block text-xs font-mono text-muted" title="${esc(u[1])}">${esc(u[0])}</span>` : ''}${b ? '' : errHtml(c) + healthBox}</td>
     <td role="cell" class="pr-4 max-lg:hidden max-lg:has-[div]:block max-lg:p-0 max-lg:pl-5 max-lg:pt-1">${pp.length
       ? `<div class="flex flex-wrap gap-1 max-lg:gap-2">${pp.map(x => portChip(c, x)).join('')}</div>` : ''}</td>
     <td role="cell" class="pr-4 max-lg:block max-lg:p-0 max-lg:pt-2"><div class="flex justify-end max-lg:justify-start items-center gap-1.5 max-lg:gap-2">
@@ -551,4 +568,4 @@ $('#dlg').addEventListener('close', afterClose);
 $<HTMLInputElement>('#q').oninput = render;
 // aba escondida não consulta o docker; ao voltar, atualiza na hora
 document.addEventListener('visibilitychange', () => document.hidden || load());
-readHash(); render(); load(); setInterval(() => document.hidden || load(), 2000);
+readHash(); render(); load(); setInterval(() => document.hidden || load(), 2000); statsLoop();
