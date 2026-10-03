@@ -9,6 +9,7 @@ ação que falha ou demora) viram dados. Campos extras por container, fora do fo
   delay   {ação: segundos}: a ação demora (para ver o estado "ocupado" na tela)
   after   {ação: {State, Status}}: estado depois da ação, no lugar do padrão (ex.: start que cai)
 No topo do JSON, "ps_error" faz o `docker ps` falhar (daemon fora do ar).
+O `docker exec -it` do terminal vira um sh local.
 """
 import contextlib
 import fcntl
@@ -55,6 +56,16 @@ def main(args):
     path = os.environ["FAKE_DOCKER_STATE"]
     cmd, ref = args[0], args[-1]
     action = "remove" if cmd == "rm" else cmd
+
+    if cmd == "exec":
+        # terminal: confere o argv que o servidor monta e roda um sh local no lugar do container
+        if args[:2] != ["exec", "-it"] or args[3:] != ["sh", "-c", "exec $(command -v bash || echo sh)"]:
+            fail(f"exec inesperado: {args}")
+        with locked(path, exclusive=False) as (_, state):
+            if find(state, args[2])["State"] != "running":
+                fail(f"Error response from daemon: container {args[2]} is not running")
+        os.environ["PS1"] = "$ "
+        os.execvp("sh", ["sh"])
 
     if action in AFTER or action == "remove":
         # dorme fora do lock, senão o `docker ps` do poll travaria junto

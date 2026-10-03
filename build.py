@@ -33,6 +33,7 @@ def bundle():
     if not ESBUILD.exists():
         sys.exit("esbuild não encontrado: rode npm ci")
     r = subprocess.run([str(ESBUILD), str(ENTRY), "--bundle", "--format=iife", "--target=es2022", "--charset=utf8",
+                        "--loader:.css=text",  # o CSS do xterm vira string, injetada num <style> pelo app.ts
                         "--log-level=warning"], cwd=ROOT, capture_output=True, text=True, check=False)
     if r.returncode:
         sys.exit(r.stderr)
