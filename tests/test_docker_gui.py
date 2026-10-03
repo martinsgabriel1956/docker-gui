@@ -46,13 +46,15 @@ class ServerTest(unittest.TestCase):
             self.docker = patcher.start()
             self.addCleanup(patcher.stop)
 
-    def request(self, method, path, host=None, token=docker_gui.TOKEN):
+    def request(self, method, path, host=None, token=docker_gui.TOKEN, body=None):
         headers = {"Host": f"localhost:{self.port}" if host is None else host}
         if token is not None:
             headers["X-Docker-GUI-Token"] = token
+        if isinstance(body, dict):
+            body = json.dumps(body)
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
         try:
-            conn.request(method, path, headers=headers)
+            conn.request(method, path, body=body, headers=headers)
             r = conn.getresponse()
             body = r.read().decode()
             return r.status, json.loads(body) if r.getheader("Content-Type", "").startswith("application/json") else body
@@ -166,6 +168,67 @@ class ActionsTest(ServerTest):
     def test_get_does_not_run_actions(self):
         status, _ = self.request("GET", f"/api/stop/{HEX_ID}")
         self.assertEqual(status, 404)
+        self.docker.assert_not_called()
+
+
+class ComposeTest(ServerTest):
+    """O cliente só escolhe o projeto; diretório e arquivos saem dos labels dos containers."""
+
+    PS = "\n".join(json.dumps(r) for r in (
+        ["shop", "/srv/shop", "/srv/shop/compose.yml,/srv/shop/compose.override.yml"],
+        ["blog", "/srv/blog", "/srv/blog/compose.yml"])) + "\n"
+    SHOP = {"project": "shop", "dir": "/srv/shop"}
+
+    def ps_call(self):
+        return mock.call("ps", "-a", "--filter", "label=com.docker.compose.project", "--format", docker_gui.COMPOSE_FORMAT)
+
+    def test_each_action_builds_argv_from_labels(self):
+        self.assertEqual(docker_gui.COMPOSE, {"up": ["up", "-d"], "down": ["down"], "pull": ["pull"]})
+        for action, args in docker_gui.COMPOSE.items():
+            self.docker.reset_mock()
+            self.docker.side_effect = [ok(self.PS), ok(stderr="Container shop-api-1  Started\n")]
+            self.assertEqual(self.request("POST", f"/api/compose/{action}", body=self.SHOP),
+                             (200, "Container shop-api-1  Started"), action)
+            self.assertEqual(self.docker.call_args_list, [self.ps_call(), mock.call(
+                "compose", "-p", "shop", "--project-directory", "/srv/shop",
+                "-f", "/srv/shop/compose.yml", "-f", "/srv/shop/compose.override.yml", *args,
+                timeout=docker_gui.COMPOSE_TIMEOUT)])
+
+    def test_compose_error_is_500_with_stderr(self):
+        self.docker.side_effect = [ok(self.PS), fail("pull access denied\n")]
+        self.assertEqual(self.request("POST", "/api/compose/pull", body=self.SHOP), (500, "pull access denied"))
+
+    def test_ps_error_is_500(self):
+        self.docker.return_value = fail("Cannot connect to the Docker daemon\n")
+        self.assertEqual(self.request("POST", "/api/compose/up", body=self.SHOP), (500, "Cannot connect to the Docker daemon"))
+
+    def test_unknown_pair_is_404_without_compose(self):
+        for body in ({"project": "shop", "dir": "/tmp/evil"}, {"project": "shop", "dir": "/srv/blog"},
+                     {"project": "nope", "dir": "/srv/shop"}):
+            self.docker.reset_mock()
+            self.docker.side_effect = None
+            self.docker.return_value = ok(self.PS)
+            status, _ = self.request("POST", "/api/compose/down", body=body)
+            self.assertEqual(status, 404, body)
+            self.assertEqual(self.docker.call_args_list, [self.ps_call()])
+
+    def test_invalid_body_is_400_without_docker(self):
+        for body in (None, "", "não é json", "[]", '"shop"', "{}", '{"project": "shop"}',
+                     '{"project": 1, "dir": "/srv/shop"}', '{"project": "", "dir": "/srv/shop"}',
+                     json.dumps({**self.SHOP, "x": "a" * docker_gui.MAX_BODY})):
+            status, _ = self.request("POST", "/api/compose/up", body=body)
+            self.assertEqual(status, 400, body and body[:40])
+        self.docker.assert_not_called()
+
+    def test_unknown_action(self):
+        for action in ("start", "rm", "UP", "exec", "build"):
+            status, _ = self.request("POST", f"/api/compose/{action}", body=self.SHOP)
+            self.assertEqual(status, 404, action)
+        self.docker.assert_not_called()
+
+    def test_requires_token(self):
+        status, _ = self.request("POST", "/api/compose/up", token=None, body=self.SHOP)
+        self.assertEqual(status, 401)
         self.docker.assert_not_called()
 
 

@@ -19,6 +19,13 @@ ACTIONS = {"start": ["start"], "stop": ["stop"], "restart": ["restart"], "pause"
            "unpause": ["unpause"], "remove": ["rm", "-f"]}
 # leitura (ps, logs, inspect) é rápida; stop/restart esperam o stop_grace_period do container
 READ_TIMEOUT, ACTION_TIMEOUT = 15, 120
+# por projeto compose; pull e up baixam imagens, por isso o prazo longo
+COMPOSE = {"up": ["up", "-d"], "down": ["down"], "pull": ["pull"]}
+COMPOSE_TIMEOUT = 600
+# .Label (um por vez) e não .Labels: este junta tudo com vírgula, e config_files já tem vírgula
+COMPOSE_FORMAT = ('[{{json (.Label "com.docker.compose.project")}},{{json (.Label "com.docker.compose.project.working_dir")}},'
+                  '{{json (.Label "com.docker.compose.project.config_files")}}]')
+MAX_BODY = 64 * 1024
 
 
 def docker(*args, timeout=READ_TIMEOUT):
@@ -75,10 +82,36 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(403, '"forbidden"')
         if not self.token_ok():
             return self.send(401, '"token ausente ou inválido"')
+        m = re.fullmatch(r"/api/compose/(\w+)", self.path)
+        if m and m[1] in COMPOSE:
+            return self.compose(m[1])
         m = re.fullmatch(r"/api/(\w+)/([0-9a-f]{12,64})", self.path)
         if not m or m[1] not in ACTIONS:
             return self.send(404, '"not found"')
         r = docker(*ACTIONS[m[1]], m[2], timeout=ACTION_TIMEOUT)
+        self.send(500 if r.returncode else 200, json.dumps(r.stderr.strip()))
+
+    def compose(self, action):
+        """Corpo {project, dir}. O par só vale se existir nos labels de algum container: o diretório e os
+        arquivos do compose vêm sempre do docker, nunca do cliente."""
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+            if not 0 < n <= MAX_BODY:
+                raise ValueError
+            body = json.loads(self.rfile.read(n))
+            key = [body["project"], body["dir"]]
+            if not all(isinstance(v, str) and v for v in key):
+                raise ValueError
+        except (ValueError, KeyError, TypeError):
+            return self.send(400, '"corpo inválido: esperado {project, dir}"')
+        r = docker("ps", "-a", "--filter", "label=com.docker.compose.project", "--format", COMPOSE_FORMAT)
+        if r.returncode:
+            return self.send(500, json.dumps(r.stderr.strip()))
+        files = next((f for p, wd, f in map(json.loads, r.stdout.splitlines()) if [p, wd] == key), None)
+        if files is None:
+            return self.send(404, '"projeto compose não encontrado"')
+        r = docker("compose", "-p", key[0], "--project-directory", key[1],
+                   *[a for f in files.split(",") if f for a in ("-f", f)], *COMPOSE[action], timeout=COMPOSE_TIMEOUT)
         self.send(500 if r.returncode else 200, json.dumps(r.stderr.strip()))
 
     def log_message(self, *args):
@@ -213,6 +246,7 @@ PAGE = r"""<!doctype html>
   var bucket = (c) => ["bad", "warn"].includes(tone(c)) ? "problema" : BUCKET_OF_STATE[c.State] || "parado";
   var isProblem = (c) => bucket(c) === "problema";
   var project = (c) => (c.Labels || "").match(/(?:^|,)com\.docker\.compose\.project=([^,]*)/)?.[1] || "";
+  var workingDir = (c) => (c.Labels || "").match(/(?:^|,)com\.docker\.compose\.project\.working_dir=([^,]*)/)?.[1] || "";
   function dur(s) {
     if (/less than a second/i.test(s)) return "<1 s";
     const m = s.match(/(about )?(an?|\d+) (second|minute|hour|day|week|month|year)/i);
@@ -259,6 +293,7 @@ PAGE = r"""<!doctype html>
   var LABEL = { start: "Iniciar", stop: "Parar", restart: "Reiniciar", pause: "Pausar", unpause: "Retomar", logs: "Logs", remove: "Remover" };
   var VERB = { start: "Iniciando…", stop: "Parando…", restart: "Reiniciando…", pause: "Pausando…", unpause: "Retomando…", remove: "Removendo…" };
   var DONE = { start: "iniciado", stop: "parado", restart: "reiniciado", pause: "pausado", unpause: "retomado", remove: "removido" };
+  var COMPOSE_VERB = { up: "Subindo…", down: "Derrubando…", pull: "Baixando…" };
   var PRIMARY = { running: "stop", restarting: "stop", paused: "unpause", exited: "start", created: "start" };
   var SECONDARY = { running: "restart", paused: "stop" };
   var STOPPABLE = ["running", "paused", "restarting"];
@@ -309,6 +344,7 @@ PAGE = r"""<!doctype html>
   var BTN = "px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 transition motion-reduce:transition-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent aria-disabled:opacity-40 aria-disabled:cursor-wait";
   var data = [];
   var busy = /* @__PURE__ */ new Map();
+  var composing = /* @__PURE__ */ new Map();
   var errors = /* @__PURE__ */ new Map();
   var lastOk = null;
   var problem = "";
@@ -522,16 +558,19 @@ PAGE = r"""<!doctype html>
   class="max-lg:block px-4 pt-4 pb-2 text-left text-xs font-medium uppercase tracking-wider border-t border-line/70 ${cls}">${text}</th></tr>`;
   function groupHead(k, label) {
     const all = data.filter((c) => project(c) === k), on = all.filter((c) => c.State === "running").length;
-    const anyBusy = all.some((c) => busy.has(c.ID));
+    const anyBusy = composing.has(k) || all.some((c) => busy.has(c.ID)), dir = k && workingDir(all[0]), armed = arming?.id === `stack-${k}`;
     const inBand = all.filter(isProblem).length;
     const sbtn = (a, n, text) => k && n ? `<button data-id="stack-${esc(k)}" data-a="${a}" data-p="${esc(k)}" ${anyBusy ? 'aria-disabled="true"' : ""}
       aria-label="${text} do projeto ${esc(k)} (${n})" title="${esc(stackList(a, k).map((c) => c.Names).join(", "))}" onclick="stackAct('${a}', this.dataset.p)" class="${BTN} text-fg hover:bg-hover normal-case tracking-normal">${text} (${n})</button>` : "";
+    const cbtn = (a, text, cls = "text-fg hover:bg-hover", aria = `${text.replace("…", "")} do projeto ${esc(k)}`) => `<button data-id="stack-${esc(k)}" data-a="${a}" data-p="${esc(k)}" ${anyBusy ? 'aria-disabled="true"' : ""} aria-label="${aria}"
+      onclick="composeAct('${a}', this.dataset.p)" class="${BTN} ${cls} normal-case tracking-normal">${composing.get(k) === a ? COMPOSE_VERB[a] : text}</button>`;
     return `<tr data-key="g:${esc(k)}" role="row" class="max-lg:block"><th role="columnheader" colspan="5" scope="colgroup" class="max-lg:block px-4 pt-5 pb-2 text-left font-normal border-t border-line/70">
     <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
       <span class="text-xs font-medium uppercase tracking-wider text-fg">${label}</span>
       ${k ? `<span class="text-xs text-muted">compose · ${on} de ${all.length} rodando</span>` : ""}
       ${k && inBand ? `<span class="text-xs text-bad-fg">${inBand} na faixa de atenção ↑</span>` : ""}
-      <span class="ml-auto flex flex-wrap gap-1.5">${STACK.map(([a, text]) => sbtn(a, stackList(a, k).length, text)).join("")}</span>
+      <span class="ml-auto flex flex-wrap gap-1.5">${STACK.map(([a, text]) => sbtn(a, stackList(a, k).length, text)).join("")}${dir ? cbtn("up", "compose up") + cbtn("pull", "compose pull") + (armed ? cbtn("down", "Confirmar down", "bg-danger text-white ring-danger hover:bg-danger-hover", `Confirmar compose down do projeto ${esc(k)}`) : cbtn("down", "compose down…")) : ""}</span>
+      ${armed ? `<p aria-hidden="true" class="w-full text-xs text-bad-soft lg:text-right">Derrubar o projeto? Os volumes ficam; o projeto some da lista e só volta com up. ${TOUCH ? "Cancela sozinho em 8 s." : "Esc cancela."}</p>` : ""}
     </div></th></tr>`;
   }
   function render() {
@@ -556,7 +595,7 @@ PAGE = r"""<!doctype html>
     renderDlg();
     if (f?.id) refocus(f.id, f.a);
     saveHash();
-    const say = arming ? `Clique em Confirmar para apagar ${arming.name} de vez. Os volumes não são afetados. ${TOUCH ? "Cancela sozinho em 8 segundos." : "Esc cancela."}` : q || only ? `${rows.length} de ${data.length} containers` : "";
+    const say = arming ? `${arming.a === "down" ? `Clique em Confirmar down para derrubar o projeto ${arming.name}. Os volumes ficam; o projeto some da lista e só volta com up.` : `Clique em Confirmar para apagar ${arming.name} de vez. Os volumes não são afetados.`} ${TOUCH ? "Cancela sozinho em 8 segundos." : "Esc cancela."}` : q || only ? `${rows.length} de ${data.length} containers` : "";
     if (say !== lastSay) $("#shown").textContent = lastSay = say;
   }
   function refocus(id, a) {
@@ -622,14 +661,7 @@ PAGE = r"""<!doctype html>
     if (a === "logs") return logs(id);
     const c = data.find((c2) => c2.ID === id);
     if (!c || busy.has(id)) return;
-    if (a === "remove" && arming?.id !== id) {
-      disarm(false);
-      arming = { id, name: c.Names, at: Date.now(), timer: setTimeout(armTick, 8e3) };
-      render();
-      return;
-    }
-    if (a === "remove" && arming && Date.now() - arming.at < 600) return;
-    if (a === "remove") disarm(false);
+    if (a === "remove" && !confirmed(id, c.Names, "remove")) return;
     const trs = [...document.querySelectorAll("#rows tr[data-row]")], i = trs.findIndex((tr) => tr.dataset.key === "c:" + id);
     const near = (trs[i + 1] || trs[i - 1])?.dataset.key?.slice(2);
     const done = run(a, c);
@@ -665,7 +697,7 @@ PAGE = r"""<!doctype html>
   }
   async function stackAct(a, p, ids) {
     const list = stackList(a, p, ids);
-    if (!list.length || list.some((c) => busy.has(c.ID))) return;
+    if (!list.length || composing.has(p) || list.some((c) => busy.has(c.ID))) return;
     const all = Promise.all(list.map((c) => run(a, c)));
     $("#shown").textContent = `${VERB[a]} ${list.length} containers de ${p}`;
     const res = await all, fails = res.filter((ok) => !ok).length, okIds = list.filter((c, i) => res[i] && c.State !== "paused").map((c) => c.ID);
@@ -675,9 +707,43 @@ PAGE = r"""<!doctype html>
     if (!fails && UP.includes(a)) return confirmUp(okIds);
     load();
   }
+  function confirmed(id, name, a) {
+    if (arming?.id !== id || arming.a !== a) {
+      disarm(false);
+      arming = { id, name, a, at: Date.now(), timer: setTimeout(armTick, 8e3) };
+      render();
+      return false;
+    }
+    if (Date.now() - arming.at < 600) return false;
+    disarm(false);
+    return true;
+  }
+  async function composeAct(a, p) {
+    const c = data.find((c2) => project(c2) === p);
+    if (!c || composing.has(p) || data.some((c2) => project(c2) === p && busy.has(c2.ID))) return;
+    if (a === "down" && !confirmed(`stack-${p}`, p, "down")) return;
+    composing.set(p, a);
+    render();
+    $("#shown").textContent = `${COMPOSE_VERB[a]} ${p}`;
+    try {
+      const r = await api(`/api/compose/${a}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ project: p, dir: workingDir(c) })
+      });
+      const msg = await r.json();
+      toast(r.ok ? `${p}: compose ${a} concluído.` : `${p}: compose ${a} falhou. ${msg.trim().split("\n").at(-1) || "Erro sem mensagem."}`, r.ok);
+    } catch {
+      toast(`${p}: sem resposta do servidor do Docker GUI.`);
+    }
+    composing.delete(p);
+    render();
+    await load();
+    if (a === "down") $("#q").focus();
+  }
   function armTick() {
     if (!arming) return;
-    const el = document.querySelector(`[data-id="${arming.id}"][data-a="remove"]`);
+    const el = document.querySelector(`[data-id="${arming.id}"][data-a="${arming.a}"]`);
     if (el && (el.matches(":hover") || el === document.activeElement)) arming.timer = setTimeout(armTick, 1e3);
     else disarm();
   }
@@ -764,6 +830,7 @@ PAGE = r"""<!doctype html>
     act,
     afterClose,
     clearFilters,
+    composeAct,
     copyAddr,
     copyExec,
     copyLogs,

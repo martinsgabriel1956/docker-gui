@@ -48,6 +48,9 @@ export const isProblem = (c: Container): boolean => bucket(c) === 'problema';
 // depends_on tem vírgulas no valor, então não dá para fazer split nos Labels; regex só no project
 export const project = (c: Pick<Container, 'Labels'>): string =>
   (c.Labels || '').match(/(?:^|,)com\.docker\.compose\.project=([^,]*)/)?.[1] || '';
+// pasta do projeto compose (vai para o compose up/down/pull; o servidor confere contra os labels)
+export const workingDir = (c: Pick<Container, 'Labels'>): string =>
+  (c.Labels || '').match(/(?:^|,)com\.docker\.compose\.project\.working_dir=([^,]*)/)?.[1] || '';
 
 // "About an hour" -> "~1 h", "23 minutes" -> "23 min", "Less than a second" -> "<1 s"
 export function dur(s: string): string {

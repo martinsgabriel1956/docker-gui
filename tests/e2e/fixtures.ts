@@ -20,7 +20,7 @@ export type Container = {
   delay?: Partial<Record<Action, number>>;
   after?: Partial<Record<Action, { State: string; Status: string }>>;
 };
-export type DockerState = { containers: Container[]; ps_error?: string };
+export type DockerState = { containers: Container[]; ps_error?: string; compose_fail?: string; compose_calls?: string[][] };
 
 // ID estável por nome: o mesmo container tem o mesmo ID em todo teste
 export const id = (name: string) => createHash('sha256').update(name).digest('hex').slice(0, 12);
