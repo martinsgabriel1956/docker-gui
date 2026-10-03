@@ -124,6 +124,15 @@ test('project lê o label do compose sem quebrar nas vírgulas do depends_on', (
   assert.equal(f.project({}), '');
 });
 
+test('workingDir lê a pasta do projeto compose', () => {
+  const labels = 'com.docker.compose.project=shop,com.docker.compose.project.working_dir=/srv/shop,'
+               + 'com.docker.compose.project.config_files=/srv/shop/a.yml,/srv/shop/b.yml';
+  assert.equal(f.workingDir({Labels: labels}), '/srv/shop');
+  assert.equal(f.project({Labels: labels}), 'shop');
+  assert.equal(f.workingDir({Labels: 'com.docker.compose.project=shop'}), '');
+  assert.equal(f.workingDir({}), '');
+});
+
 test('shortImage tira o host do registry e mantém a tag', () => {
   assert.equal(f.shortImage('ghcr.io/acme/api:1.4'), 'acme/api:1.4');
   assert.equal(f.shortImage('localhost:5000/app:dev'), 'app:dev');

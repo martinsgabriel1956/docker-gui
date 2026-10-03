@@ -11,12 +11,15 @@ ação que falha ou demora) viram dados. Campos extras por container, fora do fo
   stats   {CPUPerc, MemUsage, MemPerc}: linha do `docker stats`; sem ele, o container não aparece lá
 No topo do JSON, "ps_error" faz o `docker ps` falhar (daemon fora do ar), "df" é a saída do
 `docker system df` (lista de linhas) e "pruned" registra os prunes que rodaram. O prune zera o
-"Reclaimable" da categoria e diz que liberou o que estava lá.
+"Reclaimable" da categoria e diz que liberou o que estava lá. "compose_fail" faz todo
+`docker compose` falhar com esse stderr, e cada `docker compose` grava o argv em "compose_calls".
+`compose up` deixa os containers do projeto rodando, `down` os remove e `pull` não muda nada.
 """
 import contextlib
 import fcntl
 import json
 import os
+import re
 import sys
 import time
 
@@ -55,6 +58,25 @@ def save(f, state):
     json.dump(state, f)
 
 
+def labels(c):
+    # valor pode ter vírgula (config_files): só quebra antes de uma vírgula seguida de "chave="
+    return dict(re.findall(r"(?:^|,)([\w.-]+)=((?:[^,]|,(?![\w.-]+=))*)", c.get("Labels", "")))
+
+
+def compose(state, args):
+    state.setdefault("compose_calls", []).append(["compose", *args])
+    if state.get("compose_fail"):
+        return state["compose_fail"]
+    p = args[args.index("-p") + 1]
+    mine = [c for c in state["containers"] if labels(c).get("com.docker.compose.project") == p]
+    for c in mine:
+        if "down" in args:
+            state["containers"].remove(c)
+        elif "up" in args:
+            c.update(RUNNING)
+    return None
+
+
 def main(args):
     path = os.environ["FAKE_DOCKER_STATE"]
     cmd, ref = args[0], args[-1]
@@ -71,7 +93,16 @@ def main(args):
             if state.get("ps_error"):
                 fail(state["ps_error"])
             for c in state["containers"]:
-                print(json.dumps({k: c.get(k, "") for k in PS_FIELDS}))
+                if "--filter" not in args:
+                    print(json.dumps({k: c.get(k, "") for k in PS_FIELDS}))
+                elif "com.docker.compose.project" in labels(c):  # o COMPOSE_FORMAT do servidor
+                    print(json.dumps([labels(c).get("com.docker.compose.project" + k, "")
+                                      for k in ("", ".working_dir", ".config_files")]))
+        elif cmd == "compose":
+            err = compose(state, args[1:])
+            save(f, state)
+            if err:
+                fail(err)
         elif cmd == "stats":
             for c in state["containers"]:
                 if "stats" in c:
