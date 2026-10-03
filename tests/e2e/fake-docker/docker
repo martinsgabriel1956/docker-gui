@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""docker falso para os testes de UI: lê e grava o estado num JSON ($FAKE_DOCKER_STATE).
+
+Cenários que o Docker de verdade não reproduz sob demanda (healthcheck falhando, loop de reinício,
+ação que falha ou demora) viram dados. Campos extras por container, fora do formato do `docker ps`:
+  logs    texto do `docker logs`
+  health  objeto do `inspect --format {{json .State.Health}}`
+  fail    {ação: stderr}: a ação falha com essa mensagem
+  delay   {ação: segundos}: a ação demora (para ver o estado "ocupado" na tela)
+  after   {ação: {State, Status}}: estado depois da ação, no lugar do padrão (ex.: start que cai)
+No topo do JSON, "ps_error" faz o `docker ps` falhar (daemon fora do ar).
+"""
+import fcntl
+import json
+import os
+import sys
+import time
+
+PS_FIELDS = ("Command", "CreatedAt", "ID", "Image", "Labels", "LocalVolumes", "Mounts", "Names",
+             "Networks", "Ports", "RunningFor", "Size", "State", "Status")
+RUNNING = {"State": "running", "Status": "Up Less than a second"}
+AFTER = {"start": RUNNING, "restart": RUNNING, "unpause": RUNNING,
+         "stop": {"State": "exited", "Status": "Exited (0) Less than a second ago"},
+         "pause": {"State": "paused", "Status": "Up Less than a second (Paused)"}}
+
+
+def fail(msg, code=1):
+    sys.stderr.write(msg + "\n")
+    sys.exit(code)
+
+
+def find(state, ref):
+    for c in state["containers"]:
+        if c["ID"].startswith(ref) or ref.startswith(c["ID"]):
+            return c
+    fail(f"Error response from daemon: No such container: {ref}")
+
+
+class State:
+    """Estado no JSON, com lock: o servidor atende requisições em paralelo."""
+
+    def __init__(self, path, exclusive):
+        self.f = open(path, "r+")
+        fcntl.flock(self.f, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        self.data = json.load(self.f)
+
+    def save(self):
+        self.f.seek(0)
+        self.f.truncate()
+        json.dump(self.data, self.f)
+
+    def close(self):
+        self.f.close()  # solta o lock
+
+
+def main(args):
+    path = os.environ["FAKE_DOCKER_STATE"]
+    cmd, ref = args[0], args[-1]
+    action = "remove" if cmd == "rm" else cmd
+
+    if action in AFTER or action == "remove":
+        # dorme fora do lock, senão o `docker ps` do poll travaria junto
+        st = State(path, exclusive=False)
+        delay = find(st.data, ref).get("delay", {}).get(action, 0)
+        st.close()
+        time.sleep(delay)
+
+    st = State(path, exclusive=True)
+    try:
+        state = st.data
+        if cmd == "ps":
+            if state.get("ps_error"):
+                fail(state["ps_error"])
+            for c in state["containers"]:
+                print(json.dumps({k: c.get(k, "") for k in PS_FIELDS}))
+        elif cmd == "logs":
+            sys.stdout.write(find(state, ref).get("logs", ""))
+        elif cmd == "inspect":
+            print(json.dumps(find(state, ref).get("health")))
+        else:
+            c = find(state, ref)
+            if action in c.get("fail", {}):
+                fail(c["fail"][action])
+            if action == "remove":
+                state["containers"].remove(c)
+            else:
+                c.update(c.get("after", {}).get(action) or AFTER[action])
+            st.save()
+    finally:
+        st.close()
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
