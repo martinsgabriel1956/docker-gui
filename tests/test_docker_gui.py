@@ -92,7 +92,7 @@ class TokenTest(ServerTest):
 
     def test_api_requires_token(self):
         for token in (None, "", "errado", docker_gui.TOKEN[:-1], docker_gui.TOKEN + "x"):
-            for method, path in (("GET", "/api/containers"), ("GET", f"/api/logs/{HEX_ID}"),
+            for method, path in (("GET", "/api/containers"), ("GET", "/api/stats"), ("GET", f"/api/logs/{HEX_ID}"),
                                  ("GET", f"/api/health/{HEX_ID}"), ("POST", f"/api/stop/{HEX_ID}"),
                                  ("GET", "/api/df"), ("POST", "/api/prune/images")):
                 status, _ = self.request(method, path, token=token)
@@ -121,12 +121,25 @@ class ContainersTest(ServerTest):
         self.assertEqual(self.request("GET", "/api/containers"), (500, "permission denied while trying to connect"))
 
 
+class StatsTest(ServerTest):
+
+    def test_lines_become_json_array(self):
+        rows = [{"ID": "a" * 12, "CPUPerc": "0.52%", "MemUsage": "10.5MiB / 1.944GiB", "MemPerc": "0.53%"}]
+        self.docker.return_value = ok(json.dumps(rows[0]) + "\n")
+        self.assertEqual(self.request("GET", "/api/stats"), (200, rows))
+        self.docker.assert_called_once_with("stats", "--no-stream", "--format", "{{json .}}")
+
+    def test_docker_error_is_500_with_stderr(self):
+        self.docker.return_value = fail("Cannot connect to the Docker daemon\n")
+        self.assertEqual(self.request("GET", "/api/stats"), (500, "Cannot connect to the Docker daemon"))
+
+
 class LogsAndHealthTest(ServerTest):
 
     def test_logs_join_stdout_and_stderr(self):
         self.docker.return_value = ok("out\n", "err\n")
         self.assertEqual(self.request("GET", f"/api/logs/{HEX_ID}"), (200, "out\nerr\n"))
-        self.docker.assert_called_once_with("logs", "--tail", "500", HEX_ID)
+        self.docker.assert_called_once_with("logs", "--timestamps", "--tail", "500", HEX_ID)
 
     def test_logs_error(self):
         self.docker.return_value = fail("No such container")
@@ -367,6 +380,12 @@ class RealDockerTest(ServerTest):
             self.assertIn(field, c)  # campos que a página lê
         self.assertEqual(c["State"], "running")
         self.assertIn("docker-gui-test=1", c["Labels"])
+
+        # a página casa o stats com o ps pelo ID: os dois precisam vir no mesmo formato (curto)
+        _, rows = self.request("GET", "/api/stats")
+        s = next(s for s in rows if s["ID"] == c["ID"])
+        for field in ("CPUPerc", "MemUsage", "MemPerc"):
+            self.assertIn(field, s)
 
         short = c["ID"]
         for action, state in (("pause", "paused"), ("unpause", "running"), ("stop", "exited"), ("start", "running")):

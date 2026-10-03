@@ -99,3 +99,15 @@ export const ports = (p: string): Port[] => {
 // "ghcr.io/acme/api:1.4" -> "acme/api:1.4": o host do registry raramente importa; a tag sim
 export const shortImage = (img: string): string => img.replace(/^[^/]+[.:][^/]*\//, '');
 export const hasHealth = (c: Container): boolean => /\((un)?healthy\)|health: starting/.test(c.Status);
+
+// uma linha do `docker stats --no-stream --format '{{json .}}'`, só com os campos que a página lê
+export interface Stats {
+  ID: string;
+  CPUPerc: string;   // "0.52%"
+  MemUsage: string;  // "10.5MiB / 1.944GiB"
+  MemPerc: string;   // "0.53%"
+}
+
+// [texto curto, title com o limite de memória]
+export const usage = (s: Stats): StatusText =>
+  [`CPU ${s.CPUPerc} · RAM ${s.MemUsage.split(' / ')[0]}`, `Memória: ${s.MemUsage} (${s.MemPerc})`];

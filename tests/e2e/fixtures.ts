@@ -19,6 +19,7 @@ export type Container = {
   fail?: Partial<Record<Action, string>>;
   delay?: Partial<Record<Action, number>>;
   after?: Partial<Record<Action, { State: string; Status: string }>>;
+  stats?: { CPUPerc: string; MemUsage: string; MemPerc: string };
 };
 export type DiskUsage = { Type: string; TotalCount: string; Active: string; Size: string; Reclaimable: string };
 export type DockerState = { containers: Container[]; ps_error?: string; df?: DiskUsage[]; pruned?: string[] };
