@@ -1,6 +1,6 @@
 @import "tailwindcss";
 @source "./page.html";
-@source "./*.js";
+@source "./*.ts";
 
 /* tokens semânticos: o HTML só usa estes nomes (bg-canvas, text-muted, bg-ok...), nunca a paleta crua */
 @theme {

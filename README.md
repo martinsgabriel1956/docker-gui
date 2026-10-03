@@ -50,19 +50,21 @@ O token chega à página pelo `#fragmento` do link: o fragmento não é enviado 
 
 ## Desenvolvimento
 
-Quem usa baixa só o `docker_gui.py`. Para desenvolver, o front fica em arquivos próprios em `src/`, e o `build.py` embute tudo no `docker_gui.py`:
+Quem usa baixa só o `docker_gui.py` e não precisa de nada além de Python. Para desenvolver, o front fica em `src/`, escrito em [TypeScript](https://www.typescriptlang.org), e o `build.py` compila e embute tudo no `docker_gui.py`:
 
 | Arquivo | O que tem |
 |---|---|
-| `docker_gui.py` | Servidor (Python, editado à mão) + bloco gerado no fim, com HTML, JS e CSS |
+| `docker_gui.py` | Servidor (Python, editado à mão) + bloco gerado no fim, com HTML, JS compilado e CSS |
 | `src/page.html` | Estrutura da página |
-| `src/format.js` | Funções puras que traduzem a saída do `docker` (status, portas, projeto…) |
-| `src/app.js` | Renderização, ações e eventos |
+| `src/format.ts` | Tipos (`Container`, `Port`…) e funções puras que traduzem a saída do `docker` (status, portas, projeto…) |
+| `src/app.ts` | Renderização, ações e eventos; no fim, a lista das funções que o HTML chama (`onclick="act(...)"`) |
 | `src/theme.css` | Entrada do [Tailwind CSS v4](https://tailwindcss.com) com os **tokens semânticos** dos dois temas (`bg-canvas`, `text-muted`, `bg-ok`, `text-bad-fg`, `bg-accent`…) |
 
-Depois de mudar algo em `src/`, rode o build. Se você usou uma classe do Tailwind nova ou mexeu nos tokens, regenere também o CSS (precisa de Node/npm):
+As ferramentas de desenvolvimento ficam no `package.json` (TypeScript, [esbuild](https://esbuild.github.io), Playwright), com versões fixas no lockfile. Depois de mudar algo em `src/`, confira os tipos e rode o build. O `tsc` só checa; quem gera o JS é o esbuild, num único script. Se você usou uma classe do Tailwind nova ou mexeu nos tokens, regenere também o CSS:
 
 ```bash
+npm ci                   # uma vez
+npm run typecheck        # tsc
 python3 build.py         # HTML e JS
 python3 build.py --css   # HTML, JS e CSS
 ```
@@ -83,7 +85,7 @@ Para rodar também o fluxo completo contra o Docker de verdade (cria e remove um
 DOCKER_GUI_E2E=1 python3 -m unittest
 ```
 
-As funções de `src/format.js` têm testes próprios, que rodam no Node sem dependências:
+As funções de `src/format.ts` têm testes próprios. O Node (22.18+) importa o `.ts` direto, sem build:
 
 ```bash
 node --test tests/format.test.js
@@ -92,12 +94,11 @@ node --test tests/format.test.js
 Os testes de UI usam o [Playwright](https://playwright.dev) e cobrem o que a página faz na tela: agrupamento e faixa de atenção, filtros e atalhos, ações (incluindo a remoção em 2 passos e o "conferindo se ficou de pé"), modal de logs, healthcheck, estados de erro e o que o redesenho a cada 2 s preserva (foco, seleção de texto, menus abertos). Cada teste sobe o próprio `docker_gui.py` contra um `docker` falso (`tests/e2e/fake-docker/docker`), que lê os containers de um JSON. Assim dá para montar cenários exatos (healthcheck falhando, loop de reinício, ação que falha ou demora) sem precisar de daemon:
 
 ```bash
-npm install
-npx playwright install chromium
-npx playwright test
+npx playwright install chromium   # uma vez
+npm run test:e2e
 ```
 
-O CI roda tudo isso em cada pull request e em cada push na `main` e na `develop`: lint (`ruff check`), testes em Python 3.7 a 3.14, E2E com Docker real, sintaxe e testes do JS, testes de UI com Playwright, e a conferência de que o `docker_gui.py` está em dia com `src/`, CSS incluído.
+O CI roda tudo isso em cada pull request e em cada push na `main` e na `develop`: lint (`ruff check`), testes em Python 3.7 a 3.14, E2E com Docker real, tipos (`tsc`) e testes do `format.ts`, testes de UI com Playwright, e a conferência de que o `docker_gui.py` está em dia com `src/`, CSS incluído.
 
 ## Licença
 

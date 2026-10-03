@@ -3,9 +3,11 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = path.resolve(__dirname, '../..');
-const FAKE_BIN = path.join(__dirname, 'fake-docker');
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.resolve(HERE, '../..');
+const FAKE_BIN = path.join(HERE, 'fake-docker');
 
 type Action = 'start' | 'stop' | 'restart' | 'pause' | 'unpause' | 'remove';
 
@@ -92,6 +94,9 @@ export class Gui {
   async open(state: DockerState, { token = true } = {}) {
     await this.start(state);
     await this.page.goto(token ? this.url : this.url.split('#')[0]);
+    // a primeira consulta ao docker é assíncrona: sem esperar, um teste que lê o DOM direto (evaluateAll)
+    // pode pegar a tabela ainda vazia. "Carregando…" só aparece antes da primeira resposta.
+    await expect(this.page.locator('#rows')).not.toHaveText('Carregando…');
   }
 
   async stop() {
