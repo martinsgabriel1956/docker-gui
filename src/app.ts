@@ -1,5 +1,5 @@
 import {
-  type Bucket, type Container, type ContainerState, type Port, type Tone,
+  type Bucket, type Container, type ContainerState, type DiskUsage, type Port, type Tone,
   bucket, esc, hasHealth, isProblem, ports, project, shortImage, status, tone,
 } from './format';
 
@@ -24,7 +24,8 @@ type ProblemKind = 'docker' | 'perm' | 'server' | 'auth';
 type Problem = [title: string, hint: string, detail: unknown, kind: ProblemKind];
 type ToastAction = [label: string, fn: () => unknown];
 type RowError = {msg: string; state: ContainerState; what: string};
-type Arming = {id: string; name: string; at: number; timer: number};
+// confirmação em 2 passos pendente (remover um container ou limpar uma categoria do disco); note vai para o leitor de tela
+type Arming = {id: string; name: string; note: string; at: number; timer: number};
 type Health = {Log?: {ExitCode: number; Output: string}[]} | null;
 // linha da tabela com o HTML que a gerou, para o patchRows saber se mudou
 type Row = HTMLElement & {_html?: string};
@@ -307,10 +308,11 @@ function render() {
   dirty = false;
   renderCount();
   renderDlg();
+  renderDisk();
   if (f?.id) refocus(f.id, f.a);
   saveHash();
   // só escreve na região viva quando a mensagem muda, para não apagar o anúncio de uma ação em andamento
-  const say = arming ? `Clique em Confirmar para apagar ${arming.name} de vez. Os volumes não são afetados. ${TOUCH ? 'Cancela sozinho em 8 segundos.' : 'Esc cancela.'}`
+  const say = arming ? `Clique em Confirmar para apagar ${arming.name} de vez. ${arming.note} ${TOUCH ? 'Cancela sozinho em 8 segundos.' : 'Esc cancela.'}`
             : q || only ? `${rows.length} de ${data.length} containers` : '';
   if (say !== lastSay) $('#shown').textContent = lastSay = say;
 }
@@ -381,13 +383,7 @@ async function act(a: RowAction, id: string) {
   if (a === 'logs') return logs(id);
   const c = data.find(c => c.ID === id);
   if (!c || busy.has(id)) return;
-  if (a === 'remove' && arming?.id !== id) {  // 1º clique só arma; o 2º confirma
-    disarm(false);
-    arming = {id, name: c.Names, at: Date.now(), timer: setTimeout(armTick, 8000)}; render();
-    return;
-  }
-  if (a === 'remove' && arming && Date.now() - arming.at < 600) return;  // duplo clique não pode virar confirmação
-  if (a === 'remove') disarm(false);
+  if (a === 'remove' && !confirmed(id, c.Names, 'Os volumes não são afetados.')) return;
   const trs = [...document.querySelectorAll<HTMLElement>('#rows tr[data-row]')], i = trs.findIndex(tr => tr.dataset.key === 'c:' + id);
   const near = (trs[i + 1] || trs[i - 1])?.dataset.key?.slice(2);
   const done = run(a, c);
@@ -439,10 +435,22 @@ async function stackAct(a: Action, p: string, ids?: string[]) {
   load();
 }
 
+// 1º clique só arma (e desarma o que estiver armado); o 2º confirma. Devolve true quando é para executar
+function confirmed(id: string, name: string, note: string): boolean {
+  if (arming?.id !== id) {
+    disarm(false);
+    arming = {id, name, note, at: Date.now(), timer: setTimeout(armTick, 8000)}; render();
+    return false;
+  }
+  if (Date.now() - arming.at < 600) return false;  // duplo clique não pode virar confirmação
+  disarm(false);
+  return true;
+}
+
 // desarma sozinho depois de 8s, mas nunca enquanto o mouse ou o foco estão no botão (WCAG 2.2.1)
 function armTick() {
   if (!arming) return;
-  const el = document.querySelector(`[data-id="${arming.id}"][data-a="remove"]`);
+  const el = document.querySelector(`[data-id="${arming.id}"]:is([data-a="remove"], [data-a="prune"])`);
   if (el && (el.matches(':hover') || el === document.activeElement)) arming.timer = setTimeout(armTick, 1000);
   else disarm();
 }
@@ -532,11 +540,63 @@ function afterClose() {
   document.querySelector<HTMLElement>(`[data-id="${logId}"][data-a="logs"]`)?.focus();
 }
 
+type DiskKind = 'images' | 'volumes' | 'buildcache';
+// [Type do docker system df, categoria da API de prune, rótulo, o que o prune apaga, aviso]; Containers fica de fora:
+// parado se remove na lista. Volumes sem -a no servidor: no Docker 23+ só os anônimos saem
+const DISK: [string, DiskKind, string, string, string][] = [
+  ['Images', 'images', 'Imagens', 'as imagens que nenhum container usa', 'Dá para baixar de novo.'],
+  ['Local Volumes', 'volumes', 'Volumes', 'os volumes que nenhum container usa', 'Os dados deles se perdem.'],
+  ['Build Cache', 'buildcache', 'Build cache', 'o cache de build', 'O próximo build fica mais lento.']];
+let disk: DiskUsage[] | string | null = null, diskBusy: DiskKind | '' = '', diskHtml = '';  // string = erro
+
+async function loadDisk() {
+  try {
+    const r = await api('/api/df'), j: unknown = await r.json();
+    disk = r.ok ? j as DiskUsage[] : `Não consegui ler o uso de disco: ${j}`;
+  } catch { disk = 'Não consegui ler o uso de disco. O servidor do Docker GUI está rodando?'; }
+  render();
+}
+
+function renderDisk() {
+  const html = disk === null ? '<p class="py-3 text-muted">Carregando…</p>'
+    : typeof disk === 'string' ? `<p class="py-3 text-bad-fg">${esc(disk)}</p>`
+    : DISK.map(([type, k, label, what, note]) => {
+      const d = (disk as DiskUsage[]).find(d => d.Type === type), id = 'df-' + k, armed = arming?.id === id;
+      if (!d) return '';
+      const cls = armed ? 'bg-danger text-white ring-danger hover:bg-danger-hover' : 'text-fg hover:bg-hover';
+      return `<div class="flex flex-wrap items-center gap-x-3 gap-y-2 py-3 border-t border-line/70">
+        <div class="mr-auto min-w-0"><div class="font-medium text-fg-strong">${label}</div>
+          <div class="text-xs text-muted">${esc(d.Size)} no total · ${esc(d.Reclaimable)} liberável · ${esc(d.TotalCount)} ${d.TotalCount === '1' ? 'item' : 'itens'}, ${esc(d.Active)} em uso</div></div>
+        <button data-id="${id}" data-a="prune" ${diskBusy ? 'aria-disabled="true"' : ''} onclick="prune('${k}')"
+          aria-label="${armed ? `Confirmar limpeza de ${label.toLowerCase()}` : `Limpar ${label.toLowerCase()}`}" class="${BTN} ${cls}">${
+          diskBusy === k ? 'Limpando…' : armed ? 'Confirmar' : 'Limpar…'}</button>
+        ${armed ? `<p aria-hidden="true" class="w-full text-xs text-bad-soft lg:text-right">Apagar ${what}? ${note} ${TOUCH ? 'Cancela sozinho em 8 s.' : 'Esc cancela.'}</p>` : ''}
+      </div>`;
+    }).join('');
+  if (html !== diskHtml) $('#df').innerHTML = diskHtml = html;  // o render roda a cada poll: só troca se mudou
+}
+
+async function prune(k: DiskKind) {
+  const [, , label, what, note] = DISK.find(d => d[1] === k)!;
+  if (diskBusy || !confirmed('df-' + k, what, note)) return;
+  diskBusy = k; render();
+  $('#shown').textContent = `Limpando ${label.toLowerCase()}…`;
+  try {
+    const r = await api('/api/prune/' + k, {method: 'POST'}), msg: string = await r.json();
+    // image/volume prune terminam em "Total reclaimed space: 1.2GB"; builder prune, em "Total: 1.2GB"
+    const freed = msg.match(/Total(?: reclaimed space)?:\s*(\S+)/)?.[1];
+    if (r.ok) toast(`${label}: ${freed ? `${freed} liberados` : 'limpeza feita'}.`, true);
+    else toast(`Não deu para limpar ${label.toLowerCase()}: ${msg || 'erro sem mensagem'}`);
+  } catch { toast('Sem resposta do servidor do Docker GUI.'); }
+  diskBusy = '';
+  await loadDisk();
+}
+
 // o HTML gerado chama estas funções pelo nome (onclick="act(...)"); com módulos nada é global, então
 // esta lista é a interface completa entre o HTML e o código
 Object.assign(window, {
-  act, afterClose, clearFilters, copyAddr, copyExec, copyLogs, filterBy, loadHealth, menuPick, placeMenu,
-  refreshLogs, runToastAction, stackAct, toggleFollow,
+  act, afterClose, clearFilters, copyAddr, copyExec, copyLogs, filterBy, loadDisk, loadHealth, menuPick, placeMenu,
+  prune, refreshLogs, runToastAction, stackAct, toggleFollow,
 });
 
 $('#dlg').addEventListener('close', afterClose);

@@ -21,6 +21,7 @@ python3 docker_gui.py --port 9000
 - **Logs** com acompanhamento ao vivo, botão de copiar e ações no próprio modal. Mostra também a saída do último healthcheck.
 - **Portas:** as HTTP abrem no navegador; as outras (Postgres, Redis…) copiam `localhost:porta`.
 - **Copiar `docker exec -it <nome> sh`** pelo menu "⋯".
+- **Uso de disco** (`docker system df`) de imagens, volumes e build cache, com **limpeza** (`prune`) de cada categoria, confirmada em 2 passos como a remoção. Imagens e build cache saem com `-a` (tudo que está sem uso); volumes sem `-a`, então no Docker 23+ os nomeados ficam.
 - **Teclado:** `/` vai para a busca, `↑` `↓` andam entre os botões Logs e `Z` aciona o "desfazer". Os filtros ficam na URL.
 - Tema **claro e escuro** automático, layout de **cards no celular** e acessibilidade AA (contraste, foco, leitores de tela, `prefers-reduced-motion`).
 

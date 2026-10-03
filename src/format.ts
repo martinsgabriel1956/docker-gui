@@ -15,7 +15,16 @@ export interface Container {
   Labels: string;
 }
 
-export type Tone = 'ok' | 'check' | 'warn' | 'busy' | 'bad' | 'pause' | 'off';
+// uma linha do `docker system df --format '{{json .}}'`; os tamanhos já vêm formatados ("4.01GB", "165MB (14%)")
+export interface DiskUsage {
+  Type: string;
+  TotalCount: string;
+  Active: string;
+  Size: string;
+  Reclaimable: string;
+}
+
+export type Tone ='ok' | 'check' | 'warn' | 'busy' | 'bad' | 'pause' | 'off';
 export type Bucket = 'problema' | 'rodando' | 'pausado' | 'reiniciando' | 'parado';
 // [texto, dica opcional]
 export type StatusText = [text: string, hint?: string];
