@@ -60,3 +60,25 @@ jobs:
         run: node --test tests/format.test.js
       - name: docker_gui.py em dia com src/ (HTML, JS e CSS do Tailwind)
         run: python3 build.py --css --check
+
+  ui:
+    name: ui (Playwright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      # cada teste sobe o docker_gui.py contra um docker falso (tests/e2e/fake-docker): não precisa de daemon
+      - run: npx playwright test
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 14

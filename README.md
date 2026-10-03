@@ -89,7 +89,15 @@ As funções de `src/format.js` têm testes próprios, que rodam no Node sem dep
 node --test tests/format.test.js
 ```
 
-O CI roda tudo isso em cada pull request e em cada push na `main` e na `develop`: lint (`ruff check`), testes em Python 3.7 a 3.14, E2E com Docker real, sintaxe e testes do JS, e a conferência de que o `docker_gui.py` está em dia com `src/`, CSS incluído.
+Os testes de UI usam o [Playwright](https://playwright.dev) e cobrem o que a página faz na tela: agrupamento e faixa de atenção, filtros e atalhos, ações (incluindo a remoção em 2 passos e o "conferindo se ficou de pé"), modal de logs, healthcheck, estados de erro e o que o redesenho a cada 2 s preserva (foco, seleção de texto, menus abertos). Cada teste sobe o próprio `docker_gui.py` contra um `docker` falso (`tests/e2e/fake-docker/docker`), que lê os containers de um JSON. Assim dá para montar cenários exatos (healthcheck falhando, loop de reinício, ação que falha ou demora) sem precisar de daemon:
+
+```bash
+npm install
+npx playwright install chromium
+npx playwright test
+```
+
+O CI roda tudo isso em cada pull request e em cada push na `main` e na `develop`: lint (`ruff check`), testes em Python 3.7 a 3.14, E2E com Docker real, sintaxe e testes do JS, testes de UI com Playwright, e a conferência de que o `docker_gui.py` está em dia com `src/`, CSS incluído.
 
 ## Licença
 
