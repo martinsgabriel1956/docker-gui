@@ -19,6 +19,8 @@ ACTIONS = {"start": ["start"], "stop": ["stop"], "restart": ["restart"], "pause"
            "unpause": ["unpause"], "remove": ["rm", "-f"]}
 # leitura (ps, logs, inspect) é rápida; stop/restart esperam o stop_grace_period do container
 READ_TIMEOUT, ACTION_TIMEOUT = 15, 120
+# comandos que imprimem um JSON por linha; o stats só lista os rodando e leva ~2 s para medir a CPU
+LISTS = {"/api/containers": ["ps", "-a"], "/api/stats": ["stats", "--no-stream"]}
 
 
 def docker(*args, timeout=READ_TIMEOUT):
@@ -55,8 +57,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, PAGE, "text/html")
         if not self.token_ok():
             return self.send(401, '"token ausente ou inválido"')
-        if self.path == "/api/containers":
-            r = docker("ps", "-a", "--format", "{{json .}}")
+        if self.path in LISTS:
+            r = docker(*LISTS[self.path], "--format", "{{json .}}")
             if r.returncode:
                 return self.send(500, json.dumps(r.stderr.strip()))
             return self.send(200, "[" + ",".join(r.stdout.splitlines()) + "]")
@@ -243,6 +245,7 @@ PAGE = r"""<!doctype html>
   };
   var shortImage = (img) => img.replace(/^[^/]+[.:][^/]*\//, "");
   var hasHealth = (c) => /\((un)?healthy\)|health: starting/.test(c.Status);
+  var usage = (s) => [`CPU ${s.CPUPerc} · RAM ${s.MemUsage.split(" / ")[0]}`, `Memória: ${s.MemUsage} (${s.MemPerc})`];
 
   // src/app.ts
   var $ = (s) => document.querySelector(s);
@@ -380,6 +383,23 @@ PAGE = r"""<!doctype html>
       ]);
     }
   }
+  var stats = {};
+  async function loadStats() {
+    let next = {};
+    try {
+      const r = await api("/api/stats");
+      if (r.ok) next = Object.fromEntries((await r.json()).map((s) => [s.ID, s]));
+    } catch {
+    }
+    if (JSON.stringify(next) === JSON.stringify(stats)) return;
+    stats = next;
+    if (selectingRows()) dirty = true;
+    else render();
+  }
+  async function statsLoop() {
+    if (!document.hidden) await loadStats();
+    setTimeout(statsLoop, 5e3);
+  }
   function renderCount() {
     const n = (k) => data.filter((c) => bucket(c) === k).length, running = data.filter((c) => c.State === "running").length;
     const problemTxt = problemKind ? PROBLEM_TXT[problemKind] : "";
@@ -454,7 +474,7 @@ PAGE = r"""<!doctype html>
   }
   var rowCache = /* @__PURE__ */ new Map();
   function row(c, withProject = false) {
-    const sig = JSON.stringify([c, withProject, busy.get(c.ID), arming?.id === c.ID, errors.get(c.ID), health[c.ID + c.Status], TOUCH]);
+    const sig = JSON.stringify([c, withProject, busy.get(c.ID), arming?.id === c.ID, errors.get(c.ID), health[c.ID + c.Status], stats[c.ID], TOUCH]);
     const hit = rowCache.get(c.ID);
     if (hit?.sig === sig) return hit.html;
     const html = rowHtml(c, withProject);
@@ -464,6 +484,7 @@ PAGE = r"""<!doctype html>
   function rowHtml(c, withProject) {
     const b = busy.get(c.ID), t = TONE[b ? "busy" : tone(c)], st = status(c), pp = ports(c.Ports), p = project(c);
     const armed = arming?.id === c.ID, prim = PRIMARY[c.State], sec = SECONDARY[c.State];
+    const u = c.State === "running" && !b && stats[c.ID] ? usage(stats[c.ID]) : null;
     const slot = (w = "lg:w-20") => `<span aria-hidden="true" class="${w} shrink-0 max-lg:hidden"></span>`;
     const btn = (a, cls = "text-fg hover:bg-hover", text = LABEL[a], aria = `${LABEL[a]} ${esc(c.Names)}`) => `<button data-id="${c.ID}" data-a="${a}" ${b && a !== "logs" ? 'aria-disabled="true"' : ""}
       aria-label="${aria}" aria-describedby="st-${c.ID}" onclick="act('${a}','${c.ID}')" class="lg:w-20 shrink-0 ${BTN} ${cls}">${text}</button>`;
@@ -493,7 +514,7 @@ PAGE = r"""<!doctype html>
     <td role="cell" class="font-mono text-xs text-muted pr-4 max-lg:block max-lg:p-0 max-lg:pl-5 [overflow-wrap:anywhere]">
       <span class="sr-only lg:hidden">Imagem: </span><div class="lg:truncate lg:max-w-[24ch] lg:[direction:rtl] lg:text-left" title="${esc(c.Image)}"><bdi dir="ltr">${esc(shortImage(c.Image))}</bdi></div></td>
     <td role="cell" class="text-sm pr-4 lg:min-w-[24ch] max-lg:block max-lg:p-0 max-lg:pl-5" title="${esc(c.Status)}">
-      <span id="st-${c.ID}" class="${t[1]}">${b ? VERB[b] : esc(st[0])}${st[1] && !b ? `<span class="block text-xs text-muted">${st[1]}</span>` : ""}</span>${b ? "" : errHtml(c) + healthBox}</td>
+      <span id="st-${c.ID}" class="${t[1]}">${b ? VERB[b] : esc(st[0])}${st[1] && !b ? `<span class="block text-xs text-muted">${st[1]}</span>` : ""}</span>${u ? `<span id="us-${c.ID}" class="block text-xs font-mono text-muted" title="${esc(u[1])}">${esc(u[0])}</span>` : ""}${b ? "" : errHtml(c) + healthBox}</td>
     <td role="cell" class="pr-4 max-lg:hidden max-lg:has-[div]:block max-lg:p-0 max-lg:pl-5 max-lg:pt-1">${pp.length ? `<div class="flex flex-wrap gap-1 max-lg:gap-2">${pp.map((x) => portChip(c, x)).join("")}</div>` : ""}</td>
     <td role="cell" class="pr-4 max-lg:block max-lg:p-0 max-lg:pt-2"><div class="flex justify-end max-lg:justify-start items-center gap-1.5 max-lg:gap-2">
       ${prim ? btn(prim, prim === "start" ? "text-ok-fg hover:bg-ok/10" : void 0) : slot()}${btn("logs")}
@@ -783,6 +804,7 @@ PAGE = r"""<!doctype html>
   render();
   load();
   setInterval(() => document.hidden || load(), 2e3);
+  statsLoop();
 })();
 </script>
 </body>

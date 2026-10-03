@@ -138,3 +138,18 @@ test('no celular vira cards, sem rolagem horizontal', async ({ page, gui }) => {
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBe(0);
 });
+
+test('CPU e memória do docker stats aparecem só nos containers rodando, e atualizam sozinhos', async ({ page, gui }) => {
+  const stats = { CPUPerc: '1.50%', MemUsage: '20MiB / 1.944GiB', MemPerc: '1.00%' };
+  await gui.open({
+    containers: [ctr('web', { stats }), ctr('pausado', { State: 'paused', Status: 'Up 3 minutes (Paused)', stats })],
+  });
+  const us = page.locator(`#us-${id('web')}`);
+  await expect(us).toHaveText('CPU 1.50% · RAM 20MiB');
+  await expect(us).toHaveAttribute('title', 'Memória: 20MiB / 1.944GiB (1.00%)');
+  await expect(page.locator(`#st-${id('web')}`)).toHaveText('Rodando há 5 min');  // o status não muda
+  await expect(page.locator(`#us-${id('pausado')}`)).toHaveCount(0);
+
+  gui.update(s => { s.containers[0].stats = { ...stats, CPUPerc: '42.00%' }; });
+  await expect(us).toHaveText('CPU 42.00% · RAM 20MiB', { timeout: 12_000 });  // o stats consulta a cada 5 s
+});
