@@ -87,6 +87,31 @@ test('ports lê só as portas publicadas e remove duplicata IPv4/IPv6', () => {
   assert.deepEqual(f.ports(''), []);
 });
 
+// o docker só junta numa faixa a partir de 4 portas seguidas; abaixo disso lista uma por uma (formato acima)
+test('ports abre faixa curta em uma entrada por porta', () => {
+  assert.deepEqual(f.ports('0.0.0.0:3000-3003->3000-3003/tcp, [::]:3000-3003->3000-3003/tcp'),
+                   [['3000', '3000', 'tcp'], ['3001', '3001', 'tcp'], ['3002', '3002', 'tcp'], ['3003', '3003', 'tcp']]);
+  // defensivo: hoje o docker só agrupa quando host e container usam a mesma porta (com números
+  // diferentes ele lista uma por uma), mas o parse não depende disso
+  assert.deepEqual(f.ports('0.0.0.0:18000-18003->8000-8003/tcp'),
+                   [['18000', '8000', 'tcp'], ['18001', '8001', 'tcp'], ['18002', '8002', 'tcp'], ['18003', '8003', 'tcp']]);
+  assert.deepEqual(f.ports('127.0.0.1:5000-5003->5000-5003/udp, 0.0.0.0:8080->80/tcp').map(x => x.join(':')),
+                   ['5000:5000:udp', '5001:5001:udp', '5002:5002:udp', '5003:5003:udp', '8080:80:tcp']);
+});
+
+test('ports mantém faixa longa numa entrada só', () => {
+  const last = 9000 + f.MAX_EXPAND - 1, over = 9000 + f.MAX_EXPAND;
+  assert.equal(f.ports(`0.0.0.0:9000-${last}->9000-${last}/tcp`).length, f.MAX_EXPAND);  // no limite ainda abre
+  assert.deepEqual(f.ports(`0.0.0.0:9000-${over}->9000-${over}/tcp`), [[`9000-${over}`, `9000-${over}`, 'tcp']]);
+  assert.deepEqual(f.ports('0.0.0.0:20000-20999->20000-20999/udp, [::]:20000-20999->20000-20999/udp'),
+                   [['20000-20999', '20000-20999', 'udp']]);
+});
+
+test('ports não abre faixas de tamanhos diferentes', () => {
+  // o docker não gera isso hoje; se gerar, mostra como está em vez de inventar o pareamento
+  assert.deepEqual(f.ports('0.0.0.0:7000-7003->80/tcp'), [['7000-7003', '80', 'tcp']]);
+});
+
 test('project lê o label do compose sem quebrar nas vírgulas do depends_on', () => {
   const labels = 'com.docker.compose.depends_on=db:service_started:false,redis:service_started:false,'
                + 'com.docker.compose.project=shop,com.docker.compose.service=api';

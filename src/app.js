@@ -118,6 +118,9 @@ function copyAddr(h) {
 function portChip(c, [h, p, proto]) {
   const label = `${h}→${p}${proto === 'tcp' ? '' : '/' + proto}`, svg = 'aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" class="inline size-3 ml-1 -mt-0.5"';
   const base = 'whitespace-nowrap font-mono text-xs px-1.5 py-0.5 max-lg:text-xs max-lg:px-3 max-lg:py-3.5 rounded ring-1 focus-visible:outline-2 focus-visible:outline-accent';
+  // faixa longa: não há um endereço para abrir ou copiar, então o chip só informa
+  if (h.includes('-')) return `<span title="Faixa de portas: ${h} do host → ${p} do container"
+    class="${base} bg-hover/60 text-fg-soft ring-line-strong">${label}</span>`;
   return c.State === 'running' && proto === 'tcp' && !NOT_HTTP.has(+p)
     ? `<a href="http://localhost:${h}" target="_blank" rel="noopener" aria-label="Abrir localhost:${h} em nova aba (porta ${p} do container)"
         title="Abrir no navegador" class="${base} bg-accent/10 text-accent-fg ring-accent/20 hover:bg-accent/20">${label}<svg ${svg}><path d="M6 3h7v7M13 3 4 12"/></svg></a>`

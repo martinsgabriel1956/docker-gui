@@ -46,12 +46,23 @@ function status(c) {
 }
 
 // "0.0.0.0:5432->5432/tcp, [::]:5432->5432/tcp" -> [["5432","5432","tcp"]]
-const ports = p => [...new Set([...p.matchAll(/:(\d+)->(\d+)\/(\w+)/g)].map(m => m.slice(1).join(':')))].map(s => s.split(':'));
+// o docker junta 4+ portas seguidas numa faixa ("0.0.0.0:3000-3003->3000-3003/tcp"): faixa curta vira uma
+// entrada por porta (cada uma clicável); faixa longa (mídia RTP, FTP passivo...) fica numa entrada só, "h1-h2"
+const MAX_EXPAND = 8;
+const ports = p => {
+  const out = [];
+  for (const [, h1, h2 = h1, c1, c2 = c1, proto] of p.matchAll(/:(\d+)(?:-(\d+))?->(\d+)(?:-(\d+))?\/(\w+)/g)) {
+    const n = h2 - h1;
+    if (n === c2 - c1 && n < MAX_EXPAND) for (let i = 0; i <= n; i++) out.push([`${+h1 + i}`, `${+c1 + i}`, proto]);
+    else out.push([h1 === h2 ? h1 : `${h1}-${h2}`, c1 === c2 ? c1 : `${c1}-${c2}`, proto]);
+  }
+  return [...new Set(out.map(x => x.join(':')))].map(s => s.split(':'));
+};
 
 // "ghcr.io/acme/api:1.4" -> "acme/api:1.4": o host do registry raramente importa; a tag sim
 const shortImage = img => img.replace(/^[^/]+[.:][^/]*\//, '');
 const hasHealth = c => /\((un)?healthy\)|health: starting/.test(c.Status);
 // no navegador não existe module; no Node os testes importam daqui
 if (typeof module === 'object') {
-  module.exports = {esc, EXIT, restartCode, tone, bucket, isProblem, project, dur, status, ports, shortImage, hasHealth};
+  module.exports = {esc, EXIT, restartCode, tone, bucket, isProblem, project, dur, status, ports, MAX_EXPAND, shortImage, hasHealth};
 }
