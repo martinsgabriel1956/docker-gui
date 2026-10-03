@@ -54,8 +54,8 @@ const PROBLEM_TXT: Record<ProblemKind, string> = {docker: 'Docker fora do ar', p
 const BTN = 'px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 transition motion-reduce:transition-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent aria-disabled:opacity-40 aria-disabled:cursor-wait';
 let data: Container[] = [], busy = new Map<string, Action>(), errors = new Map<string, RowError>(), lastOk: Date | null = null,
     problem = '', problemKind: ProblemKind | '' = '', only: Bucket | '' = '',
-    toastTimer: number | undefined, logId: string | null = null, follow: number | null = null, arming: Arming | null = null,
-    lastSay = '', dirty = false;
+    toastTimer: number | undefined, logId: string | null = null, stream: EventSource | null = null, pending: string[] = [],
+    arming: Arming | null = null, lastSay = '', dirty = false;
 
 let toastFn: (() => unknown) | null = null;
 function toast(msg: string, ok = false, action: ToastAction | null = null) {
@@ -490,12 +490,11 @@ function renderDlg() {
     + (c.State === 'running' ? `<button data-id="dlg" data-a="exec" onclick="copyExec('${c.ID}')" class="${BTN} text-fg hover:bg-hover">Copiar docker exec</button>` : '');
 }
 
-async function fetchLogs(force = false) {
-  const lb = $('#lb'), sel = getSelection();
-  if (!force && sel?.toString() && lb.contains(sel.anchorNode)) return;  // não apaga a seleção de quem está copiando
-  const atEnd = lb.scrollHeight - lb.scrollTop - lb.clientHeight < 40;  // só gruda no fim se já estava lá
+async function fetchLogs() {
+  const lb = $('#lb'), atEnd = lb.scrollHeight - lb.scrollTop - lb.clientHeight < 40;  // só gruda no fim se já estava lá
   try {
     const r = await api('/api/logs/' + logId), j: string = await r.json();
+    if (stream) return;  // o ao vivo ligou enquanto esta resposta vinha: ele é quem preenche a caixa
     lb.textContent = r.ok ? j || '(sem logs)' : `Não consegui ler os logs: ${j}`;
     $('#lmeta').textContent = `Últimas 500 linhas · atualizado às ${new Date().toLocaleTimeString('pt-BR')}`;
   } catch { lb.textContent = 'Não consegui carregar os logs. O servidor do Docker GUI está rodando?'; }
@@ -506,19 +505,42 @@ function logs(id: string) {
   logId = id;
   $('#lt').textContent = data.find(c => c.ID === id)!.Names;
   $('#lb').textContent = 'Carregando…'; $('#lmeta').textContent = 'Últimas 500 linhas'; $('#dlg-msg').innerHTML = '';
-  $<HTMLDialogElement>('#dlg').showModal(); renderDlg(); fetchLogs(true);
+  $<HTMLDialogElement>('#dlg').showModal(); renderDlg(); fetchLogs();
 }
 
-function toggleFollow(on = !follow) {
-  clearInterval(follow ?? undefined); follow = on ? setInterval(() => document.hidden || fetchLogs(), 2000) : null;
+// ponytail: teto fixo; um container falante por horas não pode crescer o DOM sem limite
+const MAX_LINES = 5000;
+
+// as linhas do ao vivo chegam em rajada (500 de uma vez ao conectar): entram no DOM juntas, não uma a uma
+function flushLogs() {
+  const lb = $('#lb'), atEnd = lb.scrollHeight - lb.scrollTop - lb.clientHeight < 40;
+  lb.append(...pending.splice(0));  // anexar (em vez de trocar o texto) não apaga a seleção de quem está copiando
+  for (let n = lb.childNodes.length - MAX_LINES; n > 0; n--) lb.firstChild!.remove();  // um nó de texto por linha
+  if (atEnd) lb.scrollTop = lb.scrollHeight;
+}
+
+// ao vivo: Server-Sent Events com o docker logs -f. Fechar o EventSource derruba a conexão e o servidor mata o processo
+function toggleFollow(on = !stream, why = '') {
+  const was = !!stream;
+  stream?.close(); stream = null;
+  if (was) flushLogs();  // o que já chegou entra antes de parar
+  if (on) {
+    // EventSource não manda header: o token vai na query, só nesta rota
+    const es = stream = new EventSource(`/api/logs/${logId}/stream?t=${encodeURIComponent(TOKEN)}`);
+    // cada conexão (inclusive a reconexão automática) recomeça das últimas 500 linhas: limpa para não duplicar
+    es.onopen = () => { pending = []; $('#lb').textContent = ''; $('#lmeta').textContent = 'Ao vivo · últimas 500 linhas e as novas'; };
+    es.onmessage = e => { if (pending.push(JSON.parse(e.data)) === 1) setTimeout(flushLogs, 50); };
+    es.addEventListener('end', () => toggleFollow(false, 'o container parou'));
+    // queda de rede: o EventSource reconecta sozinho; CLOSED é recusa do servidor (token, erro)
+    es.onerror = () => { if (es.readyState === EventSource.CLOSED) toggleFollow(false, 'falhou'); else $('#lmeta').textContent = 'Ao vivo · reconectando…'; };
+  } else if (was) $('#lmeta').textContent = `Ao vivo parado às ${new Date().toLocaleTimeString('pt-BR')}${why ? ` · ${why}` : ''}`;
   $('#follow').setAttribute('aria-pressed', String(on));
   $('#refresh').setAttribute('aria-disabled', String(on));  // com o ao vivo ligado, Atualizar é redundante (mas continua no Tab)
-  if (on) fetchLogs();  // sem forçar: ligar o ao vivo não pode apagar uma seleção
 }
 
 // botão Atualizar: com o ao vivo ligado não faz nada (já atualiza sozinho)
 function refreshLogs() {
-  if (!follow) fetchLogs(true);
+  if (!stream) fetchLogs();
 }
 
 function copyLogs() {

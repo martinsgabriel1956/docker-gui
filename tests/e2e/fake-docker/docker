@@ -3,7 +3,7 @@
 
 Cenários que o Docker de verdade não reproduz sob demanda (healthcheck falhando, loop de reinício,
 ação que falha ou demora) viram dados. Campos extras por container, fora do formato do `docker ps`:
-  logs    texto do `docker logs`
+  logs    texto do `docker logs`; com -f, o que for acrescentado depois sai na hora
   health  objeto do `inspect --format {{json .State.Health}}`
   fail    {ação: stderr}: a ação falha com essa mensagem
   delay   {ação: segundos}: a ação demora (para ver o estado "ocupado" na tela)
@@ -51,10 +51,27 @@ def save(f, state):
     json.dump(state, f)
 
 
+def follow(path, ref):
+    """logs -f: manda o que já tem, depois só o que for acrescentado; termina quando o container para, como o docker."""
+    sent = 0
+    while True:
+        with locked(path, exclusive=False) as (_, state):
+            c = find(state, ref)
+        logs = c.get("logs", "")
+        sys.stdout.write(logs[sent:])
+        sys.stdout.flush()
+        sent = len(logs)
+        if c["State"] not in ("running", "paused"):
+            return
+        time.sleep(0.2)  # dorme fora do lock
+
+
 def main(args):
     path = os.environ["FAKE_DOCKER_STATE"]
     cmd, ref = args[0], args[-1]
     action = "remove" if cmd == "rm" else cmd
+    if cmd == "logs" and "-f" in args:
+        return follow(path, ref)
 
     if action in AFTER or action == "remove":
         # dorme fora do lock, senão o `docker ps` do poll travaria junto

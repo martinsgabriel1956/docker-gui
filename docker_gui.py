@@ -4,12 +4,15 @@ import argparse
 import errno
 import hmac
 import json
+import os
 import re
 import secrets
+import select
 import subprocess
 import sys
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs
 
 PORT = 8765  # padrão; se estiver ocupada, serve() tenta as próximas
 # segredo por execução: sem ele a API não responde. Fecha a porta para o que roda na máquina
@@ -53,6 +56,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(403, '"forbidden"')
         if self.path == "/":  # a página em si não tem dados; só a API exige o token
             return self.send(200, PAGE, "text/html")
+        path, _, query = self.path.partition("?")
+        m = re.fullmatch(r"/api/logs/([0-9a-f]{12,64})/stream", path)
+        if m:  # EventSource não manda header custom: só esta rota (GET, só leitura) aceita o token na query
+            if not hmac.compare_digest(parse_qs(query).get("t", [""])[0].encode(), TOKEN.encode()):
+                return self.send(401, '"token ausente ou inválido"')
+            return self.stream_logs(m[1])
         if not self.token_ok():
             return self.send(401, '"token ausente ou inválido"')
         if self.path == "/api/containers":
@@ -69,6 +78,39 @@ class Handler(BaseHTTPRequestHandler):
             r = docker("inspect", "--format", "{{json .State.Health}}", m[1])
             return self.send(500, json.dumps(r.stderr.strip())) if r.returncode else self.send(200, r.stdout.strip())
         self.send(404, '"not found"')
+
+    def stream_logs(self, cid):
+        """Server-Sent Events com o `docker logs -f`: uma linha por evento e um "end" quando o docker termina."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+
+        def sse(line):  # em JSON: \r ou \n dentro do log não quebram o formato do SSE
+            return f"data: {json.dumps(line.decode(errors='replace'))}\n\n".encode()
+
+        # cada conexão tem a própria thread (ThreadingHTTPServer): um stream longo não trava as outras requisições.
+        # O with fecha o pipe e espera o processo morto (sem zumbi nem fd vazando)
+        with subprocess.Popen(["docker", "logs", "-f", "--tail", "500", cid],
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as p:
+            rest = b""
+            try:
+                while True:
+                    # espera saída do docker ou o cliente fechar: sem olhar o socket, um container quieto
+                    # deixaria o docker logs vivo para sempre depois que a aba fechou
+                    ready, _, _ = select.select([p.stdout, self.connection], [], [])
+                    if self.connection in ready:  # o navegador não manda nada depois do GET: legível = desconectou
+                        return
+                    chunk = os.read(p.stdout.fileno(), 65536)
+                    if not chunk:  # o docker logs -f termina quando o container para
+                        self.wfile.write((sse(rest) if rest else b"") + b"event: end\ndata:\n\n")
+                        return
+                    *lines, rest = (rest + chunk).split(b"\n")  # só manda linha inteira (e UTF-8 inteiro)
+                    self.wfile.write(b"".join(sse(line + b"\n") for line in lines))
+            except OSError:  # cliente fechou no meio da escrita
+                pass
+            finally:
+                p.kill()
 
     def do_POST(self):
         if not self.host_ok():
@@ -316,7 +358,8 @@ PAGE = r"""<!doctype html>
   var only = "";
   var toastTimer;
   var logId = null;
-  var follow = null;
+  var stream = null;
+  var pending = [];
   var arming = null;
   var lastSay = "";
   var dirty = false;
@@ -720,12 +763,11 @@ PAGE = r"""<!doctype html>
     $("#dlg-acts").innerHTML = [PRIMARY[c.State], SECONDARY[c.State]].filter((a) => !!a).map((a) => `<button data-id="dlg" data-a="${a}" ${b ? 'aria-disabled="true"' : ""} aria-label="${LABEL[a]} ${esc(c.Names)}" onclick="act('${a}', '${c.ID}')"
       class="${BTN} ${a === "start" ? "text-ok-fg hover:bg-ok/10" : "text-fg hover:bg-hover"}">${LABEL[a]}</button>`).join("") + (c.State === "running" ? `<button data-id="dlg" data-a="exec" onclick="copyExec('${c.ID}')" class="${BTN} text-fg hover:bg-hover">Copiar docker exec</button>` : "");
   }
-  async function fetchLogs(force = false) {
-    const lb = $("#lb"), sel = getSelection();
-    if (!force && sel?.toString() && lb.contains(sel.anchorNode)) return;
-    const atEnd = lb.scrollHeight - lb.scrollTop - lb.clientHeight < 40;
+  async function fetchLogs() {
+    const lb = $("#lb"), atEnd = lb.scrollHeight - lb.scrollTop - lb.clientHeight < 40;
     try {
       const r = await api("/api/logs/" + logId), j = await r.json();
+      if (stream) return;
       lb.textContent = r.ok ? j || "(sem logs)" : `Não consegui ler os logs: ${j}`;
       $("#lmeta").textContent = `Últimas 500 linhas · atualizado às ${(/* @__PURE__ */ new Date()).toLocaleTimeString("pt-BR")}`;
     } catch {
@@ -741,17 +783,41 @@ PAGE = r"""<!doctype html>
     $("#dlg-msg").innerHTML = "";
     $("#dlg").showModal();
     renderDlg();
-    fetchLogs(true);
+    fetchLogs();
   }
-  function toggleFollow(on = !follow) {
-    clearInterval(follow ?? void 0);
-    follow = on ? setInterval(() => document.hidden || fetchLogs(), 2e3) : null;
+  var MAX_LINES = 5e3;
+  function flushLogs() {
+    const lb = $("#lb"), atEnd = lb.scrollHeight - lb.scrollTop - lb.clientHeight < 40;
+    lb.append(...pending.splice(0));
+    for (let n = lb.childNodes.length - MAX_LINES; n > 0; n--) lb.firstChild.remove();
+    if (atEnd) lb.scrollTop = lb.scrollHeight;
+  }
+  function toggleFollow(on = !stream, why = "") {
+    const was = !!stream;
+    stream?.close();
+    stream = null;
+    if (was) flushLogs();
+    if (on) {
+      const es = stream = new EventSource(`/api/logs/${logId}/stream?t=${encodeURIComponent(TOKEN)}`);
+      es.onopen = () => {
+        pending = [];
+        $("#lb").textContent = "";
+        $("#lmeta").textContent = "Ao vivo · últimas 500 linhas e as novas";
+      };
+      es.onmessage = (e) => {
+        if (pending.push(JSON.parse(e.data)) === 1) setTimeout(flushLogs, 50);
+      };
+      es.addEventListener("end", () => toggleFollow(false, "o container parou"));
+      es.onerror = () => {
+        if (es.readyState === EventSource.CLOSED) toggleFollow(false, "falhou");
+        else $("#lmeta").textContent = "Ao vivo · reconectando…";
+      };
+    } else if (was) $("#lmeta").textContent = `Ao vivo parado às ${(/* @__PURE__ */ new Date()).toLocaleTimeString("pt-BR")}${why ? ` · ${why}` : ""}`;
     $("#follow").setAttribute("aria-pressed", String(on));
     $("#refresh").setAttribute("aria-disabled", String(on));
-    if (on) fetchLogs();
   }
   function refreshLogs() {
-    if (!follow) fetchLogs(true);
+    if (!stream) fetchLogs();
   }
   function copyLogs() {
     navigator.clipboard.writeText($("#lb").textContent ?? "").then(() => toast("Logs copiados.", true), () => toast("Não consegui copiar."));
