@@ -94,6 +94,9 @@ export class Gui {
   async open(state: DockerState, { token = true } = {}) {
     await this.start(state);
     await this.page.goto(token ? this.url : this.url.split('#')[0]);
+    // a primeira consulta ao docker é assíncrona: sem esperar, um teste que lê o DOM direto (evaluateAll)
+    // pode pegar a tabela ainda vazia. "Carregando…" só aparece antes da primeira resposta.
+    await expect(this.page.locator('#rows')).not.toHaveText('Carregando…');
   }
 
   async stop() {
