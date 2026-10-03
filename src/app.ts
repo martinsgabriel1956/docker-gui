@@ -421,7 +421,8 @@ const stackList = (a: Action, p: string, ids?: string[]) => data.filter(c => pro
   : a === 'start' ? PRIMARY[c.State] === 'start' : a === 'restart' ? c.State === 'running' : STOPPABLE.includes(c.State)));
 
 function copyExec(id: string) {
-  const cmd = `docker exec -it ${data.find(c => c.ID === id)!.Names} sh`;
+  // data-cli: binário e --context com que o servidor foi iniciado (ex.: "podman", "docker --context prod")
+  const cmd = `${document.documentElement.dataset.cli} exec -it ${data.find(c => c.ID === id)!.Names} sh`;
   navigator.clipboard.writeText(cmd).then(() => toast(`Copiado: ${cmd}`, true), () => toast(`Não consegui copiar. O comando é: ${cmd}`));
 }
 

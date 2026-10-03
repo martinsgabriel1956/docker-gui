@@ -6,6 +6,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import unittest
 from http.server import ThreadingHTTPServer
@@ -119,6 +120,68 @@ class ContainersTest(ServerTest):
         self.docker.return_value = fail("permission denied while trying to connect\n")
         self.assertEqual(self.request("GET", "/api/containers"), (500, "permission denied while trying to connect"))
 
+    def test_podman_uses_json_array_and_is_normalized(self):
+        self.docker.return_value = ok(json.dumps(PODMAN_PS, indent=2) + "\n")
+        with mock.patch.object(docker_gui, "CLI", ["/usr/bin/podman"]):
+            status, body = self.request("GET", "/api/containers")
+        self.assertEqual((status, body), (200, PODMAN_EXPECTED))
+        self.docker.assert_called_once_with("ps", "-a", "--format", "json")
+
+
+# `podman ps -a --format json` do podman 5: array, Id inteiro, Names lista, Ports objetos, Labels dict
+PODMAN_PS = [
+    {"AutoRemove": False, "Command": ["postgres"], "CreatedAt": "2 hours ago", "CIDFile": "", "Exited": False,
+     "ExitedAt": 1759480000, "ExitCode": 0, "ExposedPorts": {"5432": ["tcp"]},
+     "Id": "3f1c2b9a8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a3928170f5e4d3c",
+     "Image": "docker.io/library/postgres:16", "ImageID": "b2c9" + "0" * 60, "IsInfra": False,
+     "Labels": {"com.docker.compose.project": "loja", "com.docker.compose.service": "db",
+                "com.docker.compose.depends_on": "cache:service_started:false,api:service_started:false"},
+     "Mounts": ["/var/lib/postgresql/data"], "Names": ["loja_db_1"], "Namespaces": {}, "Networks": ["loja_default"],
+     "Pid": 4242, "Pod": "", "PodName": "",
+     "Ports": [{"host_ip": "", "container_port": 5432, "host_port": 5432, "range": 1, "protocol": "tcp"},
+               {"host_ip": "127.0.0.1", "container_port": 3000, "host_port": 8000, "range": 4, "protocol": "tcp,udp"}],
+     "Restarts": 0, "Size": None, "StartedAt": 1759480000, "State": "running", "Status": "Up 2 hours (starting)",
+     "Created": 1759480000},
+    {"AutoRemove": False, "Command": None, "CreatedAt": "3 days ago", "Exited": True, "ExitedAt": 1759200000,
+     "ExitCode": 137, "Id": "a" * 64, "Image": "localhost/worker:dev", "Labels": None, "Mounts": [],
+     "Names": ["worker"], "Networks": [], "Pid": 0, "Pod": "", "PodName": "", "Ports": None,
+     "State": "stopped", "Status": "Exited (137) 3 days ago", "Created": 1759100000},
+]
+PODMAN_EXPECTED = [
+    {"ID": PODMAN_PS[0]["Id"], "Names": "loja_db_1", "Image": "docker.io/library/postgres:16", "State": "running",
+     "Status": "Up 2 hours (health: starting)",
+     "Ports": "0.0.0.0:5432->5432/tcp, 127.0.0.1:8000-8003->3000-3003/tcp, 127.0.0.1:8000-8003->3000-3003/udp",
+     "Labels": "com.docker.compose.project=loja,com.docker.compose.service=db,"
+               "com.docker.compose.depends_on=cache:service_started:false,api:service_started:false"},
+    {"ID": "a" * 64, "Names": "worker", "Image": "localhost/worker:dev", "State": "exited",
+     "Status": "Exited (137) 3 days ago", "Ports": "", "Labels": ""},
+]
+
+
+class NormalizeTest(unittest.TestCase):
+    """Saída do podman -> o formato do `docker ps` que a página lê."""
+
+    def test_docker_lines_pass_through(self):
+        row = {"ID": "a" * 12, "Names": "web", "Ports": "0.0.0.0:80->80/tcp", "Labels": "a=1"}
+        self.assertEqual(docker_gui.containers(json.dumps(row) + "\n"), [row])
+        self.assertEqual(docker_gui.containers(""), [])
+
+    def test_podman_array(self):
+        self.assertEqual(docker_gui.containers(json.dumps(PODMAN_PS, indent=2)), PODMAN_EXPECTED)
+        self.assertEqual(docker_gui.containers("[]\n"), [])
+
+    def test_podman_lines_from_docker_shim(self):
+        # podman-docker: `docker ps --format '{{json .}}'` chama o podman e sai uma linha por container
+        out = "\n".join(json.dumps(c) for c in PODMAN_PS)
+        self.assertEqual(docker_gui.containers(out), PODMAN_EXPECTED)
+
+    def test_podman3_camel_case_ports_and_states(self):
+        c = {"Id": "b" * 64, "Names": ["a", "b"], "State": "configured", "Status": "Created",
+             "Ports": [{"hostPort": 8080, "containerPort": 80, "protocol": "tcp", "hostIP": ""},
+                       {"hostPort": 0, "containerPort": 9000, "protocol": "tcp", "hostIP": ""}]}
+        got = docker_gui.from_podman(c)
+        self.assertEqual((got["Names"], got["State"], got["Ports"]), ("a,b", "created", "0.0.0.0:8080->80/tcp, 9000/tcp"))
+
 
 class LogsAndHealthTest(ServerTest):
 
@@ -208,6 +271,12 @@ class DockerCallTest(unittest.TestCase):
         run.assert_called_once_with(["docker", "ps", "-a"], capture_output=True, text=True,
                                     timeout=docker_gui.READ_TIMEOUT, check=False)
 
+    def test_cli_and_context_prefix_args(self):
+        with mock.patch.object(docker_gui, "CLI", ["podman", "--context", "prod"]), \
+                mock.patch.object(subprocess, "run", return_value=ok()) as run:
+            docker_gui.docker("ps", "-a")
+        self.assertEqual(run.call_args[0][0], ["podman", "--context", "prod", "ps", "-a"])
+
     def test_custom_timeout(self):
         with mock.patch.object(subprocess, "run", return_value=ok()) as run:
             docker_gui.docker("stop", HEX_ID, timeout=99)
@@ -290,6 +359,20 @@ class ServeTest(unittest.TestCase):
                 self.assertRaises(OSError):
             docker_gui.serve(None)
         self.assertEqual(srv.call_count, 1)  # não mascara erro de permissão tentando outras portas
+
+
+class MainTest(unittest.TestCase):
+
+    def test_cli_from_env_and_context_flag(self):
+        # patch com o próprio valor: o main() troca os globais e o mock os devolve no fim
+        with mock.patch.object(docker_gui, "CLI", docker_gui.CLI), mock.patch.object(docker_gui, "PAGE", docker_gui.PAGE), \
+                mock.patch.dict(os.environ, {"DOCKER_GUI_CLI": "podman"}), \
+                mock.patch.object(sys, "argv", ["docker_gui.py", "--context", "a b"]), \
+                mock.patch.object(docker_gui, "serve", side_effect=SystemExit):
+            self.assertRaises(SystemExit, docker_gui.main)  # para antes de abrir porta e navegador
+            self.assertEqual(docker_gui.CLI, ["podman", "--context", "a b"])
+            # o "Copiar docker exec" da página usa o mesmo comando, com aspas de shell e escapado no HTML
+            self.assertIn('data-cli="podman --context &#x27;a b&#x27;"', docker_gui.PAGE)
 
 
 @unittest.skipUnless(os.environ.get("DOCKER_GUI_E2E") == "1" and shutil.which("docker"),
