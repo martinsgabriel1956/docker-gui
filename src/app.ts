@@ -1,6 +1,6 @@
 import {
   type Bucket, type Container, type ContainerState, type DiskUsage, type Port, type Stats, type Tone,
-  bucket, esc, hasHealth, isProblem, ports, project, shortImage, status, tone, usage, workingDir,
+  bucket, esc, hasHealth, isProblem, newProblems, ports, project, shortImage, status, tone, usage, workingDir,
 } from './format';
 
 // a página é estática: todo seletor usado aqui existe no page.html
@@ -62,7 +62,7 @@ const BTN = 'px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md t
 let data: Container[] = [], busy = new Map<string, Action>(), composing = new Map<string, ComposeAction>(), errors = new Map<string, RowError>(), lastOk: Date | null = null,
     problem = '', problemKind: ProblemKind | '' = '', only: Bucket | '' = '',
     toastTimer: number | undefined, logId: string | null = null, follow: number | null = null, arming: Arming | null = null,
-    lastSay = '', dirty = false;
+    lastSay = '', dirty = false, seen: Set<string> | null = null;
 
 let toastFn: (() => unknown) | null = null;
 function toast(msg: string, ok = false, action: ToastAction | null = null) {
@@ -115,11 +115,40 @@ async function load() {
       data = j as Container[];
       if (selectingRows()) dirty = true; else render();
     }
+    notify(newProblems(seen, data));
+    seen = new Set(data.filter(isProblem).map(c => c.ID));
     showProblem(null);
   } catch (e) {
     showProblem([lastOk ? 'O servidor do Docker GUI parou de responder.' : 'Não consegui conectar ao servidor do Docker GUI.',
       'Rode <code class="font-mono">python3 docker_gui.py</code> de novo; a página volta sozinha.', (e as Error).message, 'server']);
   }
+}
+
+// notificação do sistema só por pedido explícito (botão no cabeçalho) e só para quem acabou de entrar na faixa
+// de atenção; com a página em foco ela não aparece, a lista e o favicon já mostram
+const canAsk = () => isSecureContext && 'Notification' in window && Notification.permission === 'default';
+const notifying = () => 'Notification' in window && Notification.permission === 'granted';
+async function askNotify() {
+  const ok = await Notification.requestPermission() === 'granted';
+  $('#notify').hidden = !canAsk();
+  toast(ok ? 'Pronto: aviso quando um container entrar na faixa de atenção, mesmo com a aba em segundo plano.'
+           : 'Sem permissão para notificar. Dá para liberar nas configurações do site, no navegador.', ok);
+}
+function notify(cs: Container[]) {
+  if (!cs.length || !notifying() || (!document.hidden && document.hasFocus())) return;
+  try {
+    const n = new Notification(cs.length === 1 ? `${cs[0].Names} precisa de atenção` : `${cs.length} containers precisam de atenção`,
+      {body: cs.length === 1 ? status(cs[0])[0] : cs.map(c => c.Names).join(', ')});
+    n.onclick = () => { focus(); n.close(); };
+  } catch { /* Chrome no Android só notifica via service worker; o favicon continua avisando */ }
+}
+
+// favicon: o cubo do cabeçalho com a contagem da faixa de atenção por cima ("!" quando os dados estão velhos)
+const icon = document.head.appendChild(Object.assign(document.createElement('link'), {rel: 'icon'}));
+function setIcon(badge: string) {
+  const href = 'data:image/svg+xml,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="1.8" stroke-linejoin="round"><path d="M12 2.5 3.5 7v10l8.5 4.5 8.5-4.5V7z"/><path d="M3.5 7 12 11.5 20.5 7M12 11.5v10"/>${badge
+    ? `<circle cx="16.5" cy="16.5" r="7.5" fill="#dc2626" stroke="none"/><text x="16.5" y="20" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="700" fill="#fff" stroke="none">${badge}</text>` : ''}</svg>`);
+  if (icon.getAttribute('href') !== href) icon.href = href;  // trocar o href a cada poll faz a aba piscar
 }
 
 // CPU e memória vêm à parte e mais devagar que a lista: o docker stats leva ~2 s para medir
@@ -140,6 +169,7 @@ async function statsLoop() { if (!document.hidden) await loadStats(); setTimeout
 function renderCount() {
   const n = (k: Bucket) => data.filter(c => bucket(c) === k).length, running = data.filter(c => c.State === 'running').length;
   const problemTxt = problemKind ? PROBLEM_TXT[problemKind] : '';
+  setIcon(problem ? '!' : n('problema') > 9 ? '9+' : String(n('problema') || ''));
   document.title = !lastOk && !problem ? 'Docker GUI' : !problem ? `Docker GUI · ${running} rodando${n('problema') ? ` · ${n('problema')} com problema` : ''}`
     : `Docker GUI · ${problemTxt}`;
   if (problem) {
@@ -683,12 +713,13 @@ async function prune(k: DiskKind) {
 // o HTML gerado chama estas funções pelo nome (onclick="act(...)"); com módulos nada é global, então
 // esta lista é a interface completa entre o HTML e o código
 Object.assign(window, {
-  act, afterClose, clearFilters, composeAct, copyAddr, copyExec, copyLogs, downloadLogs, filterBy, loadDisk, loadHealth,
-  loadInspect, menuPick, placeMenu, prune, refreshLogs, runToastAction, stackAct, toggleFollow,
+  act, afterClose, askNotify, clearFilters, composeAct, copyAddr, copyExec, copyLogs, downloadLogs, filterBy, loadDisk,
+  loadHealth, loadInspect, menuPick, placeMenu, prune, refreshLogs, runToastAction, stackAct, toggleFollow,
 });
 
 $('#dlg').addEventListener('close', afterClose);
 $<HTMLInputElement>('#q').oninput = render;
-// aba escondida não consulta o docker; ao voltar, atualiza na hora
+// aba escondida não consulta o docker (a não ser com as notificações ligadas: é para elas que serve); ao voltar, atualiza na hora
 document.addEventListener('visibilitychange', () => document.hidden || load());
-readHash(); render(); load(); setInterval(() => document.hidden || load(), 2000); statsLoop();
+$('#notify').hidden = !canAsk();
+readHash(); render(); load(); setInterval(() => (document.hidden && !notifying()) || load(), 2000); statsLoop();

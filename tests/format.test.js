@@ -54,6 +54,16 @@ test('bucket separa o que precisa de atenção', () => {
   }
 });
 
+test('newProblems só devolve quem acabou de entrar na faixa de atenção', () => {
+  const ok = c('running', 'Up 5 minutes', {ID: 'a'}), bad = c('exited', 'Exited (1) 1 second ago', {ID: 'b'});
+  const sick = c('running', 'Up 1 hour (unhealthy)', {ID: 'c'});
+  assert.deepEqual(f.newProblems(null, [ok, bad]), []);  // primeira leitura é só a base
+  assert.deepEqual(f.newProblems(new Set(), [ok, bad]), [bad]);
+  assert.deepEqual(f.newProblems(new Set(['b']), [ok, bad, sick]), [sick]);  // b já estava: não repete
+  // continua na faixa, só mudou o motivo: também não repete
+  assert.deepEqual(f.newProblems(new Set(['b']), [ok, c('restarting', 'Restarting (1) 2 seconds ago', {ID: 'b'})]), []);
+});
+
 test('status traduz o texto e explica o código de saída', () => {
   assert.deepEqual(f.status(c('running', 'Up 5 minutes')), ['Rodando há 5 min']);
   assert.deepEqual(f.status(c('running', 'Up 2 hours (healthy)')), ['Rodando há 2 h · saudável']);

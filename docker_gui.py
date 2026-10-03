@@ -208,6 +208,7 @@ PAGE = r"""<!doctype html>
         <kbd class="font-mono text-xs px-1 rounded ring-1 ring-line-strong text-fg-soft">/</kbd> busca ·
         <kbd class="font-mono text-xs px-1 rounded ring-1 ring-line-strong text-fg-soft">↑</kbd>
         <kbd class="font-mono text-xs px-1 rounded ring-1 ring-line-strong text-fg-soft">↓</kbd> entre os botões Logs</p>
+      <button id="notify" hidden onclick="askNotify()" class="mt-1.5 max-lg:py-3 text-xs text-accent-fg underline underline-offset-4 hover:text-accent-soft rounded focus-visible:outline-2 focus-visible:outline-accent">Notificar quando algo der problema</button>
     </div>
   </header>
   <p id="shown" class="sr-only" aria-live="polite"></p>
@@ -288,6 +289,7 @@ PAGE = r"""<!doctype html>
   var BUCKET_OF_STATE = { running: "rodando", paused: "pausado", restarting: "reiniciando" };
   var bucket = (c) => ["bad", "warn"].includes(tone(c)) ? "problema" : BUCKET_OF_STATE[c.State] || "parado";
   var isProblem = (c) => bucket(c) === "problema";
+  var newProblems = (before, cs) => before ? cs.filter((c) => isProblem(c) && !before.has(c.ID)) : [];
   var project = (c) => (c.Labels || "").match(/(?:^|,)com\.docker\.compose\.project=([^,]*)/)?.[1] || "";
   var workingDir = (c) => (c.Labels || "").match(/(?:^|,)com\.docker\.compose\.project\.working_dir=([^,]*)/)?.[1] || "";
   function dur(s) {
@@ -400,6 +402,7 @@ PAGE = r"""<!doctype html>
   var arming = null;
   var lastSay = "";
   var dirty = false;
+  var seen = null;
   var toastFn = null;
   function toast(msg, ok = false, action = null) {
     toastFn = action?.[1] || null;
@@ -450,6 +453,8 @@ PAGE = r"""<!doctype html>
         if (selectingRows()) dirty = true;
         else render();
       }
+      notify(newProblems(seen, data));
+      seen = new Set(data.filter(isProblem).map((c) => c.ID));
       showProblem(null);
     } catch (e) {
       showProblem([
@@ -459,6 +464,32 @@ PAGE = r"""<!doctype html>
         "server"
       ]);
     }
+  }
+  var canAsk = () => isSecureContext && "Notification" in window && Notification.permission === "default";
+  var notifying = () => "Notification" in window && Notification.permission === "granted";
+  async function askNotify() {
+    const ok = await Notification.requestPermission() === "granted";
+    $("#notify").hidden = !canAsk();
+    toast(ok ? "Pronto: aviso quando um container entrar na faixa de atenção, mesmo com a aba em segundo plano." : "Sem permissão para notificar. Dá para liberar nas configurações do site, no navegador.", ok);
+  }
+  function notify(cs) {
+    if (!cs.length || !notifying() || !document.hidden && document.hasFocus()) return;
+    try {
+      const n = new Notification(
+        cs.length === 1 ? `${cs[0].Names} precisa de atenção` : `${cs.length} containers precisam de atenção`,
+        { body: cs.length === 1 ? status(cs[0])[0] : cs.map((c) => c.Names).join(", ") }
+      );
+      n.onclick = () => {
+        focus();
+        n.close();
+      };
+    } catch {
+    }
+  }
+  var icon = document.head.appendChild(Object.assign(document.createElement("link"), { rel: "icon" }));
+  function setIcon(badge) {
+    const href = "data:image/svg+xml," + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="1.8" stroke-linejoin="round"><path d="M12 2.5 3.5 7v10l8.5 4.5 8.5-4.5V7z"/><path d="M3.5 7 12 11.5 20.5 7M12 11.5v10"/>${badge ? `<circle cx="16.5" cy="16.5" r="7.5" fill="#dc2626" stroke="none"/><text x="16.5" y="20" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="700" fill="#fff" stroke="none">${badge}</text>` : ""}</svg>`);
+    if (icon.getAttribute("href") !== href) icon.href = href;
   }
   var stats = {};
   async function loadStats() {
@@ -480,6 +511,7 @@ PAGE = r"""<!doctype html>
   function renderCount() {
     const n = (k) => data.filter((c) => bucket(c) === k).length, running = data.filter((c) => c.State === "running").length;
     const problemTxt = problemKind ? PROBLEM_TXT[problemKind] : "";
+    setIcon(problem ? "!" : n("problema") > 9 ? "9+" : String(n("problema") || ""));
     document.title = !lastOk && !problem ? "Docker GUI" : !problem ? `Docker GUI · ${running} rodando${n("problema") ? ` · ${n("problema")} com problema` : ""}` : `Docker GUI · ${problemTxt}`;
     if (problem) {
       const t = lastOk?.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
@@ -976,6 +1008,7 @@ PAGE = r"""<!doctype html>
   Object.assign(window, {
     act,
     afterClose,
+    askNotify,
     clearFilters,
     composeAct,
     copyAddr,
@@ -997,10 +1030,11 @@ PAGE = r"""<!doctype html>
   $("#dlg").addEventListener("close", afterClose);
   $("#q").oninput = render;
   document.addEventListener("visibilitychange", () => document.hidden || load());
+  $("#notify").hidden = !canAsk();
   readHash();
   render();
   load();
-  setInterval(() => document.hidden || load(), 2e3);
+  setInterval(() => document.hidden && !notifying() || load(), 2e3);
   statsLoop();
 })();
 </script>
