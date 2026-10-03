@@ -110,6 +110,20 @@ test('porta HTTP de container parado não vira link', async ({ page, gui }) => {
   await expect(row(page, 'web').locator('a')).toHaveCount(0);
 });
 
+test('faixa curta de portas vira um chip por porta; faixa longa vira um chip só, sem ação', async ({ page, gui }) => {
+  await gui.open({
+    containers: [
+      ctr('front', { Ports: '0.0.0.0:4000-4003->4000-4003/tcp, [::]:4000-4003->4000-4003/tcp' }),
+      ctr('media', { Ports: '0.0.0.0:20000-20099->20000-20099/udp' }),
+    ],
+  });
+  const hrefs = await row(page, 'front').locator('a').evaluateAll(as => as.map(a => a.getAttribute('href')));
+  expect(hrefs).toEqual(['http://localhost:4000', 'http://localhost:4001', 'http://localhost:4002', 'http://localhost:4003']);
+  const media = row(page, 'media');
+  await expect(media.locator('span[title^="Faixa de portas"]')).toHaveText('20000-20099→20000-20099/udp');
+  await expect(media.locator('a, button[onclick^="copyAddr"]')).toHaveCount(0);
+});
+
 test('lista vazia explica como começar', async ({ page, gui }) => {
   await gui.open({ containers: [] });
   await expect(page.locator('#rows')).toHaveText('Nenhum container ainda. Crie um com docker run.');
