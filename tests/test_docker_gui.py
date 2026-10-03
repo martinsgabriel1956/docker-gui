@@ -96,7 +96,8 @@ class TokenTest(ServerTest):
     def test_api_requires_token(self):
         for token in (None, "", "errado", docker_gui.TOKEN[:-1], docker_gui.TOKEN + "x"):
             for method, path in (("GET", "/api/containers"), ("GET", "/api/stats"), ("GET", f"/api/logs/{HEX_ID}"),
-                                 ("GET", f"/api/health/{HEX_ID}"), ("POST", f"/api/stop/{HEX_ID}"),
+                                 ("GET", f"/api/health/{HEX_ID}"), ("GET", f"/api/inspect/{HEX_ID}"),
+                                 ("GET", f"/api/inspect/{HEX_ID}/env"), ("POST", f"/api/stop/{HEX_ID}"),
                                  ("GET", "/api/df"), ("POST", "/api/prune/images")):
                 status, _ = self.request(method, path, token=token)
                 self.assertEqual(status, 401, (token, method, path))
@@ -157,6 +158,44 @@ class LogsAndHealthTest(ServerTest):
     def test_health_error(self):
         self.docker.return_value = fail("No such object\n")
         self.assertEqual(self.request("GET", f"/api/health/{HEX_ID}"), (500, "No such object"))
+
+
+class InspectTest(ServerTest):
+    """Resumo do inspect. O env sai mascarado; o valor real só vem pelo /env."""
+
+    INFO: ClassVar[dict] = {
+        "HostConfig": {"RestartPolicy": {"Name": "on-failure", "MaximumRetryCount": 3}},
+        "NetworkSettings": {"Networks": {"app_default": {"IPAddress": "172.18.0.2"}, "host": {"IPAddress": ""}}},
+        "Mounts": [{"Type": "volume", "Name": "pgdata", "Source": "/var/lib/docker/volumes/pgdata/_data",
+                    "Destination": "/var/lib/postgresql/data", "RW": True, "Driver": "local"}],
+        "Config": {"Env": ["POSTGRES_PASSWORD=s3cr3t=x", "EMPTY=", "BARE"]}}
+
+    def test_env_masked_by_default(self):
+        self.docker.return_value = ok(json.dumps(self.INFO) + "\n")
+        status, body = self.request("GET", f"/api/inspect/{HEX_ID}")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, {
+            "Restart": "on-failure:3",
+            "Networks": {"app_default": "172.18.0.2", "host": ""},
+            "Mounts": [{"Type": "volume", "Name": "pgdata", "Source": "/var/lib/docker/volumes/pgdata/_data",
+                        "Destination": "/var/lib/postgresql/data", "RW": True}],
+            "Env": [["POSTGRES_PASSWORD", None], ["EMPTY", None], ["BARE", None]]})
+        self.docker.assert_called_once_with("inspect", "--format", "{{json .}}", HEX_ID)
+
+    def test_env_revealed_on_request(self):
+        self.docker.return_value = ok(json.dumps(self.INFO))
+        _, body = self.request("GET", f"/api/inspect/{HEX_ID}/env")
+        self.assertEqual(body["Env"], [["POSTGRES_PASSWORD", "s3cr3t=x"], ["EMPTY", ""], ["BARE", ""]])
+
+    def test_minimal_inspect(self):
+        # container sem restart policy, rede, mount nem env (ou campos null, como o docker às vezes manda)
+        for info in ({}, {"HostConfig": {"RestartPolicy": {"Name": "", "MaximumRetryCount": 0}},
+                          "NetworkSettings": {"Networks": None}, "Mounts": None, "Config": {"Env": None}}):
+            self.assertEqual(docker_gui.summary(info), {"Restart": "no", "Networks": {}, "Mounts": [], "Env": []})
+
+    def test_inspect_error(self):
+        self.docker.return_value = fail("Error: No such object: 0123456789ab\n")
+        self.assertEqual(self.request("GET", f"/api/inspect/{HEX_ID}"), (500, "Error: No such object: 0123456789ab"))
 
 
 class ActionsTest(ServerTest):
@@ -304,7 +343,8 @@ class IdValidationTest(ServerTest):
 
     def test_bad_ids_never_reach_docker(self):
         for bad in self.BAD_IDS:
-            for method, path in (("POST", f"/api/stop/{bad}"), ("GET", f"/api/logs/{bad}"), ("GET", f"/api/health/{bad}")):
+            for method, path in (("POST", f"/api/stop/{bad}"), ("GET", f"/api/logs/{bad}"), ("GET", f"/api/health/{bad}"),
+                                 ("GET", f"/api/inspect/{bad}"), ("GET", f"/api/inspect/{bad}/env")):
                 status, _ = self.request(method, path)
                 self.assertEqual(status, 404, path)
         self.docker.assert_not_called()
@@ -314,7 +354,8 @@ class IdValidationTest(ServerTest):
         self.assertEqual(status, 200)
 
     def test_unknown_path(self):
-        for path in ("/api", "/api/", "/api/containers/", "/favicon.ico", "/index.html"):
+        for path in ("/api", "/api/", "/api/containers/", "/favicon.ico", "/index.html",
+                     f"/api/inspect/{HEX_ID}/", f"/api/inspect/{HEX_ID}/envx", f"/api/inspect/{HEX_ID}?env=1"):
             status, _ = self.request("GET", path)
             self.assertEqual(status, 404, path)
 
@@ -462,6 +503,12 @@ class RealDockerTest(ServerTest):
 
         status, health = self.request("GET", f"/api/health/{short}")
         self.assertEqual((status, health), (200, None))  # sem HEALTHCHECK na imagem
+
+        status, insp = self.request("GET", f"/api/inspect/{short}")
+        self.assertEqual((status, insp["Restart"]), (200, "no"))
+        self.assertIn(["PATH", None], insp["Env"])  # mascarado
+        _, insp = self.request("GET", f"/api/inspect/{short}/env")
+        self.assertTrue(any(k == "PATH" and v for k, v in insp["Env"]))
 
         self.assertEqual(self.request("POST", f"/api/remove/{short}"), (200, ""))
         _, rows = self.request("GET", "/api/containers")

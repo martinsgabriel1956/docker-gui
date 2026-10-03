@@ -16,6 +16,7 @@ export type Container = {
   ID: string; Names: string; Image: string; State: string; Status: string; Ports: string; Labels: string;
   logs?: string;
   health?: { Status: string; Log: { ExitCode: number; Output: string }[] } | null;
+  inspect?: Record<string, unknown>;
   fail?: Partial<Record<Action, string>>;
   delay?: Partial<Record<Action, number>>;
   after?: Partial<Record<Action, { State: string; Status: string }>>;

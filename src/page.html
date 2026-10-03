@@ -67,6 +67,10 @@
       <button onclick="downloadLogs()" class="px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Baixar .log</button>
       <span id="lmeta" class="ml-auto text-xs text-muted">Últimas 500 linhas</span>
     </div>
+    <details id="insp" ontoggle="this.open && loadInspect()" class="text-xs">
+      <summary class="cursor-pointer w-fit py-1 max-lg:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent text-muted hover:text-fg">Configuração: restart, redes, mounts e env</summary>
+      <div id="insp-body" class="mt-1 max-h-[30vh] overflow-auto">Carregando…</div>
+    </details>
     <div id="dlg-msg" role="status" aria-live="polite" class="empty:hidden"></div>
   </div>
   <pre id="lb" tabindex="0" aria-label="Saída dos logs" class="focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent h-[65vh] overflow-auto p-4 text-xs leading-relaxed font-mono text-fg-soft whitespace-pre-wrap [overflow-wrap:anywhere]"></pre>

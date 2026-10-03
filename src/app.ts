@@ -29,6 +29,9 @@ type ComposeAction = 'up' | 'down' | 'pull';
 // uma categoria do disco; a é o data-a do botão e note vai para o leitor de tela
 type Arming = {id: string; name: string; a: 'remove' | 'down' | 'prune'; note: string; at: number; timer: number};
 type Health = {Log?: {ExitCode: number; Output: string}[]} | null;
+// resumo do /api/inspect; o valor do env vem null (mascarado) até o usuário pedir para revelar
+type Inspect = {Restart: string; Networks: Record<string, string>; Env: [key: string, value: string | null][];
+                Mounts: {Type: string; Name: string; Source: string; Destination: string; RW: boolean}[]};
 // linha da tabela com o HTML que a gerou, para o patchRows saber se mudou
 type Row = HTMLElement & {_html?: string};
 
@@ -581,6 +584,33 @@ function copyLogs() {
   navigator.clipboard.writeText($('#lb').textContent ?? '').then(() => toast('Logs copiados.', true), () => toast('Não consegui copiar.'));
 }
 
+function inspectHtml(d: Inspect, reveal: boolean) {
+  const list = (xs: string[]) => xs.length ? xs.map(x => `<div>${x}</div>`).join('') : '<span class="font-sans text-muted">nenhum</span>';
+  const nets = Object.entries(d.Networks).map(([n, ip]) => esc(ip ? `${n} · ${ip}` : n));
+  const mounts = d.Mounts.map(m => esc(`${[m.Type, m.Name || m.Source].filter(Boolean).join(' ')} → ${m.Destination}${m.RW ? '' : ' (somente leitura)'}`));
+  const env = d.Env.map(([k, v]) => `${esc(k)}=${v === null ? '<span aria-hidden="true">••••••</span><span class="sr-only">(oculto)</span>' : esc(v)}`);
+  const dt = 'font-sans text-muted';
+  return `<dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 font-mono text-fg-soft [overflow-wrap:anywhere]">
+    <dt class="${dt}">Restart</dt><dd>${esc(d.Restart)}</dd>
+    <dt class="${dt}">Redes</dt><dd>${list(nets)}</dd>
+    <dt class="${dt}">Mounts</dt><dd>${list(mounts)}</dd>
+    <dt class="${dt}">Env</dt><dd>${list(env)}${d.Env.length ? `<button id="insp-env" onclick="loadInspect(${!reveal})"
+      class="mt-1.5 ${BTN} font-sans text-fg hover:bg-hover">${reveal ? 'Ocultar valores' : 'Revelar valores'}</button>` : ''}</dd></dl>`;
+}
+
+// abrir o "Configuração" sempre busca mascarado; o valor real do env só vem pelo botão Revelar
+async function loadInspect(reveal = false) {
+  const id = logId, refocus = document.activeElement?.id === 'insp-env';
+  let html: string;
+  try {
+    const r = await api(`/api/inspect/${id}${reveal ? '/env' : ''}`), j: unknown = await r.json();
+    html = r.ok ? inspectHtml(j as Inspect, reveal) : esc(`Não consegui ler o inspect: ${j}`);
+  } catch { html = 'Não consegui ler o inspect.'; }
+  if (id !== logId || !$<HTMLDetailsElement>('#insp').open) return;  // trocou de container ou fechou enquanto carregava
+  $('#insp-body').innerHTML = html;
+  if (refocus) $('#insp-env')?.focus();
+}
+
 // baixa o que está na tela (com os timestamps do docker), sem ir de novo ao servidor
 function downloadLogs() {
   const a = document.createElement('a');
@@ -592,6 +622,8 @@ function downloadLogs() {
 // roda no × direto e também no evento close (Esc); chamar duas vezes não faz mal
 function afterClose() {
   toggleFollow(false);
+  // fecha o "Configuração" e apaga o que estava nele: env revelado não fica na página
+  $('#insp').removeAttribute('open'); $('#insp-body').textContent = 'Carregando…';
   // a linha pode ter sido redesenhada com o modal aberto; foca o botão Logs atual dela
   document.querySelector<HTMLElement>(`[data-id="${logId}"][data-a="logs"]`)?.focus();
 }
@@ -652,7 +684,7 @@ async function prune(k: DiskKind) {
 // esta lista é a interface completa entre o HTML e o código
 Object.assign(window, {
   act, afterClose, clearFilters, composeAct, copyAddr, copyExec, copyLogs, downloadLogs, filterBy, loadDisk, loadHealth,
-  menuPick, placeMenu, prune, refreshLogs, runToastAction, stackAct, toggleFollow,
+  loadInspect, menuPick, placeMenu, prune, refreshLogs, runToastAction, stackAct, toggleFollow,
 });
 
 $('#dlg').addEventListener('close', afterClose);
