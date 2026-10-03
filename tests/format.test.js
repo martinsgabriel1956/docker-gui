@@ -134,6 +134,15 @@ test('project lê o label do compose sem quebrar nas vírgulas do depends_on', (
   assert.equal(f.project({}), '');
 });
 
+test('workingDir lê a pasta do projeto compose', () => {
+  const labels = 'com.docker.compose.project=shop,com.docker.compose.project.working_dir=/srv/shop,'
+               + 'com.docker.compose.project.config_files=/srv/shop/a.yml,/srv/shop/b.yml';
+  assert.equal(f.workingDir({Labels: labels}), '/srv/shop');
+  assert.equal(f.project({Labels: labels}), 'shop');
+  assert.equal(f.workingDir({Labels: 'com.docker.compose.project=shop'}), '');
+  assert.equal(f.workingDir({}), '');
+});
+
 test('shortImage tira o host do registry e mantém a tag', () => {
   assert.equal(f.shortImage('ghcr.io/acme/api:1.4'), 'acme/api:1.4');
   assert.equal(f.shortImage('localhost:5000/app:dev'), 'app:dev');
@@ -149,4 +158,9 @@ test('esc neutraliza HTML', () => {
 
 test('todo código de saída explicado tem texto', () => {
   for (const [code, txt] of Object.entries(f.EXIT)) assert.ok(txt.length > 3, code);
+});
+
+test('usage mostra CPU e a memória usada; o limite fica no title', () => {
+  assert.deepEqual(f.usage({ID: 'a', CPUPerc: '0.52%', MemUsage: '10.5MiB / 1.944GiB', MemPerc: '0.53%'}),
+                   ['CPU 0.52% · RAM 10.5MiB', 'Memória: 10.5MiB / 1.944GiB (0.53%)']);
 });

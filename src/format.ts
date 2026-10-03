@@ -15,7 +15,16 @@ export interface Container {
   Labels: string;
 }
 
-export type Tone = 'ok' | 'check' | 'warn' | 'busy' | 'bad' | 'pause' | 'off';
+// uma linha do `docker system df --format '{{json .}}'`; os tamanhos já vêm formatados ("4.01GB", "165MB (14%)")
+export interface DiskUsage {
+  Type: string;
+  TotalCount: string;
+  Active: string;
+  Size: string;
+  Reclaimable: string;
+}
+
+export type Tone ='ok' | 'check' | 'warn' | 'busy' | 'bad' | 'pause' | 'off';
 export type Bucket = 'problema' | 'rodando' | 'pausado' | 'reiniciando' | 'parado';
 // [texto, dica opcional]
 export type StatusText = [text: string, hint?: string];
@@ -52,6 +61,9 @@ export const newProblems = (before: Set<string> | null, cs: Container[]): Contai
 // depends_on tem vírgulas no valor, então não dá para fazer split nos Labels; regex só no project
 export const project = (c: Pick<Container, 'Labels'>): string =>
   (c.Labels || '').match(/(?:^|,)com\.docker\.compose\.project=([^,]*)/)?.[1] || '';
+// pasta do projeto compose (vai para o compose up/down/pull; o servidor confere contra os labels)
+export const workingDir = (c: Pick<Container, 'Labels'>): string =>
+  (c.Labels || '').match(/(?:^|,)com\.docker\.compose\.project\.working_dir=([^,]*)/)?.[1] || '';
 
 // "About an hour" -> "~1 h", "23 minutes" -> "23 min", "Less than a second" -> "<1 s"
 export function dur(s: string): string {
@@ -94,3 +106,15 @@ export const ports = (p: string): Port[] => {
 // "ghcr.io/acme/api:1.4" -> "acme/api:1.4": o host do registry raramente importa; a tag sim
 export const shortImage = (img: string): string => img.replace(/^[^/]+[.:][^/]*\//, '');
 export const hasHealth = (c: Container): boolean => /\((un)?healthy\)|health: starting/.test(c.Status);
+
+// uma linha do `docker stats --no-stream --format '{{json .}}'`, só com os campos que a página lê
+export interface Stats {
+  ID: string;
+  CPUPerc: string;   // "0.52%"
+  MemUsage: string;  // "10.5MiB / 1.944GiB"
+  MemPerc: string;   // "0.53%"
+}
+
+// [texto curto, title com o limite de memória]
+export const usage = (s: Stats): StatusText =>
+  [`CPU ${s.CPUPerc} · RAM ${s.MemUsage.split(' / ')[0]}`, `Memória: ${s.MemUsage} (${s.MemPerc})`];

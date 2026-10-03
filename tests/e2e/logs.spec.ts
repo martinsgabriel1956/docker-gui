@@ -15,6 +15,18 @@ test('Logs abre o modal com a saída do container', async ({ page, gui }) => {
   await expect(page.locator('#dlg-status')).toHaveText('Rodando há 5 min');
 });
 
+test('Baixar .log salva o que está na tela com o nome do container', async ({ page, gui }) => {
+  const text = '2026-10-03T12:00:00.000000000Z listening on :80\n';
+  await gui.open({ containers: [ctr('web', { logs: text })] });
+  await page.getByRole('button', { name: 'Logs web' }).click();
+  await expect(page.locator('#lb')).toHaveText(text);
+  const [download] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: 'Baixar .log' }).click()]);
+  expect(download.suggestedFilename()).toBe('web.log');
+  const chunks: Buffer[] = [];
+  for await (const chunk of await download.createReadStream()) chunks.push(chunk as Buffer);
+  expect(Buffer.concat(chunks).toString()).toBe(text);
+});
+
 test('container sem logs diz isso em vez de ficar em branco', async ({ page, gui }) => {
   await gui.open({ containers: [ctr('web')] });
   await page.getByRole('button', { name: 'Logs web' }).click();
