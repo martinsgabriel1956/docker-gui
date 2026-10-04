@@ -6,7 +6,9 @@ import os
 import shutil
 import socket
 import subprocess
+import tempfile
 import threading
+import time
 import unittest
 from http.server import ThreadingHTTPServer
 from typing import ClassVar
@@ -158,6 +160,65 @@ class LogsAndHealthTest(ServerTest):
     def test_health_error(self):
         self.docker.return_value = fail("No such object\n")
         self.assertEqual(self.request("GET", f"/api/health/{HEX_ID}"), (500, "No such object"))
+
+
+@unittest.skipUnless(os.name == "posix", "usa script shell")
+class LogsStreamTest(ServerTest):
+    """Logs ao vivo (SSE): o docker é um script shell de verdade, porque o stream roda um processo longo."""
+
+    def setUp(self):
+        super().setUp()
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.dir = d.name
+        patcher = mock.patch.dict(os.environ, {"PATH": d.name + os.pathsep + os.environ.get("PATH", "")})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def fake_docker(self, body):
+        path = os.path.join(self.dir, "docker")
+        with open(path, "w") as f:
+            f.write(f'#!/bin/sh\necho "$@" > {self.dir}/args\n{body}\n')
+        os.chmod(path, 0o755)
+
+    def path(self, token=docker_gui.TOKEN):
+        return f"/api/logs/{HEX_ID}/stream" + (f"?t={token}" if token is not None else "")
+
+    def test_lines_become_events_and_end(self):
+        self.fake_docker("printf 'um\\ndois\\r\\nsem quebra no fim'")
+        status, body = self.request("GET", self.path())
+        self.assertEqual(status, 200)
+        self.assertEqual(body, 'data: "um\\n"\n\ndata: "dois\\r\\n"\n\ndata: "sem quebra no fim"\n\nevent: end\ndata:\n\n')
+        with open(os.path.join(self.dir, "args")) as f:
+            self.assertEqual(f.read().split(), ["logs", "-f", "--timestamps", "--tail", "500", HEX_ID])
+
+    def test_token_goes_in_query(self):
+        self.fake_docker("echo nunca")
+        for token in (None, "", "errado", docker_gui.TOKEN[:-1]):
+            status, _ = self.request("GET", self.path(token))  # o header com o token certo não vale aqui
+            self.assertEqual(status, 401, token)
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "args")))
+
+    def test_disconnect_kills_docker_and_server_keeps_serving(self):
+        self.fake_docker(f"echo $$ > {self.dir}/pid\necho oi\nexec sleep 30")
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        conn.request("GET", self.path(), headers={"Host": f"localhost:{self.port}"})
+        r = conn.getresponse()
+        self.assertEqual(r.getheader("Content-Type"), "text/event-stream; charset=utf-8")
+        self.assertEqual(r.readline(), b'data: "oi\\n"\n')
+        # com o stream aberto, o resto da API continua respondendo
+        self.assertEqual(self.request("GET", "/api/containers"), (200, []))
+        with open(os.path.join(self.dir, "pid")) as f:
+            pid = int(f.read())
+        r.close()  # a resposta segura o socket aberto: sem fechar as duas, a conexão não cai
+        conn.close()
+        for _ in range(50):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.1)
+        self.fail("docker logs -f continuou vivo depois que o cliente desconectou")
 
 
 class InspectTest(ServerTest):
@@ -344,7 +405,8 @@ class IdValidationTest(ServerTest):
     def test_bad_ids_never_reach_docker(self):
         for bad in self.BAD_IDS:
             for method, path in (("POST", f"/api/stop/{bad}"), ("GET", f"/api/logs/{bad}"), ("GET", f"/api/health/{bad}"),
-                                 ("GET", f"/api/inspect/{bad}"), ("GET", f"/api/inspect/{bad}/env")):
+                                 ("GET", f"/api/inspect/{bad}"), ("GET", f"/api/inspect/{bad}/env"),
+                                 ("GET", f"/api/logs/{bad}/stream?t={docker_gui.TOKEN}")):
                 status, _ = self.request(method, path)
                 self.assertEqual(status, 404, path)
         self.docker.assert_not_called()

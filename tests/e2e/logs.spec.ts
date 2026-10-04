@@ -47,6 +47,28 @@ test('Acompanhar ao vivo traz as linhas novas e para ao fechar', async ({ page, 
   await expect(page.locator('#follow')).toHaveAttribute('aria-pressed', 'false');
 });
 
+test('ao vivo para sozinho quando o container para', async ({ page, gui }) => {
+  await gui.open({ containers: [ctr('web', { logs: 'linha 1\n' })] });
+  await page.getByRole('button', { name: 'Logs web' }).click();
+  await page.locator('#follow').click();
+  await expect(page.locator('#lmeta')).toHaveText('Ao vivo · últimas 500 linhas e as novas');
+  gui.update(s => { Object.assign(s.containers[0], { logs: 'linha 1\nsaindo\n', State: 'exited', Status: 'Exited (0) 1 second ago' }); });
+  await expect(page.locator('#follow')).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('#lb')).toHaveText('linha 1\nsaindo\n');
+  await expect(page.locator('#lmeta')).toContainText('o container parou');
+});
+
+test('ao vivo guarda no máximo 5000 linhas', async ({ page, gui }) => {
+  await gui.open({ containers: [ctr('web', { logs: 'linha 0\n' })] });
+  await page.getByRole('button', { name: 'Logs web' }).click();
+  await page.locator('#follow').click();
+  await expect(page.locator('#lb')).toHaveText('linha 0\n');
+  gui.update(s => { s.containers[0].logs = Array.from({ length: 6000 }, (_, i) => `linha ${i}\n`).join(''); });
+  await expect(page.locator('#lb')).toContainText('linha 5999');
+  await expect.poll(() => page.locator('#lb').evaluate(lb => [lb.childNodes.length, lb.textContent!.split('\n')[0]]))
+    .toEqual([5000, 'linha 1000']);
+});
+
 test('fechar o modal devolve o foco ao botão Logs da linha', async ({ page, gui }) => {
   await gui.open({ containers: [ctr('a'), ctr('web')] });
   await page.getByRole('button', { name: 'Logs web' }).click();
