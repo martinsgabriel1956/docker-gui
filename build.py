@@ -7,6 +7,7 @@
 """
 import argparse
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -33,10 +34,13 @@ def bundle():
     if not ESBUILD.exists():
         sys.exit("esbuild não encontrado: rode npm ci")
     r = subprocess.run([str(ESBUILD), str(ENTRY), "--bundle", "--format=iife", "--target=es2022", "--charset=utf8",
+                        "--loader:.css=text",  # o CSS do xterm vira string, injetada num <style> pelo app.ts
                         "--log-level=warning"], cwd=ROOT, capture_output=True, text=True, check=False)
     if r.returncode:
         sys.exit(r.stderr)
-    return r.stdout
+    # o xterm.js tem caracteres de controle crus em strings ("\x16"...): no .py eles viram armadilha (o ruff
+    # acusa, editores escondem). Escapados como \xNN, que no JS vale o mesmo dentro de string e regex
+    return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", lambda m: f"\\x{ord(m[0]):02x}", r.stdout)
 
 
 def page():

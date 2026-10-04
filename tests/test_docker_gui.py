@@ -1,10 +1,12 @@
 """Testes do backend. Só stdlib: o docker CLI é trocado por mock, exceto em RealDockerTest."""
 import errno
 import http.client
+import io
 import json
 import os
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -515,7 +517,6 @@ class DockerCallTest(unittest.TestCase):
         # um "docker" que trava de verdade: o processo tem que ser morto no prazo
         if os.name != "posix":
             self.skipTest("usa script shell")
-        import tempfile
         with tempfile.TemporaryDirectory() as d:
             fake = os.path.join(d, "docker")
             with open(fake, "w") as f:
@@ -581,6 +582,191 @@ class ServeTest(unittest.TestCase):
                 self.assertRaises(OSError):
             docker_gui.serve(None)
         self.assertEqual(srv.call_count, 1)  # não mascara erro de permissão tentando outras portas
+
+
+def client_frame(payload, opcode=2, mask=b"\x01\x02\x03\x04"):
+    """Frame como o navegador manda: FIN e mascarado."""
+    n = len(payload)
+    size = bytes([0x80 | n]) if n < 126 else struct.pack("!BH", 0x80 | 126, n) if n < 1 << 16 \
+        else struct.pack("!BQ", 0x80 | 127, n)
+    return bytes([0x80 | opcode]) + size + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+
+
+class WebSocketFramesTest(unittest.TestCase):
+
+    def test_accept_key_from_rfc(self):
+        self.assertEqual(docker_gui.ws_accept("dGhlIHNhbXBsZSBub25jZQ=="), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
+
+    def test_server_frame_lengths(self):
+        for n, head in ((5, b"\x82\x05"), (200, b"\x82\x7e\x00\xc8"), (70000, b"\x82\x7f" + (70000).to_bytes(8, "big"))):
+            payload = os.urandom(n)
+            self.assertEqual(docker_gui.ws_frame(payload), head + payload, n)
+        self.assertEqual(docker_gui.ws_frame(b"\x03\xe8", 8), b"\x88\x02\x03\xe8")
+
+    def test_read_unmasks(self):
+        # exemplo do RFC 6455 5.7: "Hello" mascarado
+        rfc = bytes.fromhex("818537fa213d7f9f4d5158")
+        self.assertEqual(docker_gui.ws_read(io.BytesIO(rfc)), (1, b"Hello"))
+        for n in (0, 5, 200, 70000):
+            payload = os.urandom(n)
+            self.assertEqual(docker_gui.ws_read(io.BytesIO(client_frame(payload))), (2, payload), n)
+
+    def test_rejects_bad_frames(self):
+        good = client_frame(b"hello")
+        too_big = b"\x82\xff" + (docker_gui.WS_MAX + 1).to_bytes(8, "big") + b"\x00" * 4
+        for bad in (b"", b"\x82",
+                    docker_gui.ws_frame(b"hello"),  # sem máscara
+                    good[:-1], good[:4],            # cortados no meio do payload e da máscara
+                    too_big, b"\x82\xff" + b"\xff" * 8):
+            self.assertIsNone(docker_gui.ws_read(io.BytesIO(bad)), bad[:12])
+
+
+FAKE_EXEC = """#!/bin/sh
+echo $$ > "$FAKE_EXEC_DIR/pid"
+printf '%s\\n' "$@" > "$FAKE_EXEC_DIR/args"
+IFS= read -r line
+stty size
+echo "got:$line"
+"""
+
+
+@unittest.skipUnless(os.name == "posix", "PTY só existe em Unix")
+class TerminalTest(ServerTest):
+    """WebSocket de /api/exec contra um docker falso no PATH: grava pid e argv, lê uma linha e mostra o tamanho."""
+
+    mock_docker = False
+
+    def setUp(self):
+        super().setUp()
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir)
+        fake = os.path.join(self.dir, "docker")
+        with open(fake, "w") as f:
+            f.write(FAKE_EXEC)
+        os.chmod(fake, 0o755)
+        env = {"PATH": self.dir + os.pathsep + os.environ.get("PATH", ""), "FAKE_EXEC_DIR": self.dir}
+        patcher = mock.patch.dict(os.environ, env)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def connect(self, path=None, origin="", headers=None):
+        """Handshake cru. Devolve (status, headers, socket, arquivo de leitura)."""
+        origin = f"http://localhost:{self.port}" if origin == "" else origin
+        lines = [f"GET {path or f'/api/exec/{HEX_ID}?t={docker_gui.TOKEN}'} HTTP/1.1", f"Host: localhost:{self.port}"]
+        if origin is not None:
+            lines.append(f"Origin: {origin}")
+        hdrs = {"Upgrade": "websocket", "Connection": "Upgrade", "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+                "Sec-WebSocket-Version": "13"}
+        hdrs.update(headers or {})
+        lines += [f"{k}: {v}" for k, v in hdrs.items() if v is not None]
+        sock = socket.create_connection(("127.0.0.1", self.port), timeout=10)
+        self.addCleanup(sock.close)
+        sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode("utf-8"))
+        f = sock.makefile("rb")
+        self.addCleanup(f.close)
+        status = int(f.readline().split()[1])
+        got = {}
+        for line in iter(f.readline, b"\r\n"):
+            k, _, v = line.decode().partition(":")
+            got[k.lower()] = v.strip()
+        return status, got, sock, f
+
+    @staticmethod
+    def recv(f):
+        head = f.read(2)
+        n = head[1] & 0x7F
+        if n >= 126:
+            n = int.from_bytes(f.read(2 if n == 126 else 8), "big")
+        return head[0] & 0x0F, f.read(n)
+
+    def no_process(self):
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "pid")), "o docker exec não devia ter rodado")
+
+    def started(self):
+        path = os.path.join(self.dir, "pid")
+        for _ in range(100):
+            if os.path.exists(path):
+                with open(path) as f:
+                    pid = f.read().strip()
+                if pid:
+                    return int(pid)
+            time.sleep(0.05)
+        self.fail("o docker exec não rodou")
+
+    def open_session(self):
+        status, headers, sock, f = self.connect()
+        self.assertEqual(status, 101)
+        self.assertEqual(headers["sec-websocket-accept"], "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
+        sock.sendall(client_frame(b'{"cols": 80, "rows": 24}', 1))
+        return sock, f
+
+    def test_origin_rejected(self):
+        p = self.port
+        for origin in (None, "null", f"https://localhost:{p}", f"http://localhost:{p + 1}", f"http://evil.com:{p}",
+                       "http://localhost", f"http://127.0.0.1:{p}.evil.com"):
+            self.assertEqual(self.connect(origin=origin)[0], 403, origin)
+        self.no_process()
+
+    def test_origin_on_ip_accepted(self):
+        status, _, _sock, _ = self.connect(origin=f"http://127.0.0.1:{self.port}")
+        self.assertEqual(status, 101)
+
+    def test_token_rejected(self):
+        for query in ("", "?t=", "?t=errado", f"?t={docker_gui.TOKEN[:-1]}", f"?t={docker_gui.TOKEN}x",
+                      "?t=%C3%A7", "?t=ç", f"?x={docker_gui.TOKEN}"):
+            self.assertEqual(self.connect(f"/api/exec/{HEX_ID}{query}")[0], 401, query)
+        self.no_process()
+
+    def test_bad_ids_never_run(self):
+        for bad in IdValidationTest.BAD_IDS:
+            status = self.connect(f"/api/exec/{bad}?t={docker_gui.TOKEN}")[0]
+            self.assertIn(status, (401, 404), bad)
+        self.no_process()
+
+    def test_needs_upgrade_headers(self):
+        for headers in ({"Upgrade": None}, {"Upgrade": "h2c"}, {"Sec-WebSocket-Key": None}):
+            self.assertEqual(self.connect(headers=headers)[0], 400, headers)
+        self.no_process()
+
+    def test_session(self):
+        sock, f = self.open_session()
+        sock.sendall(client_frame(b'{"cols": 100, "rows": 30}', 1) + client_frame(b"hello\n"))
+        out = b""
+        while True:
+            op, data = self.recv(f)
+            if op == 8:
+                break
+            self.assertEqual(op, 2)
+            out += data
+        self.assertEqual(data, struct.pack("!H", 1000))  # o processo saiu: close normal
+        self.assertIn(b"30 100", out)
+        self.assertIn(b"got:hello", out)
+        with open(os.path.join(self.dir, "args")) as a:
+            self.assertEqual(a.read().splitlines(), ["exec", "-it", HEX_ID, *docker_gui.SHELL])
+
+    def test_ping_pong(self):
+        sock, f = self.open_session()
+        sock.sendall(client_frame(b"abc", 9))
+        self.assertEqual(self.recv(f), (10, b"abc"))
+
+    def test_closing_socket_kills_process(self):
+        sock, _f = self.open_session()
+        pid = self.started()
+        sock.shutdown(socket.SHUT_RDWR)
+        for _ in range(100):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.05)
+        self.fail("o docker exec continuou rodando depois que o navegador fechou")
+
+    def test_first_message_must_be_size(self):
+        status, _, sock, f = self.connect()
+        self.assertEqual(status, 101)
+        sock.sendall(client_frame(b"ls\n"))
+        self.assertEqual(f.read(), b"")  # fecha sem rodar nada
+        self.no_process()
 
 
 class MainTest(unittest.TestCase):

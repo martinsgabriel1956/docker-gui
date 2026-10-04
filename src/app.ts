@@ -2,6 +2,9 @@ import {
   type Bucket, type Container, type ContainerState, type DiskUsage, type Port, type Stats, type Tone,
   bucket, esc, hasHealth, isProblem, newProblems, ports, project, shortImage, status, tone, usage, workingDir,
 } from './format';
+import {Terminal} from '@xterm/xterm';
+import {FitAddon} from '@xterm/addon-fit';
+import XTERM_CSS from '@xterm/xterm/css/xterm.css';  // string (build.py usa --loader:.css=text): nada de CDN
 
 // a página é estática: todo seletor usado aqui existe no page.html
 const $ = <T extends HTMLElement = HTMLElement>(s: string): T => document.querySelector(s) as T;
@@ -18,7 +21,7 @@ const api = (path: string, opts: RequestInit = {}) =>
 
 type Action = 'start' | 'stop' | 'restart' | 'pause' | 'unpause' | 'remove';
 type RowAction = Action | 'logs';
-type MenuAction = Action | 'exec';
+type MenuAction = Action | 'exec' | 'shell';
 type ProblemKind = 'docker' | 'perm' | 'server' | 'auth';
 // [título, dica (HTML confiável), detalhe técnico, tipo]
 type Problem = [title: string, hint: string, detail: unknown, kind: ProblemKind];
@@ -262,7 +265,7 @@ function rowHtml(c: Container, withProject: boolean) {
       aria-label="${aria}" aria-describedby="st-${c.ID}" onclick="act('${a}','${c.ID}')" class="lg:w-20 shrink-0 ${BTN} ${cls}">${text}</button>`;
   // ações raras (reiniciar, pausar, remover, exec) ficam no "⋯": a linha mostra só a ação principal e Logs
   const more = [sec && [sec, LABEL[sec]], c.State === 'running' && ['pause', 'Pausar'],
-                c.State === 'running' && ['exec', 'Copiar docker exec'],
+                c.State === 'running' && ['shell', 'Abrir terminal'], c.State === 'running' && ['exec', 'Copiar docker exec'],
                 removable(c) && ['remove', 'Remover…']].filter((x): x is [MenuAction, string] => !!x);
   const item = 'block w-full text-left px-3 py-2 max-lg:py-3 rounded-md text-sm hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent';
   const menu = !more.length ? slot('lg:w-9') : `<details data-keep="menu" class="shrink-0" ontoggle="placeMenu(this)">
@@ -270,7 +273,7 @@ function rowHtml(c: Container, withProject: boolean) {
         class="list-none [&::-webkit-details-marker]:hidden cursor-pointer grid place-items-center lg:w-9 max-lg:w-11 ${BTN} text-fg hover:bg-hover">
         <svg aria-hidden="true" viewBox="0 0 16 16" fill="currentColor" class="size-4"><circle cx="3.5" cy="8" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="12.5" cy="8" r="1.3"/></svg></summary>
       <div class="fixed z-30 min-w-48 rounded-lg bg-raised ring-1 ring-line-strong p-1 shadow-lg shadow-black/40">
-        ${more.map(([a, text]) => `<button data-id="${c.ID}" data-a="m-${a}" ${b ? 'aria-disabled="true"' : ''} onclick="menuPick(this); ${a === 'exec' ? `copyExec('${c.ID}')` : `act('${a}','${c.ID}')`}"
+        ${more.map(([a, text]) => `<button data-id="${c.ID}" data-a="m-${a}" ${b ? 'aria-disabled="true"' : ''} onclick="menuPick(this); ${a === 'exec' ? `copyExec('${c.ID}')` : a === 'shell' ? `openShell('${c.ID}')` : `act('${a}','${c.ID}')`}"
           class="${item} ${a === 'remove' ? 'text-bad-fg' : 'text-fg'}">${text}</button>`).join('')}
       </div></details>`;
   const healthBox = hasHealth(c) && !b ? `<details data-keep="health" class="mt-1 text-xs" ontoggle="this.open && loadHealth('${c.ID}')">
@@ -546,7 +549,7 @@ function disarm(redraw = true) {
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') closeMenus();
   if (e.key === 'Escape' && arming) return disarm();
-  if ($<HTMLDialogElement>('#dlg').open || e.ctrlKey || e.metaKey || e.altKey) return;
+  if ($<HTMLDialogElement>('#dlg').open || $<HTMLDialogElement>('#shell').open || e.ctrlKey || e.metaKey || e.altKey) return;
   const el = document.activeElement as HTMLElement, typing = /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName);
   if (e.key === '/' && !typing) { e.preventDefault(); return $('#q').focus(); }
   if ((e.key === 'z' || e.key === 'Z') && !typing && toastFn) return runToastAction();
@@ -681,6 +684,49 @@ function afterClose() {
   document.querySelector<HTMLElement>(`[data-id="${logId}"][data-a="logs"]`)?.focus();
 }
 
+// terminal no navegador: xterm.js <-> WebSocket <-> `docker exec -it` num PTY do servidor
+const xtermCss = document.createElement('style');
+xtermCss.textContent = XTERM_CSS;
+document.head.append(xtermCss);
+let sess: {id: string; term: Terminal; ws: WebSocket; ro: ResizeObserver} | null = null;
+
+function openShell(id: string) {
+  const c = data.find(c => c.ID === id);
+  if (!c) return;
+  $('#shell-name').textContent = c.Names;
+  $('#shell-status').textContent = 'Conectando…';
+  $<HTMLDialogElement>('#shell').showModal();
+  const term = new Terminal({cursorBlink: true, fontSize: 13, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace'});
+  const fit = new FitAddon(), enc = new TextEncoder();
+  term.loadAddon(fit);
+  term.open($('#shell-box'));
+  fit.fit();
+  // o WebSocket do navegador não manda header custom: o token vai na query
+  const ws = new WebSocket(`ws://${location.host}/api/exec/${id}?t=${encodeURIComponent(TOKEN)}`);
+  ws.binaryType = 'arraybuffer';
+  // a primeira mensagem tem que ser o tamanho: o servidor só sobe o docker exec depois dela
+  const size = () => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({cols: term.cols, rows: term.rows})); };
+  ws.onopen = () => { size(); $('#shell-status').textContent = 'Conectado. Esc vai para o terminal; feche pelo ×.'; term.focus(); };
+  ws.onmessage = e => term.write(new Uint8Array(e.data));
+  ws.onclose = () => { $('#shell-status').textContent = 'Sessão encerrada.'; };
+  term.onData(d => { if (ws.readyState === WebSocket.OPEN) ws.send(enc.encode(d)); });
+  term.onResize(size);
+  const ro = new ResizeObserver(() => fit.fit());
+  ro.observe($('#shell-box'));
+  sess = {id, term, ws, ro};
+}
+
+function closeShell() {
+  if (!sess) return;
+  const {id, term, ws, ro} = sess;
+  sess = null;
+  ws.onclose = ws.onmessage = null;  // a sessão já foi: nada de escrever num terminal descartado
+  ws.close();
+  ro.disconnect();
+  term.dispose();
+  document.querySelector<HTMLElement>(`[data-id="${id}"][data-a="menu"]`)?.focus();
+}
+
 type DiskKind = 'images' | 'volumes' | 'buildcache';
 // [Type do docker system df, categoria da API de prune, rótulo, o que o prune apaga, aviso]; Containers fica de fora:
 // parado se remove na lista. Volumes sem -a no servidor: no Docker 23+ só os anônimos saem
@@ -737,10 +783,12 @@ async function prune(k: DiskKind) {
 // esta lista é a interface completa entre o HTML e o código
 Object.assign(window, {
   act, afterClose, askNotify, clearFilters, composeAct, copyAddr, copyExec, copyLogs, downloadLogs, filterBy, loadDisk,
-  loadHealth, loadInspect, menuPick, placeMenu, prune, refreshLogs, runToastAction, stackAct, toggleFollow,
+  loadHealth, loadInspect, menuPick, openShell, placeMenu, prune, refreshLogs, runToastAction, stackAct, toggleFollow,
 });
 
 $('#dlg').addEventListener('close', afterClose);
+$('#shell').addEventListener('close', closeShell);
+$('#shell').addEventListener('cancel', e => e.preventDefault());  // Esc é do vim/less, não do modal
 $<HTMLInputElement>('#q').oninput = render;
 // aba escondida não consulta o docker (a não ser com as notificações ligadas: é para elas que serve); ao voltar, atualiza na hora
 document.addEventListener('visibilitychange', () => document.hidden || load());
