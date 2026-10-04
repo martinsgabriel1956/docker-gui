@@ -16,11 +16,17 @@ export type Container = {
   ID: string; Names: string; Image: string; State: string; Status: string; Ports: string; Labels: string;
   logs?: string;
   health?: { Status: string; Log: { ExitCode: number; Output: string }[] } | null;
+  inspect?: Record<string, unknown>;
   fail?: Partial<Record<Action, string>>;
   delay?: Partial<Record<Action, number>>;
   after?: Partial<Record<Action, { State: string; Status: string }>>;
+  stats?: { CPUPerc: string; MemUsage: string; MemPerc: string };
 };
-export type DockerState = { containers: Container[]; ps_error?: string };
+export type DiskUsage = { Type: string; TotalCount: string; Active: string; Size: string; Reclaimable: string };
+export type DockerState = {
+  containers: Container[]; ps_error?: string; df?: DiskUsage[]; pruned?: string[];
+  compose_fail?: string; compose_calls?: string[][];
+};
 
 // ID estável por nome: o mesmo container tem o mesmo ID em todo teste
 export const id = (name: string) => createHash('sha256').update(name).digest('hex').slice(0, 12);

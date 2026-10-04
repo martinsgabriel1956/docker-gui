@@ -1,6 +1,6 @@
 import {
-  type Bucket, type Container, type ContainerState, type Port, type Tone,
-  bucket, esc, hasHealth, isProblem, ports, project, shortImage, status, tone,
+  type Bucket, type Container, type ContainerState, type DiskUsage, type Port, type Stats, type Tone,
+  bucket, esc, hasHealth, isProblem, newProblems, ports, project, shortImage, status, tone, usage, workingDir,
 } from './format';
 
 // a página é estática: todo seletor usado aqui existe no page.html
@@ -24,14 +24,21 @@ type ProblemKind = 'docker' | 'perm' | 'server' | 'auth';
 type Problem = [title: string, hint: string, detail: unknown, kind: ProblemKind];
 type ToastAction = [label: string, fn: () => unknown];
 type RowError = {msg: string; state: ContainerState; what: string};
-type Arming = {id: string; name: string; at: number; timer: number};
+type ComposeAction = 'up' | 'down' | 'pull';
+// confirmação em 2 passos pendente: remover um container, derrubar um projeto (id = "stack-<projeto>") ou limpar
+// uma categoria do disco; a é o data-a do botão e note vai para o leitor de tela
+type Arming = {id: string; name: string; a: 'remove' | 'down' | 'prune'; note: string; at: number; timer: number};
 type Health = {Log?: {ExitCode: number; Output: string}[]} | null;
+// resumo do /api/inspect; o valor do env vem null (mascarado) até o usuário pedir para revelar
+type Inspect = {Restart: string; Networks: Record<string, string>; Env: [key: string, value: string | null][];
+                Mounts: {Type: string; Name: string; Source: string; Destination: string; RW: boolean}[]};
 // linha da tabela com o HTML que a gerou, para o patchRows saber se mudou
 type Row = HTMLElement & {_html?: string};
 
 const LABEL: Record<RowAction, string> = {start: 'Iniciar', stop: 'Parar', restart: 'Reiniciar', pause: 'Pausar', unpause: 'Retomar', logs: 'Logs', remove: 'Remover'};
 const VERB: Record<Action, string> = {start: 'Iniciando…', stop: 'Parando…', restart: 'Reiniciando…', pause: 'Pausando…', unpause: 'Retomando…', remove: 'Removendo…'};
 const DONE: Record<Action, string> = {start: 'iniciado', stop: 'parado', restart: 'reiniciado', pause: 'pausado', unpause: 'retomado', remove: 'removido'};
+const COMPOSE_VERB: Record<ComposeAction, string> = {up: 'Subindo…', down: 'Derrubando…', pull: 'Baixando…'};
 // cada estado tem posições fixas de botão, assim Logs fica sempre no mesmo lugar (dead não inicia, só remove)
 const PRIMARY: Partial<Record<ContainerState, Action>> = {running: 'stop', restarting: 'stop', paused: 'unpause', exited: 'start', created: 'start'};
 const SECONDARY: Partial<Record<ContainerState, Action>> = {running: 'restart', paused: 'stop'};
@@ -52,10 +59,10 @@ const BUCKETS: [Bucket, string, string, string][] = [
 const TOUCH = matchMedia('(pointer: coarse)').matches;
 const PROBLEM_TXT: Record<ProblemKind, string> = {docker: 'Docker fora do ar', perm: 'sem acesso ao Docker', server: 'sem conexão', auth: 'sem token'};
 const BTN = 'px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 transition motion-reduce:transition-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent aria-disabled:opacity-40 aria-disabled:cursor-wait';
-let data: Container[] = [], busy = new Map<string, Action>(), errors = new Map<string, RowError>(), lastOk: Date | null = null,
+let data: Container[] = [], busy = new Map<string, Action>(), composing = new Map<string, ComposeAction>(), errors = new Map<string, RowError>(), lastOk: Date | null = null,
     problem = '', problemKind: ProblemKind | '' = '', only: Bucket | '' = '',
-    toastTimer: number | undefined, logId: string | null = null, follow: number | null = null, arming: Arming | null = null,
-    lastSay = '', dirty = false;
+    toastTimer: number | undefined, logId: string | null = null, stream: EventSource | null = null, pending: string[] = [],
+    arming: Arming | null = null, lastSay = '', dirty = false, seen: Set<string> | null = null;
 
 let toastFn: (() => unknown) | null = null;
 function toast(msg: string, ok = false, action: ToastAction | null = null) {
@@ -108,6 +115,8 @@ async function load() {
       data = j as Container[];
       if (selectingRows()) dirty = true; else render();
     }
+    notify(newProblems(seen, data));
+    seen = new Set(data.filter(isProblem).map(c => c.ID));
     showProblem(null);
   } catch (e) {
     showProblem([lastOk ? 'O servidor do Docker GUI parou de responder.' : 'Não consegui conectar ao servidor do Docker GUI.',
@@ -115,9 +124,52 @@ async function load() {
   }
 }
 
+// notificação do sistema só por pedido explícito (botão no cabeçalho) e só para quem acabou de entrar na faixa
+// de atenção; com a página em foco ela não aparece, a lista e o favicon já mostram
+const canAsk = () => isSecureContext && 'Notification' in window && Notification.permission === 'default';
+const notifying = () => 'Notification' in window && Notification.permission === 'granted';
+async function askNotify() {
+  const ok = await Notification.requestPermission() === 'granted';
+  $('#notify').hidden = !canAsk();
+  toast(ok ? 'Pronto: aviso quando um container entrar na faixa de atenção, mesmo com a aba em segundo plano.'
+           : 'Sem permissão para notificar. Dá para liberar nas configurações do site, no navegador.', ok);
+}
+function notify(cs: Container[]) {
+  if (!cs.length || !notifying() || (!document.hidden && document.hasFocus())) return;
+  try {
+    const n = new Notification(cs.length === 1 ? `${cs[0].Names} precisa de atenção` : `${cs.length} containers precisam de atenção`,
+      {body: cs.length === 1 ? status(cs[0])[0] : cs.map(c => c.Names).join(', ')});
+    n.onclick = () => { focus(); n.close(); };
+  } catch { /* Chrome no Android só notifica via service worker; o favicon continua avisando */ }
+}
+
+// favicon: o cubo do cabeçalho com a contagem da faixa de atenção por cima ("!" quando os dados estão velhos)
+const icon = document.head.appendChild(Object.assign(document.createElement('link'), {rel: 'icon'}));
+function setIcon(badge: string) {
+  const href = 'data:image/svg+xml,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="1.8" stroke-linejoin="round"><path d="M12 2.5 3.5 7v10l8.5 4.5 8.5-4.5V7z"/><path d="M3.5 7 12 11.5 20.5 7M12 11.5v10"/>${badge
+    ? `<circle cx="16.5" cy="16.5" r="7.5" fill="#dc2626" stroke="none"/><text x="16.5" y="20" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="700" fill="#fff" stroke="none">${badge}</text>` : ''}</svg>`);
+  if (icon.getAttribute('href') !== href) icon.href = href;  // trocar o href a cada poll faz a aba piscar
+}
+
+// CPU e memória vêm à parte e mais devagar que a lista: o docker stats leva ~2 s para medir
+let stats: Record<string, Stats> = {};
+async function loadStats() {
+  let next: Record<string, Stats> = {};
+  try {
+    const r = await api('/api/stats');
+    if (r.ok) next = Object.fromEntries((await r.json() as Stats[]).map(s => [s.ID, s]));
+  } catch { /* sem conexão: o banner do load() já avisa */ }
+  if (JSON.stringify(next) === JSON.stringify(stats)) return;
+  stats = next;
+  if (selectingRows()) dirty = true; else render();
+}
+// setTimeout encadeado em vez de setInterval: um docker lento não empilha consultas
+async function statsLoop() { if (!document.hidden) await loadStats(); setTimeout(statsLoop, 5000); }
+
 function renderCount() {
   const n = (k: Bucket) => data.filter(c => bucket(c) === k).length, running = data.filter(c => c.State === 'running').length;
   const problemTxt = problemKind ? PROBLEM_TXT[problemKind] : '';
+  setIcon(problem ? '!' : n('problema') > 9 ? '9+' : String(n('problema') || ''));
   document.title = !lastOk && !problem ? 'Docker GUI' : !problem ? `Docker GUI · ${running} rodando${n('problema') ? ` · ${n('problema')} com problema` : ''}`
     : `Docker GUI · ${problemTxt}`;
   if (problem) {
@@ -192,7 +244,7 @@ async function loadHealth(id: string) {
 
 const rowCache = new Map<string, {sig: string; html: string}>();
 function row(c: Container, withProject = false) {
-  const sig = JSON.stringify([c, withProject, busy.get(c.ID), arming?.id === c.ID, errors.get(c.ID), health[c.ID + c.Status], TOUCH]);
+  const sig = JSON.stringify([c, withProject, busy.get(c.ID), arming?.id === c.ID, errors.get(c.ID), health[c.ID + c.Status], stats[c.ID], TOUCH]);
   const hit = rowCache.get(c.ID);
   if (hit?.sig === sig) return hit.html;
   const html = rowHtml(c, withProject);
@@ -203,6 +255,7 @@ function row(c: Container, withProject = false) {
 function rowHtml(c: Container, withProject: boolean) {
   const b = busy.get(c.ID), t = TONE[b ? 'busy' : tone(c)], st = status(c), pp = ports(c.Ports), p = project(c);
   const armed = arming?.id === c.ID, prim = PRIMARY[c.State], sec = SECONDARY[c.State];
+  const u = c.State === 'running' && !b && stats[c.ID] ? usage(stats[c.ID]) : null;
   const slot = (w = 'lg:w-20') => `<span aria-hidden="true" class="${w} shrink-0 max-lg:hidden"></span>`;
   const btn = (a: RowAction, cls = 'text-fg hover:bg-hover', text = LABEL[a], aria = `${LABEL[a]} ${esc(c.Names)}`) =>
     `<button data-id="${c.ID}" data-a="${a}" ${b && a !== 'logs' ? 'aria-disabled="true"' : ''}
@@ -231,7 +284,8 @@ function rowHtml(c: Container, withProject: boolean) {
     <td role="cell" class="font-mono text-xs text-muted pr-4 max-lg:block max-lg:p-0 max-lg:pl-5 [overflow-wrap:anywhere]">
       <span class="sr-only lg:hidden">Imagem: </span><div class="lg:truncate lg:max-w-[24ch] lg:[direction:rtl] lg:text-left" title="${esc(c.Image)}"><bdi dir="ltr">${esc(shortImage(c.Image))}</bdi></div></td>
     <td role="cell" class="text-sm pr-4 lg:min-w-[24ch] max-lg:block max-lg:p-0 max-lg:pl-5" title="${esc(c.Status)}">
-      <span id="st-${c.ID}" class="${t[1]}">${b ? VERB[b] : esc(st[0])}${st[1] && !b ? `<span class="block text-xs text-muted">${st[1]}</span>` : ''}</span>${b ? '' : errHtml(c) + healthBox}</td>
+      <span id="st-${c.ID}" class="${t[1]}">${b ? VERB[b] : esc(st[0])}${st[1] && !b ? `<span class="block text-xs text-muted">${st[1]}</span>` : ''}</span>${
+      u ? `<span id="us-${c.ID}" class="block text-xs font-mono text-muted" title="${esc(u[1])}">${esc(u[0])}</span>` : ''}${b ? '' : errHtml(c) + healthBox}</td>
     <td role="cell" class="pr-4 max-lg:hidden max-lg:has-[div]:block max-lg:p-0 max-lg:pl-5 max-lg:pt-1">${pp.length
       ? `<div class="flex flex-wrap gap-1 max-lg:gap-2">${pp.map(x => portChip(c, x)).join('')}</div>` : ''}</td>
     <td role="cell" class="pr-4 max-lg:block max-lg:p-0 max-lg:pt-2"><div class="flex justify-end max-lg:justify-start items-center gap-1.5 max-lg:gap-2">
@@ -269,16 +323,24 @@ const bandHead = (text: string, cls: string) => `<tr data-key="h:attn" role="row
 // cabeçalho do projeto compose: contagem e ações para o stack inteiro (sempre sobre todos os containers do projeto)
 function groupHead(k: string, label: string) {
   const all = data.filter(c => project(c) === k), on = all.filter(c => c.State === 'running').length;
-  const anyBusy = all.some(c => busy.has(c.ID));
+  const anyBusy = composing.has(k) || all.some(c => busy.has(c.ID)), dir = k && workingDir(all[0]), armed = arming?.id === `stack-${k}`;
   const inBand = all.filter(isProblem).length;
   const sbtn = (a: Action, n: number, text: string) => k && n ? `<button data-id="stack-${esc(k)}" data-a="${a}" data-p="${esc(k)}" ${anyBusy ? 'aria-disabled="true"' : ''}
       aria-label="${text} do projeto ${esc(k)} (${n})" title="${esc(stackList(a, k).map(c => c.Names).join(', '))}" onclick="stackAct('${a}', this.dataset.p)" class="${BTN} text-fg hover:bg-hover normal-case tracking-normal">${text} (${n})</button>` : '';
+  // compose up/pull/down: só com o working_dir no label (o servidor precisa dele para achar o projeto)
+  const cbtn = (a: ComposeAction, text: string, cls = 'text-fg hover:bg-hover', aria = `${text.replace('…', '')} do projeto ${esc(k)}`) =>
+    `<button data-id="stack-${esc(k)}" data-a="${a}" data-p="${esc(k)}" ${anyBusy ? 'aria-disabled="true"' : ''} aria-label="${aria}"
+      onclick="composeAct('${a}', this.dataset.p)" class="${BTN} ${cls} normal-case tracking-normal">${composing.get(k) === a ? COMPOSE_VERB[a] : text}</button>`;
   return `<tr data-key="g:${esc(k)}" role="row" class="max-lg:block"><th role="columnheader" colspan="5" scope="colgroup" class="max-lg:block px-4 pt-5 pb-2 text-left font-normal border-t border-line/70">
     <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
       <span class="text-xs font-medium uppercase tracking-wider text-fg">${label}</span>
       ${k ? `<span class="text-xs text-muted">compose · ${on} de ${all.length} rodando</span>` : ''}
       ${k && inBand ? `<span class="text-xs text-bad-fg">${inBand} na faixa de atenção ↑</span>` : ''}
-      <span class="ml-auto flex flex-wrap gap-1.5">${STACK.map(([a, text]) => sbtn(a, stackList(a, k).length, text)).join('')}</span>
+      <span class="ml-auto flex flex-wrap gap-1.5">${STACK.map(([a, text]) => sbtn(a, stackList(a, k).length, text)).join('')}${dir
+        ? cbtn('up', 'compose up') + cbtn('pull', 'compose pull') + (armed
+          ? cbtn('down', 'Confirmar down', 'bg-danger text-white ring-danger hover:bg-danger-hover', `Confirmar compose down do projeto ${esc(k)}`)
+          : cbtn('down', 'compose down…')) : ''}</span>
+      ${armed ? `<p aria-hidden="true" class="w-full text-xs text-bad-soft lg:text-right">Derrubar o projeto? Os volumes ficam; o projeto some da lista e só volta com up. ${TOUCH ? 'Cancela sozinho em 8 s.' : 'Esc cancela.'}</p>` : ''}
     </div></th></tr>`;
 }
 
@@ -307,10 +369,12 @@ function render() {
   dirty = false;
   renderCount();
   renderDlg();
+  renderDisk();
   if (f?.id) refocus(f.id, f.a);
   saveHash();
   // só escreve na região viva quando a mensagem muda, para não apagar o anúncio de uma ação em andamento
-  const say = arming ? `Clique em Confirmar para apagar ${arming.name} de vez. Os volumes não são afetados. ${TOUCH ? 'Cancela sozinho em 8 segundos.' : 'Esc cancela.'}`
+  const say = arming ? `${arming.a === 'down' ? `Clique em Confirmar down para derrubar o projeto ${arming.name}.`
+    : `Clique em Confirmar para apagar ${arming.name} de vez.`} ${arming.note} ${TOUCH ? 'Cancela sozinho em 8 segundos.' : 'Esc cancela.'}`
             : q || only ? `${rows.length} de ${data.length} containers` : '';
   if (say !== lastSay) $('#shown').textContent = lastSay = say;
 }
@@ -381,13 +445,7 @@ async function act(a: RowAction, id: string) {
   if (a === 'logs') return logs(id);
   const c = data.find(c => c.ID === id);
   if (!c || busy.has(id)) return;
-  if (a === 'remove' && arming?.id !== id) {  // 1º clique só arma; o 2º confirma
-    disarm(false);
-    arming = {id, name: c.Names, at: Date.now(), timer: setTimeout(armTick, 8000)}; render();
-    return;
-  }
-  if (a === 'remove' && arming && Date.now() - arming.at < 600) return;  // duplo clique não pode virar confirmação
-  if (a === 'remove') disarm(false);
+  if (a === 'remove' && !confirmed(id, c.Names, 'remove', 'Os volumes não são afetados.')) return;
   const trs = [...document.querySelectorAll<HTMLElement>('#rows tr[data-row]')], i = trs.findIndex(tr => tr.dataset.key === 'c:' + id);
   const near = (trs[i + 1] || trs[i - 1])?.dataset.key?.slice(2);
   const done = run(a, c);
@@ -429,7 +487,7 @@ function copyExec(id: string) {
 // ids: limita a ação a containers específicos (usado pelo "Iniciar de novo" depois de um Parar tudo)
 async function stackAct(a: Action, p: string, ids?: string[]) {
   const list = stackList(a, p, ids);
-  if (!list.length || list.some(c => busy.has(c.ID))) return;
+  if (!list.length || composing.has(p) || list.some(c => busy.has(c.ID))) return;
   const all = Promise.all(list.map(c => run(a, c)));
   $('#shown').textContent = `${VERB[a]} ${list.length} containers de ${p}`;
   const res = await all, fails = res.filter(ok => !ok).length, okIds = list.filter((c, i) => res[i] && c.State !== 'paused').map(c => c.ID);
@@ -440,10 +498,41 @@ async function stackAct(a: Action, p: string, ids?: string[]) {
   load();
 }
 
+// 1º clique só arma (e desarma o que estiver armado); o 2º confirma. Devolve true quando é para executar
+function confirmed(id: string, name: string, a: Arming['a'], note: string): boolean {
+  if (arming?.id !== id || arming.a !== a) {
+    disarm(false);
+    arming = {id, name, a, note, at: Date.now(), timer: setTimeout(armTick, 8000)}; render();
+    return false;
+  }
+  if (Date.now() - arming.at < 600) return false;  // duplo clique não pode virar confirmação
+  disarm(false);
+  return true;
+}
+
+// docker compose up/pull/down no projeto inteiro (down pede confirmação: o projeto some da lista)
+async function composeAct(a: ComposeAction, p: string) {
+  const c = data.find(c => project(c) === p);
+  if (!c || composing.has(p) || data.some(c => project(c) === p && busy.has(c.ID))) return;
+  if (a === 'down' && !confirmed(`stack-${p}`, p, 'down', 'Os volumes ficam; o projeto some da lista e só volta com up.')) return;
+  composing.set(p, a); render();
+  $('#shown').textContent = `${COMPOSE_VERB[a]} ${p}`;
+  try {
+    const r = await api(`/api/compose/${a}`, {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                              body: JSON.stringify({project: p, dir: workingDir(c)})});
+    const msg: string = await r.json();
+    // o compose escreve o progresso no stderr: no erro, a última linha é a que explica
+    toast(r.ok ? `${p}: compose ${a} concluído.` : `${p}: compose ${a} falhou. ${msg.trim().split('\n').at(-1) || 'Erro sem mensagem.'}`, r.ok);
+  } catch { toast(`${p}: sem resposta do servidor do Docker GUI.`); }
+  composing.delete(p); render();
+  await load();
+  if (a === 'down') $('#q').focus();
+}
+
 // desarma sozinho depois de 8s, mas nunca enquanto o mouse ou o foco estão no botão (WCAG 2.2.1)
 function armTick() {
   if (!arming) return;
-  const el = document.querySelector(`[data-id="${arming.id}"][data-a="remove"]`);
+  const el = document.querySelector(`[data-id="${arming.id}"][data-a="${arming.a}"]`);
   if (el && (el.matches(':hover') || el === document.activeElement)) arming.timer = setTimeout(armTick, 1000);
   else disarm();
 }
@@ -491,12 +580,11 @@ function renderDlg() {
     + (c.State === 'running' ? `<button data-id="dlg" data-a="exec" onclick="copyExec('${c.ID}')" class="${BTN} text-fg hover:bg-hover">Copiar docker exec</button>` : '');
 }
 
-async function fetchLogs(force = false) {
-  const lb = $('#lb'), sel = getSelection();
-  if (!force && sel?.toString() && lb.contains(sel.anchorNode)) return;  // não apaga a seleção de quem está copiando
-  const atEnd = lb.scrollHeight - lb.scrollTop - lb.clientHeight < 40;  // só gruda no fim se já estava lá
+async function fetchLogs() {
+  const lb = $('#lb'), atEnd = lb.scrollHeight - lb.scrollTop - lb.clientHeight < 40;  // só gruda no fim se já estava lá
   try {
     const r = await api('/api/logs/' + logId), j: string = await r.json();
+    if (stream) return;  // o ao vivo ligou enquanto esta resposta vinha: ele é quem preenche a caixa
     lb.textContent = r.ok ? j || '(sem logs)' : `Não consegui ler os logs: ${j}`;
     $('#lmeta').textContent = `Últimas 500 linhas · atualizado às ${new Date().toLocaleTimeString('pt-BR')}`;
   } catch { lb.textContent = 'Não consegui carregar os logs. O servidor do Docker GUI está rodando?'; }
@@ -507,41 +595,154 @@ function logs(id: string) {
   logId = id;
   $('#lt').textContent = data.find(c => c.ID === id)!.Names;
   $('#lb').textContent = 'Carregando…'; $('#lmeta').textContent = 'Últimas 500 linhas'; $('#dlg-msg').innerHTML = '';
-  $<HTMLDialogElement>('#dlg').showModal(); renderDlg(); fetchLogs(true);
+  $<HTMLDialogElement>('#dlg').showModal(); renderDlg(); fetchLogs();
 }
 
-function toggleFollow(on = !follow) {
-  clearInterval(follow ?? undefined); follow = on ? setInterval(() => document.hidden || fetchLogs(), 2000) : null;
+// ponytail: teto fixo; um container falante por horas não pode crescer o DOM sem limite
+const MAX_LINES = 5000;
+
+// as linhas do ao vivo chegam em rajada (500 de uma vez ao conectar): entram no DOM juntas, não uma a uma
+function flushLogs() {
+  const lb = $('#lb'), atEnd = lb.scrollHeight - lb.scrollTop - lb.clientHeight < 40;
+  lb.append(...pending.splice(0));  // anexar (em vez de trocar o texto) não apaga a seleção de quem está copiando
+  for (let n = lb.childNodes.length - MAX_LINES; n > 0; n--) lb.firstChild!.remove();  // um nó de texto por linha
+  if (atEnd) lb.scrollTop = lb.scrollHeight;
+}
+
+// ao vivo: Server-Sent Events com o docker logs -f. Fechar o EventSource derruba a conexão e o servidor mata o processo
+function toggleFollow(on = !stream, why = '') {
+  const was = !!stream;
+  stream?.close(); stream = null;
+  if (was) flushLogs();  // o que já chegou entra antes de parar
+  if (on) {
+    // EventSource não manda header: o token vai na query, só nesta rota
+    const es = stream = new EventSource(`/api/logs/${logId}/stream?t=${encodeURIComponent(TOKEN)}`);
+    // cada conexão (inclusive a reconexão automática) recomeça das últimas 500 linhas: limpa para não duplicar
+    es.onopen = () => { pending = []; $('#lb').textContent = ''; $('#lmeta').textContent = 'Ao vivo · últimas 500 linhas e as novas'; };
+    es.onmessage = e => { if (pending.push(JSON.parse(e.data)) === 1) setTimeout(flushLogs, 50); };
+    es.addEventListener('end', () => toggleFollow(false, 'o container parou'));
+    // queda de rede: o EventSource reconecta sozinho; CLOSED é recusa do servidor (token, erro)
+    es.onerror = () => { if (es.readyState === EventSource.CLOSED) toggleFollow(false, 'falhou'); else $('#lmeta').textContent = 'Ao vivo · reconectando…'; };
+  } else if (was) $('#lmeta').textContent = `Ao vivo parado às ${new Date().toLocaleTimeString('pt-BR')}${why ? ` · ${why}` : ''}`;
   $('#follow').setAttribute('aria-pressed', String(on));
   $('#refresh').setAttribute('aria-disabled', String(on));  // com o ao vivo ligado, Atualizar é redundante (mas continua no Tab)
-  if (on) fetchLogs();  // sem forçar: ligar o ao vivo não pode apagar uma seleção
 }
 
 // botão Atualizar: com o ao vivo ligado não faz nada (já atualiza sozinho)
 function refreshLogs() {
-  if (!follow) fetchLogs(true);
+  if (!stream) fetchLogs();
 }
 
 function copyLogs() {
   navigator.clipboard.writeText($('#lb').textContent ?? '').then(() => toast('Logs copiados.', true), () => toast('Não consegui copiar.'));
 }
 
+function inspectHtml(d: Inspect, reveal: boolean) {
+  const list = (xs: string[]) => xs.length ? xs.map(x => `<div>${x}</div>`).join('') : '<span class="font-sans text-muted">nenhum</span>';
+  const nets = Object.entries(d.Networks).map(([n, ip]) => esc(ip ? `${n} · ${ip}` : n));
+  const mounts = d.Mounts.map(m => esc(`${[m.Type, m.Name || m.Source].filter(Boolean).join(' ')} → ${m.Destination}${m.RW ? '' : ' (somente leitura)'}`));
+  const env = d.Env.map(([k, v]) => `${esc(k)}=${v === null ? '<span aria-hidden="true">••••••</span><span class="sr-only">(oculto)</span>' : esc(v)}`);
+  const dt = 'font-sans text-muted';
+  return `<dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 font-mono text-fg-soft [overflow-wrap:anywhere]">
+    <dt class="${dt}">Restart</dt><dd>${esc(d.Restart)}</dd>
+    <dt class="${dt}">Redes</dt><dd>${list(nets)}</dd>
+    <dt class="${dt}">Mounts</dt><dd>${list(mounts)}</dd>
+    <dt class="${dt}">Env</dt><dd>${list(env)}${d.Env.length ? `<button id="insp-env" onclick="loadInspect(${!reveal})"
+      class="mt-1.5 ${BTN} font-sans text-fg hover:bg-hover">${reveal ? 'Ocultar valores' : 'Revelar valores'}</button>` : ''}</dd></dl>`;
+}
+
+// abrir o "Configuração" sempre busca mascarado; o valor real do env só vem pelo botão Revelar
+async function loadInspect(reveal = false) {
+  const id = logId, refocus = document.activeElement?.id === 'insp-env';
+  let html: string;
+  try {
+    const r = await api(`/api/inspect/${id}${reveal ? '/env' : ''}`), j: unknown = await r.json();
+    html = r.ok ? inspectHtml(j as Inspect, reveal) : esc(`Não consegui ler o inspect: ${j}`);
+  } catch { html = 'Não consegui ler o inspect.'; }
+  if (id !== logId || !$<HTMLDetailsElement>('#insp').open) return;  // trocou de container ou fechou enquanto carregava
+  $('#insp-body').innerHTML = html;
+  if (refocus) $('#insp-env')?.focus();
+}
+
+// baixa o que está na tela (com os timestamps do docker), sem ir de novo ao servidor
+function downloadLogs() {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([$('#lb').textContent ?? ''], {type: 'text/plain'}));
+  a.download = `${$('#lt').textContent}.log`;
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href));
+}
+
 // roda no × direto e também no evento close (Esc); chamar duas vezes não faz mal
 function afterClose() {
   toggleFollow(false);
+  // fecha o "Configuração" e apaga o que estava nele: env revelado não fica na página
+  $('#insp').removeAttribute('open'); $('#insp-body').textContent = 'Carregando…';
   // a linha pode ter sido redesenhada com o modal aberto; foca o botão Logs atual dela
   document.querySelector<HTMLElement>(`[data-id="${logId}"][data-a="logs"]`)?.focus();
+}
+
+type DiskKind = 'images' | 'volumes' | 'buildcache';
+// [Type do docker system df, categoria da API de prune, rótulo, o que o prune apaga, aviso]; Containers fica de fora:
+// parado se remove na lista. Volumes sem -a no servidor: no Docker 23+ só os anônimos saem
+const DISK: [string, DiskKind, string, string, string][] = [
+  ['Images', 'images', 'Imagens', 'as imagens que nenhum container usa', 'Dá para baixar de novo.'],
+  ['Local Volumes', 'volumes', 'Volumes', 'os volumes que nenhum container usa', 'Os dados deles se perdem.'],
+  ['Build Cache', 'buildcache', 'Build cache', 'o cache de build', 'O próximo build fica mais lento.']];
+let disk: DiskUsage[] | string | null = null, diskBusy: DiskKind | '' = '', diskHtml = '';  // string = erro
+
+async function loadDisk() {
+  try {
+    const r = await api('/api/df'), j: unknown = await r.json();
+    disk = r.ok ? j as DiskUsage[] : `Não consegui ler o uso de disco: ${j}`;
+  } catch { disk = 'Não consegui ler o uso de disco. O servidor do Docker GUI está rodando?'; }
+  render();
+}
+
+function renderDisk() {
+  const html = disk === null ? '<p class="py-3 text-muted">Carregando…</p>'
+    : typeof disk === 'string' ? `<p class="py-3 text-bad-fg">${esc(disk)}</p>`
+    : DISK.map(([type, k, label, what, note]) => {
+      const d = (disk as DiskUsage[]).find(d => d.Type === type), id = 'df-' + k, armed = arming?.id === id;
+      if (!d) return '';
+      const cls = armed ? 'bg-danger text-white ring-danger hover:bg-danger-hover' : 'text-fg hover:bg-hover';
+      return `<div class="flex flex-wrap items-center gap-x-3 gap-y-2 py-3 border-t border-line/70">
+        <div class="mr-auto min-w-0"><div class="font-medium text-fg-strong">${label}</div>
+          <div class="text-xs text-muted">${esc(d.Size)} no total · ${esc(d.Reclaimable)} liberável · ${esc(d.TotalCount)} ${d.TotalCount === '1' ? 'item' : 'itens'}, ${esc(d.Active)} em uso</div></div>
+        <button data-id="${id}" data-a="prune" ${diskBusy ? 'aria-disabled="true"' : ''} onclick="prune('${k}')"
+          aria-label="${armed ? `Confirmar limpeza de ${label.toLowerCase()}` : `Limpar ${label.toLowerCase()}`}" class="${BTN} ${cls}">${
+          diskBusy === k ? 'Limpando…' : armed ? 'Confirmar' : 'Limpar…'}</button>
+        ${armed ? `<p aria-hidden="true" class="w-full text-xs text-bad-soft lg:text-right">Apagar ${what}? ${note} ${TOUCH ? 'Cancela sozinho em 8 s.' : 'Esc cancela.'}</p>` : ''}
+      </div>`;
+    }).join('');
+  if (html !== diskHtml) $('#df').innerHTML = diskHtml = html;  // o render roda a cada poll: só troca se mudou
+}
+
+async function prune(k: DiskKind) {
+  const [, , label, what, note] = DISK.find(d => d[1] === k)!;
+  if (diskBusy || !confirmed('df-' + k, what, 'prune', note)) return;
+  diskBusy = k; render();
+  $('#shown').textContent = `Limpando ${label.toLowerCase()}…`;
+  try {
+    const r = await api('/api/prune/' + k, {method: 'POST'}), msg: string = await r.json();
+    // image/volume prune terminam em "Total reclaimed space: 1.2GB"; builder prune, em "Total: 1.2GB"
+    const freed = msg.match(/Total(?: reclaimed space)?:\s*(\S+)/)?.[1];
+    if (r.ok) toast(`${label}: ${freed ? `${freed} liberados` : 'limpeza feita'}.`, true);
+    else toast(`Não deu para limpar ${label.toLowerCase()}: ${msg || 'erro sem mensagem'}`);
+  } catch { toast('Sem resposta do servidor do Docker GUI.'); }
+  diskBusy = '';
+  await loadDisk();
 }
 
 // o HTML gerado chama estas funções pelo nome (onclick="act(...)"); com módulos nada é global, então
 // esta lista é a interface completa entre o HTML e o código
 Object.assign(window, {
-  act, afterClose, clearFilters, copyAddr, copyExec, copyLogs, filterBy, loadHealth, menuPick, placeMenu,
-  refreshLogs, runToastAction, stackAct, toggleFollow,
+  act, afterClose, askNotify, clearFilters, composeAct, copyAddr, copyExec, copyLogs, downloadLogs, filterBy, loadDisk,
+  loadHealth, loadInspect, menuPick, placeMenu, prune, refreshLogs, runToastAction, stackAct, toggleFollow,
 });
 
 $('#dlg').addEventListener('close', afterClose);
 $<HTMLInputElement>('#q').oninput = render;
-// aba escondida não consulta o docker; ao voltar, atualiza na hora
+// aba escondida não consulta o docker (a não ser com as notificações ligadas: é para elas que serve); ao voltar, atualiza na hora
 document.addEventListener('visibilitychange', () => document.hidden || load());
-readHash(); render(); load(); setInterval(() => document.hidden || load(), 2000);
+$('#notify').hidden = !canAsk();
+readHash(); render(); load(); setInterval(() => (document.hidden && !notifying()) || load(), 2000); statsLoop();
