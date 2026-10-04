@@ -12,6 +12,16 @@ O comando abre o navegador em `http://localhost:8765` com um token de acesso. O 
 python3 docker_gui.py --port 9000
 ```
 
+Para usar o [Podman](https://podman.io) no lugar do Docker, ou outro contexto do Docker (um daemon remoto, por exemplo), use `--cli` e `--context`. O `--cli` também pode vir da variável `DOCKER_GUI_CLI`. Sem `--context`, vale o `DOCKER_CONTEXT` do ambiente ou o contexto atual (`docker context use`):
+
+```bash
+python3 docker_gui.py --cli podman
+DOCKER_GUI_CLI=podman python3 docker_gui.py
+python3 docker_gui.py --context producao
+```
+
+A saída do `podman ps` tem outro formato (`Names` em lista, portas como objetos, labels como dicionário…). O servidor converte tudo para o formato do `docker ps`, então a página funciona igual. O "Copiar `docker exec`" usa o mesmo binário e contexto.
+
 ## O que faz
 
 - **Lista ao vivo** de todos os containers, atualizada a cada 2s. Só as linhas que mudaram são redesenhadas, e o poll pausa quando a aba fica escondida.
@@ -31,7 +41,7 @@ python3 docker_gui.py --port 9000
 ## Requisitos
 
 - Python 3.7+
-- Docker, com o seu usuário com acesso ao daemon (`docker ps` funcionando sem `sudo`)
+- Docker, com o seu usuário com acesso ao daemon (`docker ps` funcionando sem `sudo`), ou Podman
 
 Não precisa instalar nada. O CSS já vem embutido no arquivo, então funciona offline.
 
