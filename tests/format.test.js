@@ -54,6 +54,16 @@ test('bucket separa o que precisa de atenção', () => {
   }
 });
 
+test('newProblems só devolve quem acabou de entrar na faixa de atenção', () => {
+  const ok = c('running', 'Up 5 minutes', {ID: 'a'}), bad = c('exited', 'Exited (1) 1 second ago', {ID: 'b'});
+  const sick = c('running', 'Up 1 hour (unhealthy)', {ID: 'c'});
+  assert.deepEqual(f.newProblems(null, [ok, bad]), []);  // primeira leitura é só a base
+  assert.deepEqual(f.newProblems(new Set(), [ok, bad]), [bad]);
+  assert.deepEqual(f.newProblems(new Set(['b']), [ok, bad, sick]), [sick]);  // b já estava: não repete
+  // continua na faixa, só mudou o motivo: também não repete
+  assert.deepEqual(f.newProblems(new Set(['b']), [ok, c('restarting', 'Restarting (1) 2 seconds ago', {ID: 'b'})]), []);
+});
+
 test('status traduz o texto e explica o código de saída', () => {
   assert.deepEqual(f.status(c('running', 'Up 5 minutes')), ['Rodando há 5 min']);
   assert.deepEqual(f.status(c('running', 'Up 2 hours (healthy)')), ['Rodando há 2 h · saudável']);
@@ -124,6 +134,15 @@ test('project lê o label do compose sem quebrar nas vírgulas do depends_on', (
   assert.equal(f.project({}), '');
 });
 
+test('workingDir lê a pasta do projeto compose', () => {
+  const labels = 'com.docker.compose.project=shop,com.docker.compose.project.working_dir=/srv/shop,'
+               + 'com.docker.compose.project.config_files=/srv/shop/a.yml,/srv/shop/b.yml';
+  assert.equal(f.workingDir({Labels: labels}), '/srv/shop');
+  assert.equal(f.project({Labels: labels}), 'shop');
+  assert.equal(f.workingDir({Labels: 'com.docker.compose.project=shop'}), '');
+  assert.equal(f.workingDir({}), '');
+});
+
 test('shortImage tira o host do registry e mantém a tag', () => {
   assert.equal(f.shortImage('ghcr.io/acme/api:1.4'), 'acme/api:1.4');
   assert.equal(f.shortImage('localhost:5000/app:dev'), 'app:dev');
@@ -139,4 +158,9 @@ test('esc neutraliza HTML', () => {
 
 test('todo código de saída explicado tem texto', () => {
   for (const [code, txt] of Object.entries(f.EXIT)) assert.ok(txt.length > 3, code);
+});
+
+test('usage mostra CPU e a memória usada; o limite fica no title', () => {
+  assert.deepEqual(f.usage({ID: 'a', CPUPerc: '0.52%', MemUsage: '10.5MiB / 1.944GiB', MemPerc: '0.53%'}),
+                   ['CPU 0.52% · RAM 10.5MiB', 'Memória: 10.5MiB / 1.944GiB (0.53%)']);
 });

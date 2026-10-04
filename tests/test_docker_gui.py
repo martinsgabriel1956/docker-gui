@@ -8,11 +8,13 @@ import shutil
 import socket
 import struct
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import unittest
 from http.server import ThreadingHTTPServer
+from typing import ClassVar
 from unittest import mock
 
 import docker_gui
@@ -50,13 +52,15 @@ class ServerTest(unittest.TestCase):
             self.docker = patcher.start()
             self.addCleanup(patcher.stop)
 
-    def request(self, method, path, host=None, token=docker_gui.TOKEN):
+    def request(self, method, path, host=None, token=docker_gui.TOKEN, body=None):
         headers = {"Host": f"localhost:{self.port}" if host is None else host}
         if token is not None:
             headers["X-Docker-GUI-Token"] = token
+        if isinstance(body, dict):
+            body = json.dumps(body)
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
         try:
-            conn.request(method, path, headers=headers)
+            conn.request(method, path, body=body, headers=headers)
             r = conn.getresponse()
             body = r.read().decode()
             return r.status, json.loads(body) if r.getheader("Content-Type", "").startswith("application/json") else body
@@ -96,8 +100,10 @@ class TokenTest(ServerTest):
 
     def test_api_requires_token(self):
         for token in (None, "", "errado", docker_gui.TOKEN[:-1], docker_gui.TOKEN + "x"):
-            for method, path in (("GET", "/api/containers"), ("GET", f"/api/logs/{HEX_ID}"),
-                                 ("GET", f"/api/health/{HEX_ID}"), ("POST", f"/api/stop/{HEX_ID}")):
+            for method, path in (("GET", "/api/containers"), ("GET", "/api/stats"), ("GET", f"/api/logs/{HEX_ID}"),
+                                 ("GET", f"/api/health/{HEX_ID}"), ("GET", f"/api/inspect/{HEX_ID}"),
+                                 ("GET", f"/api/inspect/{HEX_ID}/env"), ("POST", f"/api/stop/{HEX_ID}"),
+                                 ("GET", "/api/df"), ("POST", "/api/prune/images")):
                 status, _ = self.request(method, path, token=token)
                 self.assertEqual(status, 401, (token, method, path))
         self.docker.assert_not_called()
@@ -123,13 +129,88 @@ class ContainersTest(ServerTest):
         self.docker.return_value = fail("permission denied while trying to connect\n")
         self.assertEqual(self.request("GET", "/api/containers"), (500, "permission denied while trying to connect"))
 
+    def test_podman_uses_json_array_and_is_normalized(self):
+        self.docker.return_value = ok(json.dumps(PODMAN_PS, indent=2) + "\n")
+        with mock.patch.object(docker_gui, "CLI", ["/usr/bin/podman"]):
+            status, body = self.request("GET", "/api/containers")
+        self.assertEqual((status, body), (200, PODMAN_EXPECTED))
+        self.docker.assert_called_once_with("ps", "-a", "--format", "json")
+
+
+# `podman ps -a --format json` do podman 5: array, Id inteiro, Names lista, Ports objetos, Labels dict
+PODMAN_PS = [
+    {"AutoRemove": False, "Command": ["postgres"], "CreatedAt": "2 hours ago", "CIDFile": "", "Exited": False,
+     "ExitedAt": 1759480000, "ExitCode": 0, "ExposedPorts": {"5432": ["tcp"]},
+     "Id": "3f1c2b9a8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a3928170f5e4d3c",
+     "Image": "docker.io/library/postgres:16", "ImageID": "b2c9" + "0" * 60, "IsInfra": False,
+     "Labels": {"com.docker.compose.project": "loja", "com.docker.compose.service": "db",
+                "com.docker.compose.depends_on": "cache:service_started:false,api:service_started:false"},
+     "Mounts": ["/var/lib/postgresql/data"], "Names": ["loja_db_1"], "Namespaces": {}, "Networks": ["loja_default"],
+     "Pid": 4242, "Pod": "", "PodName": "",
+     "Ports": [{"host_ip": "", "container_port": 5432, "host_port": 5432, "range": 1, "protocol": "tcp"},
+               {"host_ip": "127.0.0.1", "container_port": 3000, "host_port": 8000, "range": 4, "protocol": "tcp,udp"}],
+     "Restarts": 0, "Size": None, "StartedAt": 1759480000, "State": "running", "Status": "Up 2 hours (starting)",
+     "Created": 1759480000},
+    {"AutoRemove": False, "Command": None, "CreatedAt": "3 days ago", "Exited": True, "ExitedAt": 1759200000,
+     "ExitCode": 137, "Id": "a" * 64, "Image": "localhost/worker:dev", "Labels": None, "Mounts": [],
+     "Names": ["worker"], "Networks": [], "Pid": 0, "Pod": "", "PodName": "", "Ports": None,
+     "State": "stopped", "Status": "Exited (137) 3 days ago", "Created": 1759100000},
+]
+PODMAN_EXPECTED = [
+    {"ID": PODMAN_PS[0]["Id"], "Names": "loja_db_1", "Image": "docker.io/library/postgres:16", "State": "running",
+     "Status": "Up 2 hours (health: starting)",
+     "Ports": "0.0.0.0:5432->5432/tcp, 127.0.0.1:8000-8003->3000-3003/tcp, 127.0.0.1:8000-8003->3000-3003/udp",
+     "Labels": "com.docker.compose.project=loja,com.docker.compose.service=db,"
+               "com.docker.compose.depends_on=cache:service_started:false,api:service_started:false"},
+    {"ID": "a" * 64, "Names": "worker", "Image": "localhost/worker:dev", "State": "exited",
+     "Status": "Exited (137) 3 days ago", "Ports": "", "Labels": ""},
+]
+
+
+class NormalizeTest(unittest.TestCase):
+    """Saída do podman -> o formato do `docker ps` que a página lê."""
+
+    def test_docker_lines_pass_through(self):
+        row = {"ID": "a" * 12, "Names": "web", "Ports": "0.0.0.0:80->80/tcp", "Labels": "a=1"}
+        self.assertEqual(docker_gui.containers(json.dumps(row) + "\n"), [row])
+        self.assertEqual(docker_gui.containers(""), [])
+
+    def test_podman_array(self):
+        self.assertEqual(docker_gui.containers(json.dumps(PODMAN_PS, indent=2)), PODMAN_EXPECTED)
+        self.assertEqual(docker_gui.containers("[]\n"), [])
+
+    def test_podman_lines_from_docker_shim(self):
+        # podman-docker: `docker ps --format '{{json .}}'` chama o podman e sai uma linha por container
+        out = "\n".join(json.dumps(c) for c in PODMAN_PS)
+        self.assertEqual(docker_gui.containers(out), PODMAN_EXPECTED)
+
+    def test_podman3_camel_case_ports_and_states(self):
+        c = {"Id": "b" * 64, "Names": ["a", "b"], "State": "configured", "Status": "Created",
+             "Ports": [{"hostPort": 8080, "containerPort": 80, "protocol": "tcp", "hostIP": ""},
+                       {"hostPort": 0, "containerPort": 9000, "protocol": "tcp", "hostIP": ""}]}
+        got = docker_gui.from_podman(c)
+        self.assertEqual((got["Names"], got["State"], got["Ports"]), ("a,b", "created", "0.0.0.0:8080->80/tcp, 9000/tcp"))
+
+
+class StatsTest(ServerTest):
+
+    def test_lines_become_json_array(self):
+        rows = [{"ID": "a" * 12, "CPUPerc": "0.52%", "MemUsage": "10.5MiB / 1.944GiB", "MemPerc": "0.53%"}]
+        self.docker.return_value = ok(json.dumps(rows[0]) + "\n")
+        self.assertEqual(self.request("GET", "/api/stats"), (200, rows))
+        self.docker.assert_called_once_with("stats", "--no-stream", "--format", "{{json .}}")
+
+    def test_docker_error_is_500_with_stderr(self):
+        self.docker.return_value = fail("Cannot connect to the Docker daemon\n")
+        self.assertEqual(self.request("GET", "/api/stats"), (500, "Cannot connect to the Docker daemon"))
+
 
 class LogsAndHealthTest(ServerTest):
 
     def test_logs_join_stdout_and_stderr(self):
         self.docker.return_value = ok("out\n", "err\n")
         self.assertEqual(self.request("GET", f"/api/logs/{HEX_ID}"), (200, "out\nerr\n"))
-        self.docker.assert_called_once_with("logs", "--tail", "500", HEX_ID)
+        self.docker.assert_called_once_with("logs", "--timestamps", "--tail", "500", HEX_ID)
 
     def test_logs_error(self):
         self.docker.return_value = fail("No such container")
@@ -144,6 +225,103 @@ class LogsAndHealthTest(ServerTest):
     def test_health_error(self):
         self.docker.return_value = fail("No such object\n")
         self.assertEqual(self.request("GET", f"/api/health/{HEX_ID}"), (500, "No such object"))
+
+
+@unittest.skipUnless(os.name == "posix", "usa script shell")
+class LogsStreamTest(ServerTest):
+    """Logs ao vivo (SSE): o docker é um script shell de verdade, porque o stream roda um processo longo."""
+
+    def setUp(self):
+        super().setUp()
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.dir = d.name
+        patcher = mock.patch.dict(os.environ, {"PATH": d.name + os.pathsep + os.environ.get("PATH", "")})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def fake_docker(self, body):
+        path = os.path.join(self.dir, "docker")
+        with open(path, "w") as f:
+            f.write(f'#!/bin/sh\necho "$@" > {self.dir}/args\n{body}\n')
+        os.chmod(path, 0o755)
+
+    def path(self, token=docker_gui.TOKEN):
+        return f"/api/logs/{HEX_ID}/stream" + (f"?t={token}" if token is not None else "")
+
+    def test_lines_become_events_and_end(self):
+        self.fake_docker("printf 'um\\ndois\\r\\nsem quebra no fim'")
+        status, body = self.request("GET", self.path())
+        self.assertEqual(status, 200)
+        self.assertEqual(body, 'data: "um\\n"\n\ndata: "dois\\r\\n"\n\ndata: "sem quebra no fim"\n\nevent: end\ndata:\n\n')
+        with open(os.path.join(self.dir, "args")) as f:
+            self.assertEqual(f.read().split(), ["logs", "-f", "--timestamps", "--tail", "500", HEX_ID])
+
+    def test_token_goes_in_query(self):
+        self.fake_docker("echo nunca")
+        for token in (None, "", "errado", docker_gui.TOKEN[:-1]):
+            status, _ = self.request("GET", self.path(token))  # o header com o token certo não vale aqui
+            self.assertEqual(status, 401, token)
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "args")))
+
+    def test_disconnect_kills_docker_and_server_keeps_serving(self):
+        self.fake_docker(f"echo $$ > {self.dir}/pid\necho oi\nexec sleep 30")
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        conn.request("GET", self.path(), headers={"Host": f"localhost:{self.port}"})
+        r = conn.getresponse()
+        self.assertEqual(r.getheader("Content-Type"), "text/event-stream; charset=utf-8")
+        self.assertEqual(r.readline(), b'data: "oi\\n"\n')
+        # com o stream aberto, o resto da API continua respondendo
+        self.assertEqual(self.request("GET", "/api/containers"), (200, []))
+        with open(os.path.join(self.dir, "pid")) as f:
+            pid = int(f.read())
+        r.close()  # a resposta segura o socket aberto: sem fechar as duas, a conexão não cai
+        conn.close()
+        for _ in range(50):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.1)
+        self.fail("docker logs -f continuou vivo depois que o cliente desconectou")
+
+
+class InspectTest(ServerTest):
+    """Resumo do inspect. O env sai mascarado; o valor real só vem pelo /env."""
+
+    INFO: ClassVar[dict] = {
+        "HostConfig": {"RestartPolicy": {"Name": "on-failure", "MaximumRetryCount": 3}},
+        "NetworkSettings": {"Networks": {"app_default": {"IPAddress": "172.18.0.2"}, "host": {"IPAddress": ""}}},
+        "Mounts": [{"Type": "volume", "Name": "pgdata", "Source": "/var/lib/docker/volumes/pgdata/_data",
+                    "Destination": "/var/lib/postgresql/data", "RW": True, "Driver": "local"}],
+        "Config": {"Env": ["POSTGRES_PASSWORD=s3cr3t=x", "EMPTY=", "BARE"]}}
+
+    def test_env_masked_by_default(self):
+        self.docker.return_value = ok(json.dumps(self.INFO) + "\n")
+        status, body = self.request("GET", f"/api/inspect/{HEX_ID}")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, {
+            "Restart": "on-failure:3",
+            "Networks": {"app_default": "172.18.0.2", "host": ""},
+            "Mounts": [{"Type": "volume", "Name": "pgdata", "Source": "/var/lib/docker/volumes/pgdata/_data",
+                        "Destination": "/var/lib/postgresql/data", "RW": True}],
+            "Env": [["POSTGRES_PASSWORD", None], ["EMPTY", None], ["BARE", None]]})
+        self.docker.assert_called_once_with("inspect", "--format", "{{json .}}", HEX_ID)
+
+    def test_env_revealed_on_request(self):
+        self.docker.return_value = ok(json.dumps(self.INFO))
+        _, body = self.request("GET", f"/api/inspect/{HEX_ID}/env")
+        self.assertEqual(body["Env"], [["POSTGRES_PASSWORD", "s3cr3t=x"], ["EMPTY", ""], ["BARE", ""]])
+
+    def test_minimal_inspect(self):
+        # container sem restart policy, rede, mount nem env (ou campos null, como o docker às vezes manda)
+        for info in ({}, {"HostConfig": {"RestartPolicy": {"Name": "", "MaximumRetryCount": 0}},
+                          "NetworkSettings": {"Networks": None}, "Mounts": None, "Config": {"Env": None}}):
+            self.assertEqual(docker_gui.summary(info), {"Restart": "no", "Networks": {}, "Mounts": [], "Env": []})
+
+    def test_inspect_error(self):
+        self.docker.return_value = fail("Error: No such object: 0123456789ab\n")
+        self.assertEqual(self.request("GET", f"/api/inspect/{HEX_ID}"), (500, "Error: No such object: 0123456789ab"))
 
 
 class ActionsTest(ServerTest):
@@ -173,6 +351,108 @@ class ActionsTest(ServerTest):
         self.docker.assert_not_called()
 
 
+class ComposeTest(ServerTest):
+    """O cliente só escolhe o projeto; diretório e arquivos saem dos labels dos containers."""
+
+    PS = "\n".join(json.dumps(r) for r in (
+        ["shop", "/srv/shop", "/srv/shop/compose.yml,/srv/shop/compose.override.yml"],
+        ["blog", "/srv/blog", "/srv/blog/compose.yml"])) + "\n"
+    SHOP: ClassVar[dict] = {"project": "shop", "dir": "/srv/shop"}
+
+    def ps_call(self):
+        return mock.call("ps", "-a", "--filter", "label=com.docker.compose.project", "--format", docker_gui.COMPOSE_FORMAT)
+
+    def test_each_action_builds_argv_from_labels(self):
+        self.assertEqual(docker_gui.COMPOSE, {"up": ["up", "-d"], "down": ["down"], "pull": ["pull"]})
+        for action, args in docker_gui.COMPOSE.items():
+            self.docker.reset_mock()
+            self.docker.side_effect = [ok(self.PS), ok(stderr="Container shop-api-1  Started\n")]
+            self.assertEqual(self.request("POST", f"/api/compose/{action}", body=self.SHOP),
+                             (200, "Container shop-api-1  Started"), action)
+            self.assertEqual(self.docker.call_args_list, [self.ps_call(), mock.call(
+                "compose", "-p", "shop", "--project-directory", "/srv/shop",
+                "-f", "/srv/shop/compose.yml", "-f", "/srv/shop/compose.override.yml", *args,
+                timeout=docker_gui.COMPOSE_TIMEOUT)])
+
+    def test_compose_error_is_500_with_stderr(self):
+        self.docker.side_effect = [ok(self.PS), fail("pull access denied\n")]
+        self.assertEqual(self.request("POST", "/api/compose/pull", body=self.SHOP), (500, "pull access denied"))
+
+    def test_ps_error_is_500(self):
+        self.docker.return_value = fail("Cannot connect to the Docker daemon\n")
+        self.assertEqual(self.request("POST", "/api/compose/up", body=self.SHOP), (500, "Cannot connect to the Docker daemon"))
+
+    def test_unknown_pair_is_404_without_compose(self):
+        for body in ({"project": "shop", "dir": "/tmp/evil"}, {"project": "shop", "dir": "/srv/blog"},
+                     {"project": "nope", "dir": "/srv/shop"}):
+            self.docker.reset_mock()
+            self.docker.side_effect = None
+            self.docker.return_value = ok(self.PS)
+            status, _ = self.request("POST", "/api/compose/down", body=body)
+            self.assertEqual(status, 404, body)
+            self.assertEqual(self.docker.call_args_list, [self.ps_call()])
+
+    def test_invalid_body_is_400_without_docker(self):
+        for body in (None, "", "não é json", "[]", '"shop"', "{}", '{"project": "shop"}',
+                     '{"project": 1, "dir": "/srv/shop"}', '{"project": "", "dir": "/srv/shop"}',
+                     json.dumps({**self.SHOP, "x": "a" * docker_gui.MAX_BODY})):
+            status, _ = self.request("POST", "/api/compose/up", body=body)
+            self.assertEqual(status, 400, body and body[:40])
+        self.docker.assert_not_called()
+
+    def test_unknown_action(self):
+        for action in ("start", "rm", "UP", "exec", "build"):
+            status, _ = self.request("POST", f"/api/compose/{action}", body=self.SHOP)
+            self.assertEqual(status, 404, action)
+        self.docker.assert_not_called()
+
+    def test_requires_token(self):
+        status, _ = self.request("POST", "/api/compose/up", token=None, body=self.SHOP)
+        self.assertEqual(status, 401)
+        self.docker.assert_not_called()
+
+
+class DiskTest(ServerTest):
+
+    def test_df_lines_become_json_array(self):
+        rows = [{"Type": "Images", "TotalCount": "10", "Active": "7", "Size": "4.01GB", "Reclaimable": "1.2GB (29%)"},
+                {"Type": "Build Cache", "TotalCount": "2", "Active": "0", "Size": "16.38kB", "Reclaimable": "16.38kB"}]
+        self.docker.return_value = ok("\n".join(json.dumps(r) for r in rows) + "\n")
+        self.assertEqual(self.request("GET", "/api/df"), (200, rows))
+        self.docker.assert_called_once_with("system", "df", "--format", "{{json .}}", timeout=docker_gui.ACTION_TIMEOUT)
+
+    def test_df_error(self):
+        self.docker.return_value = fail("Cannot connect to the Docker daemon\n")
+        self.assertEqual(self.request("GET", "/api/df"), (500, "Cannot connect to the Docker daemon"))
+
+    def test_each_prune_runs_expected_command(self):
+        expected = {"images": ["image", "prune", "-a", "-f"], "volumes": ["volume", "prune", "-f"],
+                    "buildcache": ["builder", "prune", "-a", "-f"]}
+        self.assertEqual(docker_gui.PRUNE, expected)  # mudou a allowlist? reveja o teste e o aviso na página
+        self.docker.return_value = ok("Deleted Images:\nx\n\nTotal reclaimed space: 1.2GB\n")
+        for kind, args in expected.items():
+            self.docker.reset_mock()
+            self.assertEqual(self.request("POST", f"/api/prune/{kind}"),
+                             (200, "Deleted Images:\nx\n\nTotal reclaimed space: 1.2GB"), kind)
+            self.docker.assert_called_once_with(*args, timeout=docker_gui.ACTION_TIMEOUT)
+
+    def test_prune_error_is_500_with_stderr(self):
+        self.docker.return_value = fail("Error response from daemon: a prune operation is already running\n")
+        self.assertEqual(self.request("POST", "/api/prune/volumes"),
+                         (500, "Error response from daemon: a prune operation is already running"))
+
+    def test_unknown_prune_kind(self):
+        for kind in ("system", "containers", "all", "Images", "images/x", HEX_ID):
+            status, _ = self.request("POST", f"/api/prune/{kind}")
+            self.assertEqual(status, 404, kind)
+        self.docker.assert_not_called()
+
+    def test_get_does_not_prune(self):
+        status, _ = self.request("GET", "/api/prune/images")
+        self.assertEqual(status, 404)
+        self.docker.assert_not_called()
+
+
 class IdValidationTest(ServerTest):
     """O ID vai direto para o argv do docker: só hex, de 12 a 64 caracteres."""
 
@@ -189,7 +469,9 @@ class IdValidationTest(ServerTest):
 
     def test_bad_ids_never_reach_docker(self):
         for bad in self.BAD_IDS:
-            for method, path in (("POST", f"/api/stop/{bad}"), ("GET", f"/api/logs/{bad}"), ("GET", f"/api/health/{bad}")):
+            for method, path in (("POST", f"/api/stop/{bad}"), ("GET", f"/api/logs/{bad}"), ("GET", f"/api/health/{bad}"),
+                                 ("GET", f"/api/inspect/{bad}"), ("GET", f"/api/inspect/{bad}/env"),
+                                 ("GET", f"/api/logs/{bad}/stream?t={docker_gui.TOKEN}")):
                 status, _ = self.request(method, path)
                 self.assertEqual(status, 404, path)
         self.docker.assert_not_called()
@@ -199,7 +481,8 @@ class IdValidationTest(ServerTest):
         self.assertEqual(status, 200)
 
     def test_unknown_path(self):
-        for path in ("/api", "/api/", "/api/containers/", "/favicon.ico", "/index.html"):
+        for path in ("/api", "/api/", "/api/containers/", "/favicon.ico", "/index.html",
+                     f"/api/inspect/{HEX_ID}/", f"/api/inspect/{HEX_ID}/envx", f"/api/inspect/{HEX_ID}?env=1"):
             status, _ = self.request("GET", path)
             self.assertEqual(status, 404, path)
 
@@ -211,6 +494,12 @@ class DockerCallTest(unittest.TestCase):
             self.assertEqual(docker_gui.docker("ps", "-a").stdout, "x")
         run.assert_called_once_with(["docker", "ps", "-a"], capture_output=True, text=True,
                                     timeout=docker_gui.READ_TIMEOUT, check=False)
+
+    def test_cli_and_context_prefix_args(self):
+        with mock.patch.object(docker_gui, "CLI", ["podman", "--context", "prod"]), \
+                mock.patch.object(subprocess, "run", return_value=ok()) as run:
+            docker_gui.docker("ps", "-a")
+        self.assertEqual(run.call_args[0][0], ["podman", "--context", "prod", "ps", "-a"])
 
     def test_custom_timeout(self):
         with mock.patch.object(subprocess, "run", return_value=ok()) as run:
@@ -419,7 +708,7 @@ class TerminalTest(ServerTest):
         self.no_process()
 
     def test_origin_on_ip_accepted(self):
-        status, _, sock, _ = self.connect(origin=f"http://127.0.0.1:{self.port}")
+        status, _, _sock, _ = self.connect(origin=f"http://127.0.0.1:{self.port}")
         self.assertEqual(status, 101)
 
     def test_token_rejected(self):
@@ -461,7 +750,7 @@ class TerminalTest(ServerTest):
         self.assertEqual(self.recv(f), (10, b"abc"))
 
     def test_closing_socket_kills_process(self):
-        sock, f = self.open_session()
+        sock, _f = self.open_session()
         pid = self.started()
         sock.shutdown(socket.SHUT_RDWR)
         for _ in range(100):
@@ -478,6 +767,20 @@ class TerminalTest(ServerTest):
         sock.sendall(client_frame(b"ls\n"))
         self.assertEqual(f.read(), b"")  # fecha sem rodar nada
         self.no_process()
+
+
+class MainTest(unittest.TestCase):
+
+    def test_cli_from_env_and_context_flag(self):
+        # patch com o próprio valor: o main() troca os globais e o mock os devolve no fim
+        with mock.patch.object(docker_gui, "CLI", docker_gui.CLI), mock.patch.object(docker_gui, "PAGE", docker_gui.PAGE), \
+                mock.patch.dict(os.environ, {"DOCKER_GUI_CLI": "podman"}), \
+                mock.patch.object(sys, "argv", ["docker_gui.py", "--context", "a b"]), \
+                mock.patch.object(docker_gui, "serve", side_effect=SystemExit):
+            self.assertRaises(SystemExit, docker_gui.main)  # para antes de abrir porta e navegador
+            self.assertEqual(docker_gui.CLI, ["podman", "--context", "a b"])
+            # o "Copiar docker exec" da página usa o mesmo comando, com aspas de shell e escapado no HTML
+            self.assertIn('data-cli="podman --context &#x27;a b&#x27;"', docker_gui.PAGE)
 
 
 @unittest.skipUnless(os.environ.get("DOCKER_GUI_E2E") == "1" and shutil.which("docker"),
@@ -514,6 +817,12 @@ class RealDockerTest(ServerTest):
         self.assertEqual(c["State"], "running")
         self.assertIn("docker-gui-test=1", c["Labels"])
 
+        # a página casa o stats com o ps pelo ID: os dois precisam vir no mesmo formato (curto)
+        _, rows = self.request("GET", "/api/stats")
+        s = next(s for s in rows if s["ID"] == c["ID"])
+        for field in ("CPUPerc", "MemUsage", "MemPerc"):
+            self.assertIn(field, s)
+
         short = c["ID"]
         for action, state in (("pause", "paused"), ("unpause", "running"), ("stop", "exited"), ("start", "running")):
             self.assertEqual(self.request("POST", f"/api/{action}/{short}"), (200, ""), action)
@@ -526,9 +835,23 @@ class RealDockerTest(ServerTest):
         status, health = self.request("GET", f"/api/health/{short}")
         self.assertEqual((status, health), (200, None))  # sem HEALTHCHECK na imagem
 
+        status, insp = self.request("GET", f"/api/inspect/{short}")
+        self.assertEqual((status, insp["Restart"]), (200, "no"))
+        self.assertIn(["PATH", None], insp["Env"])  # mascarado
+        _, insp = self.request("GET", f"/api/inspect/{short}/env")
+        self.assertTrue(any(k == "PATH" and v for k, v in insp["Env"]))
+
         self.assertEqual(self.request("POST", f"/api/remove/{short}"), (200, ""))
         _, rows = self.request("GET", "/api/containers")
         self.assertFalse(any(self.cid.startswith(r["ID"]) for r in rows))
+
+    def test_df(self):
+        # só lê: prune nunca roda contra o Docker de verdade
+        status, rows = self.request("GET", "/api/df")
+        self.assertEqual(status, 200)
+        self.assertTrue({"Images", "Local Volumes", "Build Cache"} <= {r["Type"] for r in rows})
+        for field in ("TotalCount", "Active", "Size", "Reclaimable"):
+            self.assertIn(field, rows[0])  # campos que a página lê
 
     def test_action_on_missing_container(self):
         status, err = self.request("POST", f"/api/stop/{'0' * 64}")

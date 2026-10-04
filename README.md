@@ -12,23 +12,37 @@ O comando abre o navegador em `http://localhost:8765` com um token de acesso. O 
 python3 docker_gui.py --port 9000
 ```
 
+Para usar o [Podman](https://podman.io) no lugar do Docker, ou outro contexto do Docker (um daemon remoto, por exemplo), use `--cli` e `--context`. O `--cli` também pode vir da variável `DOCKER_GUI_CLI`. Sem `--context`, vale o `DOCKER_CONTEXT` do ambiente ou o contexto atual (`docker context use`):
+
+```bash
+python3 docker_gui.py --cli podman
+DOCKER_GUI_CLI=podman python3 docker_gui.py
+python3 docker_gui.py --context producao
+```
+
+A saída do `podman ps` tem outro formato (`Names` em lista, portas como objetos, labels como dicionário…). O servidor converte tudo para o formato do `docker ps`, então a página funciona igual. O "Copiar `docker exec`" usa o mesmo binário e contexto.
+
 ## O que faz
 
 - **Lista ao vivo** de todos os containers, atualizada a cada 2s. Só as linhas que mudaram são redesenhadas, e o poll pausa quando a aba fica escondida.
+- **CPU e memória** de cada container rodando, do `docker stats`, atualizadas a cada 5s (num poll à parte, porque o stats leva uns 2s para medir).
 - **Faixa "Precisa de atenção"** com o que está quebrado: healthcheck falhando, loop de reinício e saída com código diferente de zero. O status vem traduzido, por exemplo "Saiu com código 137 · morto à força ou sem memória (OOM)".
 - **Agrupamento por projeto do compose** (`com.docker.compose.project`), com **Iniciar / Reiniciar / Parar tudo** e "Iniciar de novo" para desfazer.
+- **`compose up` / `pull` / `down` por projeto**, com a pasta e os arquivos do compose lidos dos labels dos containers (o servidor nunca confia num caminho vindo da página). O `down` pede confirmação em 2 passos: os volumes ficam, mas o projeto some da lista e só volta com `up` pelo terminal.
 - **Ações por container:** iniciar, parar, reiniciar, pausar, retomar e remover (com confirmação em 2 passos). Depois de iniciar, a ferramenta confere se o container ficou de pé. Depois de pausar, o aviso oferece "Retomar" (atalho `Z`).
-- **Logs** com acompanhamento ao vivo, botão de copiar e ações no próprio modal. Mostra também a saída do último healthcheck.
+- **Logs** com timestamps, acompanhamento ao vivo, botões de copiar e de baixar (.log) e ações no próprio modal. Mostra também a saída do último healthcheck.
+- **Configuração** no modal de logs: restart policy, redes, mounts e env, do `docker inspect`. Os valores do env chegam mascarados e só saem do servidor quando você clica em Revelar.
 - **Portas:** as HTTP abrem no navegador; as outras (Postgres, Redis…) copiam `localhost:porta`.
 - **Terminal no navegador** pelo menu "⋯" ("Abrir terminal"): um `docker exec -it` com bash (ou sh, se a imagem não tiver bash) num terminal [xterm.js](https://xtermjs.org) embutido. Redimensiona junto com a janela, e o `Esc` vai para o programa (vim, less), não fecha o modal. Só em Linux e macOS.
 - **Copiar `docker exec -it <nome> sh`** pelo menu "⋯".
+- **Uso de disco** (`docker system df`) de imagens, volumes e build cache, com **limpeza** (`prune`) de cada categoria, confirmada em 2 passos como a remoção. Imagens e build cache saem com `-a` (tudo que está sem uso); volumes sem `-a`, então no Docker 23+ os nomeados ficam.
 - **Teclado:** `/` vai para a busca, `↑` `↓` andam entre os botões Logs e `Z` aciona o "desfazer". Os filtros ficam na URL.
 - Tema **claro e escuro** automático, layout de **cards no celular** e acessibilidade AA (contraste, foco, leitores de tela, `prefers-reduced-motion`).
 
 ## Requisitos
 
 - Python 3.7+
-- Docker, com o seu usuário com acesso ao daemon (`docker ps` funcionando sem `sudo`)
+- Docker, com o seu usuário com acesso ao daemon (`docker ps` funcionando sem `sudo`), ou Podman
 
 Não precisa instalar nada. O CSS já vem embutido no arquivo, então funciona offline.
 
