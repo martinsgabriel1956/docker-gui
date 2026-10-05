@@ -210,7 +210,26 @@ class LogsAndHealthTest(ServerTest):
     def test_logs_join_stdout_and_stderr(self):
         self.docker.return_value = ok("out\n", "err\n")
         self.assertEqual(self.request("GET", f"/api/logs/{HEX_ID}"), (200, "out\nerr\n"))
-        self.docker.assert_called_once_with("logs", "--timestamps", "--tail", "500", HEX_ID)
+        self.docker.assert_called_once_with("logs", "--timestamps", "--tail", "500", HEX_ID, timeout=docker_gui.READ_TIMEOUT)
+
+    def test_logs_tail_from_whitelist(self):
+        cases = {"500": ["--tail", "500"], "2000": ["--tail", "2000"], "10000": ["--tail", "10000"], "all": []}
+        for tail, args in cases.items():
+            self.docker.reset_mock()
+            self.assertEqual(self.request("GET", f"/api/logs/{HEX_ID}?tail={tail}")[0], 200, tail)
+            # o log inteiro pode demorar: "all" ganha o prazo longo
+            timeout = docker_gui.ACTION_TIMEOUT if tail == "all" else docker_gui.READ_TIMEOUT
+            self.docker.assert_called_once_with("logs", "--timestamps", *args, HEX_ID, timeout=timeout)
+
+    def test_logs_tail_outside_whitelist_never_reaches_docker(self):
+        for tail in ("", "1", "499", "501", "-1", "0", "100000", "ALL", "+500", "500%20--help", "--help",
+                     "500;rm", "all%00", "500&tail=all"):
+            status, _ = self.request("GET", f"/api/logs/{HEX_ID}?tail={tail}")
+            self.assertIn(status, (400, 404), tail)
+        for query in ("tail=500&x=1", "x=1", "tail=500&tail=all", "t=1&tail=500"):
+            status, _ = self.request("GET", f"/api/logs/{HEX_ID}?{query}")
+            self.assertEqual(status, 404, query)  # só ?tail=... e nada mais
+        self.docker.assert_not_called()
 
     def test_logs_error(self):
         self.docker.return_value = fail("No such container")
@@ -256,6 +275,25 @@ class LogsStreamTest(ServerTest):
         self.assertEqual(body, 'data: "um\\n"\n\ndata: "dois\\r\\n"\n\ndata: "sem quebra no fim"\n\nevent: end\ndata:\n\n')
         with open(os.path.join(self.dir, "args")) as f:
             self.assertEqual(f.read().split(), ["logs", "-f", "--timestamps", "--tail", "500", HEX_ID])
+
+    def test_tail_from_whitelist(self):
+        cases = {"500": ["--tail", "500"], "2000": ["--tail", "2000"], "10000": ["--tail", "10000"], "all": []}
+        for tail, args in cases.items():
+            self.fake_docker("echo oi")
+            status, _ = self.request("GET", self.path() + f"&tail={tail}")
+            self.assertEqual(status, 200, tail)
+            with open(os.path.join(self.dir, "args")) as f:
+                self.assertEqual(f.read().split(), ["logs", "-f", "--timestamps", *args, HEX_ID])
+
+    def test_tail_outside_whitelist_is_400_without_docker(self):
+        self.fake_docker("echo nunca")
+        for query in ("tail=", "tail=1", "tail=-1", "tail=ALL", "tail=500%20--help", "tail=--help", "tail=500;rm",
+                      "tail=500&tail=all", "tail=10000%00"):
+            status, body = self.request("GET", self.path() + "&" + query)
+            self.assertEqual((status, body), (400, "tail inválido"), query)
+        # sem token, nem chega a olhar o tail
+        self.assertEqual(self.request("GET", f"/api/logs/{HEX_ID}/stream?tail=x")[0], 401)
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "args")))
 
     def test_token_goes_in_query(self):
         self.fake_docker("echo nunca")
