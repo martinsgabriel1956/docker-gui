@@ -583,14 +583,16 @@ class Handler(BaseHTTPRequestHandler):
         quem busca a lista é a página. Um "end" quando o docker events termina (daemon fora do ar, podman sem events)."""
         if not EVENTS_SLOTS.acquire(blocking=False):
             return self.send(503, '"streams de eventos demais abertos"')
+        # o podman nem sempre entende {{json .}}; o "json" dele já sai um JSON por linha, como o do docker
+        fmt = "json" if os.path.basename(CLI[0]).startswith("podman") else "{{json .}}"
         try:
-            # o podman nem sempre entende {{json .}}; o "json" dele já sai um JSON por linha, como o do docker
-            fmt = "json" if os.path.basename(CLI[0]).startswith("podman") else "{{json .}}"
-            try:
-                p = subprocess.Popen([*CLI, "events", "--format", fmt, "--filter", "type=container"],
-                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-            except OSError as e:  # binário não encontrado: a página fica no poll, que mostra o erro
-                return self.send(500, json.dumps(str(e)))
+            p = subprocess.Popen([*CLI, "events", "--format", fmt, "--filter", "type=container"],
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        except OSError as e:  # binário não encontrado: a página fica no poll, que mostra o erro
+            # a vaga volta antes da resposta: quem recebe o 500 e tenta de novo na hora não pode levar 503
+            EVENTS_SLOTS.release()
+            return self.send(500, json.dumps(str(e)))
+        try:
             # mesmo ciclo de vida do stream_logs: o select percebe o cliente fechando com o docker quieto,
             # e o with espera o processo morto
             with p:

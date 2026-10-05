@@ -478,7 +478,13 @@ EOF""")
         self.assertFalse(os.path.exists(os.path.join(self.dir, "args")))
 
     def test_missing_binary_is_500_and_frees_slot(self):
-        with mock.patch.object(docker_gui, "EVENTS_SLOTS", threading.BoundedSemaphore(1)):
+        class SlowRelease(threading.BoundedSemaphore):
+            def release(self, *args):  # vaga devolvida devagar: a resposta não pode sair antes dela
+                time.sleep(0.3)
+                super().release(*args)
+
+        # quem recebe o 500 e tenta de novo na hora já acha a vaga livre
+        with mock.patch.object(docker_gui, "EVENTS_SLOTS", SlowRelease(1)):
             with mock.patch.object(docker_gui, "CLI", [os.path.join(self.dir, "nao-existe")]):
                 self.assertEqual(self.request("GET", self.path())[0], 500)
             self.fake_docker("true")
