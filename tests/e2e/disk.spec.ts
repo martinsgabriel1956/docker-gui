@@ -29,11 +29,11 @@ test('limpar imagens usa a confirmação em 2 passos', async ({ page, gui }) => 
   await openDisk(page);
   await page.getByRole('button', { name: 'Limpar imagens' }).click();
   const confirm = page.getByRole('button', { name: 'Confirmar limpeza de imagens' });
-  await expect(confirm).toBeFocused();
-  await expect(page.locator('#df')).toContainText('Apagar as imagens que nenhum container usa? Dá para baixar de novo. Esc cancela.');
+  await expect(page.getByRole('button', { name: 'Cancelar limpeza de imagens' })).toBeFocused();
+  await expect(page.locator('#df')).toContainText('Apagar as imagens que nenhum container usa? Libera até 1.2GB, de 3 itens sem uso. Dá para baixar de novo. Esc cancela.');
 
   await confirm.click();  // logo em seguida, < 600 ms: duplo clique não confirma
-  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Cancelar limpeza de imagens' }).click();
   await expect(confirm).toBeHidden();
   expect(gui.read().pruned).toBeUndefined();
 
@@ -131,7 +131,7 @@ test('remover um volume usa a confirmação em 2 passos', async ({ page, gui }) 
   await openList(page, 'volumes');
   await page.getByRole('button', { name: 'Remover o volume cache' }).click();
   const confirm = page.getByRole('button', { name: 'Confirmar remoção de o volume cache' });
-  await expect(confirm).toBeFocused();
+  await expect(page.getByRole('button', { name: 'Cancelar remoção de o volume cache' })).toBeFocused();
   await expect(item(page, 'volumes', 'cache')).toContainText('Apagar o volume cache? Os dados dele se perdem. Esc cancela.');
 
   await page.keyboard.press('Escape');

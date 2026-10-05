@@ -88,12 +88,18 @@ test('dá para agir no container sem sair dos logs', async ({ page, gui }) => {
   await gui.open({ containers: [ctr('web')] });
   await page.getByRole('button', { name: 'Logs web' }).click();
   const acts = page.locator('#dlg-acts');
-  await expect(acts.getByRole('button')).toHaveText(['Parar', 'Reiniciar', 'Copiar docker exec']);
+  // como na linha: a principal à vista, o resto no "⋯"
+  await expect(acts.getByRole('button').filter({ visible: true })).toHaveText(['Parar']);
+  await acts.locator('summary').click();
+  await expect(acts.getByRole('button').filter({ visible: true })).toHaveText(['Parar', 'Reiniciar', 'Copiar docker exec']);
+  await page.keyboard.press('Escape');  // fecha só o menu, não o modal
+  await expect(acts.locator('summary')).toBeFocused();
+  await expect(page.locator('#dlg')).toBeVisible();
   await acts.getByRole('button', { name: 'Parar web' }).click();
   await expect(page.locator('#dlg-status')).toHaveText('Parado há <1 s');
   await expect(acts.getByRole('button')).toHaveText(['Iniciar']);
   // com o modal aberto, o aviso aparece dentro dele (fora, ficaria atrás do backdrop)
-  await expect(page.locator('#dlg-msg')).toHaveText('web parado.');
+  await expect(page.locator('#dlg-msg')).toContainText('web parado.');
 });
 
 test('modal avisa se o container deixou de existir', async ({ page, gui }) => {

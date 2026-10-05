@@ -26,6 +26,54 @@ test('problemas vão para a faixa de atenção e o resto fica agrupado por proje
   await expect(page.locator('#rows tr[data-key="g:"]')).toContainText('Sem projeto compose');
 });
 
+test('o cabeçalho diz em qual daemon a página age, em âmbar quando é remoto', async ({ page, gui }) => {
+  await gui.open({ containers: [ctr('web')] });
+  const where = page.locator('#where');
+  await expect(where).toHaveText('docker · default');
+  await expect(where).toHaveClass(/text-muted/);
+  await expect(page).toHaveTitle('Docker GUI · 1 rodando');  // o default não entra no título
+  await gui.stop();
+
+  await gui.open({
+    containers: [ctr('web', { Ports: '0.0.0.0:8080->80/tcp, :::8080->80/tcp, 127.0.0.1:5432->5432/tcp' })],
+    context: { Name: 'producao', Host: 'tcp://10.0.0.5:2376' },
+  });
+  await expect(page.locator('#remote')).toContainText('Daemon remoto producao (tcp://10.0.0.5:2376)');
+  // a porta abre pelo host do daemon; a que está no loopback de lá não abre daqui, então o chip só informa
+  await expect(row(page, 'web').getByRole('link')).toHaveAttribute('href', 'http://10.0.0.5:8080');
+  await expect(row(page, 'web').locator('span[title^="Só no loopback do daemon remoto producao"]')).toHaveText('5432→5432');
+  await expect(where).toHaveText('docker · producao, daemon remoto em tcp://10.0.0.5:2376');  // o sr-only conta
+  await expect(where).toHaveClass(/text-warn-fg/);
+  await expect(where).toHaveAttribute('title', 'Daemon em tcp://10.0.0.5:2376');
+  await expect(page).toHaveTitle('Docker GUI · producao · 1 rodando');
+  // o aviso e a confirmação também dizem onde
+  await page.getByRole('button', { name: 'Parar web' }).click();
+  await expect(page.locator('#toast')).toContainText('producao · web parado.');
+  await page.locator('summary[aria-label="Mais ações para web"]').click();
+  await page.getByRole('button', { name: 'Remover…' }).click();
+  await expect(row(page, 'web')).toContainText('producao · Apagar web de vez?');
+  await expect(page.locator('#shown')).toContainText('No daemon remoto producao: Clique em Confirmar para apagar web de vez.');
+});
+
+test('quem caiu mostra a última linha do log na faixa de atenção', async ({ page, gui }) => {
+  // stdout e stderr chegam separados: a ordem certa vem do timestamp, não da posição
+  const logs = '2026-10-05T12:00:01.000000000Z booting\n2026-10-05T12:00:03.000000000Z FATAL: out of memory\n'
+    + '2026-10-05T12:00:02.000000000Z loading cache\n';
+  await gui.open({ containers: [ctr('web', { State: 'exited', Status: 'Exited (137) 2 minutes ago', logs }), ctr('ok', { logs })] });
+  await expect(row(page, 'web')).toContainText('Última linha do log: FATAL: out of memory');
+  await expect(row(page, 'ok')).not.toContainText('Última linha do log');  // quem está de pé não precisa
+});
+
+test('? mostra a lista de atalhos', async ({ page, gui }) => {
+  await gui.open({ containers: [ctr('web')] });
+  await page.locator('body').click({ position: { x: 5, y: 5 } });
+  await page.keyboard.press('?');
+  await expect(page.locator('#hint')).toBeVisible();
+  await expect(page.locator('#hint')).toContainText('desfaz a última ação');
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#hint')).toBeHidden();
+});
+
 test('contagem por estado e título da aba', async ({ page, gui }) => {
   await gui.open({ containers: [...shop, ...loose] });
   const pills = page.locator('#count button[data-a="filter"]');
@@ -72,8 +120,8 @@ test('botão principal depende do estado e Logs fica sempre no mesmo lugar', asy
     ],
   });
   const actions = async (name: string) =>
-    row(page, name).locator('button[data-a]:not([data-a^="m-"])').evaluateAll(bs => bs.map(b => b.textContent!.trim()));
-  expect(await actions('on')).toEqual(['Parar', 'Logs']);
+    row(page, name).locator('button[data-a]:not([data-a^="m-"])').evaluateAll(bs => bs.map(b => b.textContent!.trim() || b.getAttribute('aria-label')));
+  expect(await actions('on')).toEqual(['Parar', 'Reiniciar on', 'Logs']);  // o Reiniciar é um ícone, à vista só rodando
   expect(await actions('off')).toEqual(['Iniciar', 'Logs']);
   expect(await actions('pausado')).toEqual(['Retomar', 'Logs']);
   expect(await actions('zumbi')).toEqual(['Logs']);  // dead não inicia: só remove, pelo menu

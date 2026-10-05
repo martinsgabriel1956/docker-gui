@@ -5,13 +5,16 @@ const toast = (page: import('@playwright/test').Page) => page.locator('#toast');
 // o "⋯" é um <summary> com aria-label
 const menu = (page: import('@playwright/test').Page, name: string) => page.locator(`summary[aria-label="Mais ações para ${name}"]`);
 
-test('Parar avisa e a linha passa para o novo estado', async ({ page, gui }) => {
+test('Parar avisa, a linha passa para o novo estado e dá para iniciar de novo', async ({ page, gui }) => {
   await gui.open({ containers: [ctr('web')] });
   await page.getByRole('button', { name: 'Parar web' }).click();
-  await expect(toast(page)).toHaveText('web parado.');
+  await expect(toast(page)).toContainText('web parado.');
   await expect(page.locator(`#st-${id('web')}`)).toHaveText('Parado há <1 s');
   await expect(page.getByRole('button', { name: 'Iniciar web' })).toBeVisible();
   expect(gui.container('web')!.State).toBe('exited');
+  // como no Parar tudo e no lote: o aviso desfaz
+  await toast(page).getByRole('button', { name: 'Iniciar de novo' }).click();
+  await expect(toast(page)).toHaveText('web está de pé.');
 });
 
 test('Iniciar confere depois de uns segundos se o container ficou de pé', async ({ page, gui }) => {
@@ -52,7 +55,7 @@ test('durante a ação a linha mostra o andamento e trava os botões', async ({ 
   await expect(page.locator(`#st-${id('web')}`)).toHaveText('Parando…');
   await expect(page.getByRole('button', { name: 'Parar web' })).toHaveAttribute('aria-disabled', 'true');
   await expect(page.getByRole('button', { name: 'Logs web' })).not.toHaveAttribute('aria-disabled');  // Logs nunca trava
-  await expect(toast(page)).toHaveText('web parado.');
+  await expect(toast(page)).toContainText('web parado.');
   await expect(page.getByRole('button', { name: 'Iniciar web' })).not.toHaveAttribute('aria-disabled');
 });
 
@@ -77,17 +80,34 @@ test('Copiar docker exec pelo menu', async ({ page, context, gui }) => {
 });
 
 test.describe('remover em 2 passos', () => {
+  test('armar não mexe na tabela, e o × cancela', async ({ page, gui }) => {
+    await gui.open({ containers: [stopped('cron'), ctr('web', { Status: 'Restarting (1) 4 seconds ago', State: 'restarting' })] });
+    // posição das colunas pela linha vizinha: o Confirmar e o aviso não podem alargar a coluna de ações
+    const cols = () => row(page, 'web').locator('td').evaluateAll(tds => tds.map(td => Math.round(td.getBoundingClientRect().left)));
+    const before = await cols();
+    await menu(page, 'cron').click();
+    await page.getByRole('button', { name: 'Remover…' }).click();
+    await expect(page.getByRole('button', { name: 'Cancelar remoção de cron' })).toBeFocused();
+    expect(await cols()).toEqual(before);
+
+    await page.getByRole('button', { name: 'Cancelar remoção de cron' }).click();
+    await expect(page.getByRole('button', { name: 'Confirmar remoção de cron' })).toBeHidden();
+    await expect(menu(page, 'cron')).toBeFocused();
+    expect(gui.container('cron')).toBeDefined();
+  });
+
   test('primeiro clique arma, Esc cancela e o segundo clique remove', async ({ page, gui }) => {
     await gui.open({ containers: [stopped('cron'), stopped('velho')] });
     await menu(page, 'cron').click();
     await page.getByRole('button', { name: 'Remover…' }).click();
     const confirm = page.getByRole('button', { name: 'Confirmar remoção de cron' });
     await expect(confirm).toBeVisible();
-    await expect(row(page, 'cron')).toContainText('Apagar de vez? Os volumes ficam. Esc cancela.');
+    await expect(row(page, 'cron')).toContainText('Apagar cron de vez? Os volumes ficam. Esc cancela.');
 
     await page.keyboard.press('Escape');
     await expect(confirm).toBeHidden();
     expect(gui.container('cron')).toBeDefined();
+    await expect(menu(page, 'cron')).toBeFocused();  // volta para o "⋯" de onde veio o Remover
 
     await menu(page, 'cron').click();
     await page.getByRole('button', { name: 'Remover…' }).click();
@@ -115,7 +135,14 @@ test.describe('remover em 2 passos', () => {
     await menu(page, 'cron').click();
     await page.getByRole('button', { name: 'Remover…' }).click();
     const confirm = page.getByRole('button', { name: 'Confirmar remoção de cron' });
-    await expect(confirm).toBeFocused();  // o foco vai para o Confirmar, então ele espera (WCAG 2.2.1)
+    // o foco vai para o ×, o botão seguro; com ele (ou o Confirmar) em foco, a confirmação espera (WCAG 2.2.1)
+    await expect(page.getByRole('button', { name: 'Cancelar remoção de cron' })).toBeFocused();
+    await page.clock.runFor(15_000);
+    await expect(confirm).toBeVisible();
+    await page.keyboard.press('Shift+Tab');  // o Confirmar está a um Tab
+    await expect(page.getByRole('button', { name: 'Logs cron' })).toBeFocused();
+    await page.keyboard.press('Shift+Tab');
+    await expect(confirm).toBeFocused();
     await page.clock.runFor(15_000);
     await expect(confirm).toBeVisible();
 
@@ -126,12 +153,44 @@ test.describe('remover em 2 passos', () => {
     expect(gui.container('cron')).toBeDefined();
   });
 
+  test.describe('no toque', () => {
+    test.use({ hasTouch: true, isMobile: true, viewport: { width: 390, height: 844 } });
+    test('cancela sozinho em 8 s mesmo com o foco nos botões, como o aviso promete', async ({ page, gui }) => {
+      await page.clock.install();
+      await gui.open({ containers: [stopped('cron')] });
+      await menu(page, 'cron').click();
+      await page.getByRole('button', { name: 'Remover…' }).click();
+      const confirm = page.getByRole('button', { name: 'Confirmar remoção de cron' });
+      await expect(row(page, 'cron')).toContainText('Cancela sozinho em 8 s.');
+      await expect(page.getByRole('button', { name: 'Cancelar remoção de cron' })).toBeFocused();
+      await page.clock.runFor(9_000);
+      await expect(confirm).toBeHidden();
+      expect(gui.container('cron')).toBeDefined();
+    });
+  });
+
   test('container rodando não tem Remover no menu', async ({ page, gui }) => {
     await gui.open({ containers: [ctr('web')] });
     await menu(page, 'web').click();
-    await expect(page.getByRole('button', { name: 'Reiniciar' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Pausar' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Reiniciar', exact: true })).toHaveCount(0);  // fica à vista na linha
     await expect(page.getByRole('button', { name: 'Remover…' })).toHaveCount(0);
   });
+});
+
+test('Reiniciar fica à vista na linha, e r reinicia a linha em foco', async ({ page, gui }) => {
+  await gui.open({ containers: [ctr('web'), stopped('cron')] });
+  await expect(row(page, 'cron').getByRole('button', { name: 'Reiniciar cron' })).toHaveCount(0);  // só quem está rodando
+  await row(page, 'web').getByRole('button', { name: 'Reiniciar web' }).click();
+  await expect(toast(page)).toHaveText('web reiniciado, conferindo se ficou de pé…');
+  await expect(toast(page)).toHaveText('web está de pé.');
+
+  await page.getByRole('button', { name: 'Logs web' }).focus();
+  await page.keyboard.press('r');
+  await expect(toast(page)).toHaveText('web reiniciado, conferindo se ficou de pé…');
+  await page.getByRole('button', { name: 'Logs cron' }).focus();
+  await page.keyboard.press('r');  // parado: r não faz nada
+  await expect(page.locator(`#st-${id('cron')}`)).toHaveText('Parado há 3 d');
 });
 
 test('Parar tudo do projeto, com "Iniciar de novo" para desfazer', async ({ page, gui }) => {
@@ -143,6 +202,7 @@ test('Parar tudo do projeto, com "Iniciar de novo" para desfazer', async ({ page
       ctr('solto'),
     ],
   });
+  await page.locator('summary[aria-label="Mais ações do projeto shop"]').click();  // migrate parado: a principal é Iniciar tudo
   await page.getByRole('button', { name: 'Parar tudo do projeto shop (2)', exact: true }).click();
   await expect(toast(page)).toContainText('shop: 2 parados.');
   expect(gui.read().containers.filter(c => c.State === 'running').map(c => c.Names)).toEqual(['solto']);

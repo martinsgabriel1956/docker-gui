@@ -7,7 +7,9 @@
 </head>
 <body class="min-h-screen bg-canvas text-fg-soft antialiased selection:bg-accent/30">
 <a href="#table" class="sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-50 focus:rounded-md focus:bg-fg-strong focus:px-3 focus:py-2 focus:text-sm focus:text-canvas">Pular para a lista</a>
-<main class="max-w-7xl mx-auto px-4 py-8">
+<!-- só com daemon remoto (app.ts): lembra o tempo todo onde as ações caem -->
+<div id="remote" role="note" hidden class="sticky top-0 z-30 border-b border-warn/40 bg-warn/15 px-4 py-2 text-center text-sm text-warn-fg"></div>
+<main class="max-w-7xl mx-auto px-4 pt-8 pb-[calc(2rem+var(--dock,0px))]">
   <header class="flex flex-wrap items-start justify-between gap-4 mb-6">
     <div>
       <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
@@ -15,29 +17,46 @@
           <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" class="size-6 text-accent"><path d="M12 2.5 3.5 7v10l8.5 4.5 8.5-4.5V7z"/><path d="M3.5 7 12 11.5 20.5 7M12 11.5v10"/></svg>
           Containers
         </h1>
+        <!-- onde as ações caem: o contexto do docker, em âmbar quando o daemon é remoto (app.ts preenche) -->
+        <span id="where" class="empty:hidden font-mono text-xs px-2 py-0.5 rounded-md ring-1 ring-line-strong text-muted"></span>
         <button id="new" onclick="openCreate()" class="px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 rounded-md text-sm font-medium ring-1 ring-accent/40 bg-accent/10 text-accent-fg hover:bg-accent/20 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">+ Novo container</button>
       </div>
       <div id="count" role="group" aria-label="Filtrar por estado" class="flex flex-wrap gap-1 mt-2 text-sm text-muted">Carregando…</div>
     </div>
     <div class="w-full sm:w-72">
       <label for="q" class="sr-only">Filtrar containers por nome, imagem ou projeto</label>
-      <input id="q" type="search" placeholder="Filtrar por nome, imagem ou projeto…" aria-describedby="hint"
+      <input id="q" type="search" placeholder="Filtrar por nome, imagem ou projeto…" aria-describedby="q-hint"
         class="w-full rounded-lg bg-raised ring-1 ring-line px-3 py-2 max-lg:py-3 text-sm text-fg-strong placeholder:text-muted focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
-      <p id="hint" class="mt-1.5 text-xs text-muted max-lg:hidden">Atalhos:
-        <kbd class="font-mono text-xs px-1 rounded ring-1 ring-line-strong text-fg-soft">/</kbd> busca ·
-        <kbd class="font-mono text-xs px-1 rounded ring-1 ring-line-strong text-fg-soft">↑</kbd>
-        <kbd class="font-mono text-xs px-1 rounded ring-1 ring-line-strong text-fg-soft">↓</kbd> entre os botões Logs ·
-        <kbd class="font-mono text-xs px-1 rounded ring-1 ring-line-strong text-fg-soft">x</kbd> seleciona a linha ·
-        <kbd class="font-mono text-xs px-1 rounded ring-1 ring-line-strong text-fg-soft">a</kbd> todos</p>
-      <button id="notify" hidden onclick="askNotify()" class="mt-1.5 max-lg:py-3 text-xs text-accent-fg underline underline-offset-4 hover:text-accent-soft rounded focus-visible:outline-2 focus-visible:outline-accent">Notificar quando algo der problema</button>
+      <!-- o que o leitor de tela ouve ao focar a busca: só o atalho dela, não a lista inteira do popover -->
+      <span id="q-hint" class="sr-only">Atalho: barra (/) volta para esta busca; interrogação (?) mostra todos os atalhos.</span>
+      <div class="mt-1.5 flex flex-wrap items-center gap-x-4">
+        <button popovertarget="hint" aria-keyshortcuts="?" class="max-lg:hidden text-xs text-muted hover:text-fg rounded focus-visible:outline-2 focus-visible:outline-accent">
+          <kbd class="font-mono px-1 rounded ring-1 ring-line-strong text-fg-soft">?</kbd> Atalhos</button>
+        <button id="notify" hidden onclick="askNotify()" class="max-lg:py-3 text-xs text-accent-fg underline underline-offset-4 hover:text-accent-soft rounded focus-visible:outline-2 focus-visible:outline-accent">Notificar quando algo der problema</button>
+      </div>
+      <!-- popover nativo: fecha com Esc e com clique fora -->
+      <div id="hint" popover class="m-auto w-[min(26rem,calc(100vw-2rem))] rounded-xl bg-raised ring-1 ring-line-strong p-4 text-sm text-fg-soft shadow-lg shadow-black/40 backdrop:bg-transparent">
+        <p class="mb-3 font-semibold text-fg-strong">Atalhos do teclado</p>
+        <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 [&_kbd]:font-mono [&_kbd]:text-xs [&_kbd]:px-1.5 [&_kbd]:rounded [&_kbd]:ring-1 [&_kbd]:ring-line-strong [&_kbd]:text-fg-strong">
+          <dt><kbd>/</kbd></dt><dd>busca na lista (nos logs, filtra as linhas)</dd>
+          <dt><kbd>↑</kbd> <kbd>↓</kbd></dt><dd>anda entre os botões Logs</dd>
+          <dt><kbd>r</kbd></dt><dd>reinicia o container da linha em foco</dd>
+          <dt><kbd>x</kbd></dt><dd>marca ou desmarca a linha em foco</dd>
+          <dt><kbd>a</kbd></dt><dd>marca ou desmarca todos os visíveis</dd>
+          <dt><kbd>z</kbd></dt><dd>desfaz a última ação (Iniciar de novo, Retomar)</dd>
+          <dt><kbd>Esc</kbd></dt><dd>cancela uma confirmação, fecha menus e modais</dd>
+          <dt><kbd>?</kbd></dt><dd>mostra esta lista</dd>
+        </dl>
+      </div>
     </div>
   </header>
   <p id="shown" class="sr-only" aria-live="polite"></p>
 
   <div id="banner" role="alert" class="hidden mb-4 rounded-lg ring-1 ring-warn/30 bg-warn/10 px-4 py-3 text-sm"></div>
 
-  <!-- ações em lote: só aparece com algo selecionado; gruda no topo para continuar à mão ao rolar a lista -->
-  <div id="bulk" role="region" aria-label="Ações em lote" class="hidden sticky top-2 z-20 mb-3 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl ring-1 ring-accent/40 bg-raised px-4 py-2.5 shadow-lg shadow-black/20"></div>
+  <!-- ações em lote: só aparece com algo selecionado. Flutua embaixo (fora do fluxo: marcar uma caixa não empurra a tabela
+       para longe do cursor), mas fica aqui no DOM, antes da lista que ela comanda, para o Tab e o leitor de tela -->
+  <div id="bulk" role="region" aria-label="Ações em lote" class="hidden fixed bottom-4 left-1/2 -translate-x-1/2 z-30 w-max max-w-[min(64rem,calc(100vw-2rem))] flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl ring-1 ring-accent/40 bg-raised px-4 py-2.5 shadow-lg shadow-black/30"></div>
   <!-- fora da barra: região viva escondida com display:none não anuncia nada -->
   <p id="sel-live" class="sr-only" aria-live="polite"></p>
 
@@ -77,40 +96,52 @@
   </details>
 </main>
 
-<dialog id="dlg" aria-labelledby="dlg-title" class="m-auto w-[min(1100px,95vw)] rounded-xl bg-raised text-fg-soft ring-1 ring-line-strong backdrop:bg-black/70 p-0">
-  <div class="px-4 py-3 border-b border-line space-y-3">
-    <div class="flex items-start gap-3">
-      <div class="mr-auto min-w-0">
+<!-- coluna de altura fixa: o container (encolhe e rola se precisar), as ferramentas dos logs e, com o resto, os logs -->
+<dialog id="dlg" aria-labelledby="dlg-title" class="m-auto w-[min(1100px,95vw)] h-[min(56rem,92dvh)] open:flex flex-col overflow-hidden rounded-xl bg-raised text-fg-soft ring-1 ring-line-strong backdrop:bg-black/70 p-0">
+  <div class="min-h-0 overflow-auto px-4 py-3 border-b border-line space-y-2">
+    <div class="flex flex-wrap items-start gap-x-3 gap-y-2">
+      <div class="mr-auto min-w-0 flex-1 basis-56">
         <h2 id="dlg-title" class="text-lg font-semibold text-fg-strong truncate">Logs · <span id="lt"></span></h2>
         <div id="dlg-status" class="text-sm mt-0.5"></div>
       </div>
+      <span id="dlg-acts" class="flex items-center gap-1.5 max-lg:gap-2 empty:hidden max-lg:order-last max-lg:basis-full"></span>
       <button onclick="dlg.close(); afterClose()" aria-label="Fechar logs" class="shrink-0 grid place-items-center size-8 max-lg:size-11 rounded-md text-muted hover:text-fg-strong hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent">
         <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="size-4"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
     </div>
-    <div class="flex flex-wrap items-center gap-2">
-      <span id="dlg-acts" class="contents"></span>
-      <span aria-hidden="true" class="h-5 w-px bg-hover mx-1 max-lg:hidden"></span>
-      <button id="refresh" onclick="refreshLogs()" class="px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover aria-disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Atualizar</button>
-      <button id="follow" aria-pressed="false" onclick="toggleFollow()" class="group px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover aria-pressed:bg-accent/15 aria-pressed:text-accent-soft aria-pressed:ring-accent/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"><span aria-hidden="true" class="hidden group-aria-pressed:inline-block size-1.5 mr-1.5 align-middle rounded-full bg-accent animate-pulse motion-reduce:animate-none"></span>Acompanhar ao vivo</button>
-      <button onclick="copyLogs()" class="px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Copiar</button>
-      <button onclick="downloadLogs()" class="px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Baixar .log</button>
-    </div>
-    <!-- filtro só na página (o docker não vê o texto); / foca o campo, como a busca da lista -->
-    <div class="flex flex-wrap items-center gap-2">
-      <label for="lf" class="sr-only">Filtrar linhas dos logs</label>
-      <input id="lf" type="search" placeholder="Filtrar linhas… (atalho /)" aria-keyshortcuts="/" aria-describedby="lcount" autocomplete="off" spellcheck="false"
-        class="w-full sm:w-72 rounded-md bg-canvas ring-1 ring-line-strong/80 px-2.5 py-1 max-lg:py-3 text-xs max-lg:text-sm text-fg-strong placeholder:text-muted focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
-      <span id="lcount" aria-live="polite" aria-atomic="true" class="text-xs text-muted"></span>
-      <span id="lmeta" class="ml-auto text-xs text-muted">Últimas 500 linhas</span>
-      <button id="more" onclick="loadMore()" class="px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover aria-disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Carregar 2.000 linhas</button>
-    </div>
     <details id="insp" ontoggle="this.open && loadInspect()" class="text-xs">
       <summary class="cursor-pointer w-fit py-1 max-lg:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent text-muted hover:text-fg">Configuração: restart, redes, mounts e env</summary>
-      <div id="insp-body" class="mt-1 max-h-[30vh] overflow-auto">Carregando…</div>
+      <div id="insp-body" class="mt-1">Carregando…</div>
     </details>
-    <div id="dlg-msg" role="status" aria-live="polite" class="empty:hidden"></div>
   </div>
-  <pre id="lb" tabindex="0" aria-label="Saída dos logs" class="focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent h-[65vh] overflow-auto p-4 text-xs leading-relaxed font-mono text-fg-soft whitespace-pre-wrap [overflow-wrap:anywhere]"></pre>
+  <!-- ferramentas dos logs, coladas na caixa: filtro (só na página; / foca o campo, como a busca da lista) e o que fazer com o texto -->
+  <div class="shrink-0 px-4 pt-3 pb-2 flex flex-wrap items-center gap-2">
+    <label for="lf" class="sr-only">Filtrar linhas dos logs</label>
+    <input id="lf" type="search" placeholder="Filtrar linhas… (atalho /)" aria-keyshortcuts="/" aria-describedby="lcount" autocomplete="off" spellcheck="false"
+      class="flex-1 min-w-48 sm:max-w-72 rounded-md bg-canvas ring-1 ring-line-strong/80 px-2.5 py-1 max-lg:py-3 text-xs max-lg:text-sm text-fg-strong placeholder:text-muted focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+    <span id="lcount" aria-live="polite" aria-atomic="true" class="text-xs text-muted empty:hidden"></span>
+    <span class="ml-auto flex flex-wrap items-center gap-1.5 max-lg:gap-2">
+      <button id="follow" aria-pressed="false" aria-label="Acompanhar ao vivo" onclick="toggleFollow()" class="group px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover aria-pressed:bg-accent/15 aria-pressed:text-accent-soft aria-pressed:ring-accent/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"><span aria-hidden="true" class="hidden group-aria-pressed:inline-block size-1.5 mr-1.5 align-middle rounded-full bg-accent animate-pulse motion-reduce:animate-none"></span>Ao vivo</button>
+      <button id="refresh" onclick="refreshLogs()" class="max-lg:hidden px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent aria-disabled:opacity-40">Atualizar</button>
+      <button onclick="copyLogs()" class="max-lg:hidden px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Copiar</button>
+      <button onclick="downloadLogs()" class="max-lg:hidden px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Baixar .log</button>
+      <!-- no celular, Atualizar, Copiar e Baixar cabem num "⋯" (mesmo menu das linhas): sobra tela para os logs -->
+      <details data-keep="menu" class="lg:hidden shrink-0" ontoggle="placeMenu(this)">
+        <summary aria-label="Mais ações dos logs" class="list-none [&::-webkit-details-marker]:hidden cursor-pointer grid place-items-center w-11 min-h-11 rounded-md ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+          <svg aria-hidden="true" viewBox="0 0 16 16" fill="currentColor" class="size-4"><circle cx="3.5" cy="8" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="12.5" cy="8" r="1.3"/></svg></summary>
+        <div class="fixed z-30 min-w-48 rounded-lg bg-raised ring-1 ring-line-strong p-1 shadow-lg shadow-black/40">
+          <button onclick="menuPick(this); refreshLogs()" class="block w-full text-left px-3 py-3 rounded-md text-sm text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent">Atualizar</button>
+          <button onclick="menuPick(this); copyLogs()" class="block w-full text-left px-3 py-3 rounded-md text-sm text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent">Copiar</button>
+          <button onclick="menuPick(this); downloadLogs()" class="block w-full text-left px-3 py-3 rounded-md text-sm text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent">Baixar .log</button>
+        </div></details>
+    </span>
+  </div>
+  <!-- quanto do histórico está na caixa; o Carregar mais pede as linhas de antes, que entram por cima -->
+  <div class="shrink-0 px-4 pb-2 flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-line">
+    <span id="lmeta" class="text-xs text-muted">Últimas 500 linhas</span>
+    <button id="more" onclick="loadMore()" class="data-done:ring-0 data-done:px-0 data-done:min-h-0 data-done:opacity-100 data-done:text-muted data-done:cursor-default px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent aria-disabled:opacity-40">Carregar 2.000 linhas</button>
+    <div id="dlg-msg" role="status" aria-live="polite" class="empty:hidden basis-full"></div>
+  </div>
+  <pre id="lb" tabindex="0" aria-label="Saída dos logs" class="flex-1 min-h-40 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent overflow-auto p-4 text-xs leading-relaxed font-mono text-fg-soft whitespace-pre-wrap [overflow-wrap:anywhere]"></pre>
 </dialog>
 
 <!-- Esc vai para o programa do terminal (vim, less...): fecha só pelo × -->
@@ -203,7 +234,7 @@
   </form>
 </dialog>
 
-<div id="toast" role="status" aria-live="polite" class="fixed bottom-4 right-4 max-w-md"></div>
+<div id="toast" role="status" aria-live="polite" class="fixed bottom-[calc(1rem+var(--dock,0px))] left-1/2 -translate-x-1/2 w-max max-w-[min(28rem,calc(100vw-2rem))] z-40"></div>
 
 <script>
 /*JS*/

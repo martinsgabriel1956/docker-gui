@@ -31,6 +31,11 @@
   --color-accent: oklch(74.6% 0.16 232.661);  /* sky-400 */
   --color-accent-fg: oklch(82.8% 0.111 230.318);  /* sky-300 */
   --color-accent-soft: oklch(90.1% 0.058 230.902);  /* sky-200 */
+  /* serviços nos logs do projeto: só distinguem um do outro, então nenhum é tom de status (ok, aviso, erro, pausa) */
+  --color-svc-1: oklch(82.3% 0.12 346.018);  /* pink-300 */
+  --color-svc-2: oklch(89.7% 0.196 126.665);  /* lime-300 */
+  --color-svc-3: oklch(86.5% 0.127 207.078);  /* cyan-300 */
+  --color-svc-4: oklch(78.5% 0.115 274.713);  /* indigo-300 */
 }
 
 /* tema claro: mesmos tokens, outros valores */
@@ -63,5 +68,9 @@
     --color-accent: oklch(58.8% 0.158 241.966);  /* sky-600 */
     --color-accent-fg: oklch(50% 0.134 242.749);  /* sky-700 */
     --color-accent-soft: oklch(44.3% 0.11 240.79);  /* sky-800 */
+    --color-svc-1: oklch(52.5% 0.223 3.958);  /* pink-700 */
+    --color-svc-2: oklch(53.2% 0.157 131.589);  /* lime-700 */
+    --color-svc-3: oklch(52% 0.105 223.128);  /* cyan-700 */
+    --color-svc-4: oklch(45.7% 0.24 277.023);  /* indigo-700 */
   }
 }

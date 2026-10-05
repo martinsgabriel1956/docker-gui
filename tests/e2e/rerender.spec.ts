@@ -60,6 +60,20 @@ test('menu "⋯" aberto não fecha sozinho com o poll', async ({ page, gui }) =>
   await expect(menu).not.toHaveAttribute('open', '');
 });
 
+test('rolar leva o menu "⋯" junto e só fecha quando o botão sai da tela', async ({ page, gui }) => {
+  await page.setViewportSize({ width: 390, height: 500 });
+  await gui.open({ containers: ['a', 'b', 'c', 'd', 'e', 'f'].map(n => ctr(n)) });
+  const menu = row(page, 'c').locator('details[data-keep="menu"]');
+  await menu.locator('summary').click();
+  const gap = () => menu.evaluate(d => Math.round(d.querySelector('div')!.getBoundingClientRect().top - d.querySelector('summary')!.getBoundingClientRect().bottom));
+  const before = await gap();
+  await page.mouse.wheel(0, 40);  // um toque de dedo
+  await expect(menu).toHaveAttribute('open', '');
+  expect(await gap()).toBe(before);  // o menu acompanhou o botão
+  await page.mouse.wheel(0, 3000);  // o botão saiu da tela
+  await expect(menu).not.toHaveAttribute('open', '');
+});
+
 test('leitura nova do stats redesenha a linha sem fechar o menu nem tirar o foco', async ({ page, gui }) => {
   const reading = (CPUPerc: string) => ({ CPUPerc, MemUsage: '20MiB / 1.944GiB', MemPerc: '1.00%' });
   await gui.open({ containers: [ctr('a', { stats: [reading('1.00%'), reading('9.00%')] })] });

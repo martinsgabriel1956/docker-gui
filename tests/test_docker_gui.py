@@ -1631,6 +1631,19 @@ class MainTest(unittest.TestCase):
             self.assertEqual(docker_gui.CLI, ["podman", "--context", "a b"])
             # o "Copiar docker exec" da página usa o mesmo comando, com aspas de shell e escapado no HTML
             self.assertIn('data-cli="podman --context &#x27;a b&#x27;"', docker_gui.PAGE)
+            self.assertIn('data-where="podman · a b" data-host=""', docker_gui.PAGE)
+
+    def test_where_asks_docker_for_the_current_context(self):
+        ok = lambda out: subprocess.CompletedProcess([], 0, out, "")
+        with mock.patch.object(docker_gui, "CLI", ["docker"]), mock.patch.object(docker_gui, "docker") as run:
+            run.return_value = ok("producao\ttcp://10.0.0.5:2376\n")
+            self.assertEqual(docker_gui.where(), ("docker · producao", "tcp://10.0.0.5:2376", True))
+            run.return_value = ok("desktop-linux\tunix:///Users/eu/.docker/run/docker.sock\n")  # Docker Desktop: local
+            self.assertEqual(docker_gui.where(), ("docker · desktop-linux", "unix:///Users/eu/.docker/run/docker.sock", False))
+            run.return_value = subprocess.CompletedProcess([], 1, "", "unknown command")  # docker antigo
+            self.assertEqual(docker_gui.where(), ("docker", "", False))
+            run.side_effect = FileNotFoundError
+            self.assertEqual(docker_gui.where(), ("docker", "", False))
 
 
 @unittest.skipUnless(os.environ.get("DOCKER_GUI_E2E") == "1" and shutil.which("docker"),

@@ -36,6 +36,7 @@ export type DockerState = {
   compose_fail?: string; compose_calls?: string[][]; events_error?: string;
   run_calls?: string[][]; run_fail?: string; run_delay?: number; run_after?: { State: string; Status: string };
   images?: ImageRow[]; volumes?: VolumeRow[]; networks?: NetworkRow[]; removed?: string[];
+  context?: { Name: string; Host: string };  // o que o `context inspect` responde (padrão: default em unix://)
 };
 
 // ID estável por nome: o mesmo container tem o mesmo ID em todo teste
