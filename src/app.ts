@@ -116,6 +116,7 @@ function showProblem(p: Problem | null) {
 }
 
 async function load() {
+  lastLoad = Date.now();
   try {
     const r = await api('/api/containers'), j: unknown = await r.json();
     if (r.status === 401) return showProblem(['Esta aba não tem o token do Docker GUI.',
@@ -140,6 +141,40 @@ async function load() {
       'Rode <code class="font-mono">python3 docker_gui.py</code> de novo; a página volta sozinha.', (e as Error).message, 'server']);
   }
 }
+
+// lista ao vivo: com o stream de eventos do docker conectado, cada leva de eventos refaz a consulta e o poll vira
+// rede de segurança (o docker não avisa a passagem do tempo: "Up 5 minutes" -> "Up 6 minutes"). Sem o stream
+// (recusado, caiu, podman sem events), poll de 2 s
+const POLL = 2000, POLL_LIVE = 30000, COALESCE = 200;
+let events: EventSource | null = null, live = false, lastLoad = 0, evTimer: number | undefined, evRetry: number | undefined,
+    loading: Promise<void> | null = null, again = false;
+// aba escondida não consulta o docker (a não ser com as notificações ligadas: é para elas que serve)
+const watching = () => !document.hidden || notifying();
+
+// no máximo uma consulta em voo: o que chega no meio dela vira mais uma depois, não várias em paralelo
+function refresh() {
+  if (loading) { again = true; return; }
+  loading = load().finally(() => { loading = null; if (again) { again = false; refresh(); } });
+}
+
+function connectEvents() {
+  clearTimeout(evRetry); evRetry = undefined;
+  if (events || !watching()) return;
+  // EventSource não manda header: o token vai na query, como no ao vivo dos logs
+  const es = events = new EventSource(`/api/events/stream?t=${encodeURIComponent(TOKEN)}`);
+  es.onopen = () => { live = true; refresh(); };  // o que mudou antes de o docker events começar a ouvir
+  // uma rajada (compose up: create, start... de cada serviço) vira uma consulta só, no máximo COALESCE ms depois
+  es.onmessage = () => {
+    if (watching() && evTimer === undefined) evTimer = setTimeout(() => { evTimer = undefined; refresh(); }, COALESCE);
+  };
+  // desiste por um tempo e volta ao poll de 2 s (que mostra o erro, se houver); "end" é o docker events que
+  // terminou (daemon fora do ar, podman sem events...)
+  const drop = () => { closeEvents(); evRetry = setTimeout(connectEvents, POLL_LIVE); };
+  es.addEventListener('end', drop);
+  // queda: o EventSource reconecta sozinho, com o poll de 2 s enquanto isso; CLOSED é recusa (token, limite, erro)
+  es.onerror = () => { live = false; if (es.readyState === EventSource.CLOSED) drop(); };
+}
+function closeEvents() { events?.close(); events = null; live = false; }
 
 // notificação do sistema só por pedido explícito (botão no cabeçalho) e só para quem acabou de entrar na faixa
 // de atenção; com a página em foco ela não aparece, a lista e o favicon já mostram
@@ -1258,7 +1293,12 @@ $('#lf').addEventListener('keydown', e => {
   const f = e.target as HTMLInputElement;
   if (e.key === 'Escape' && f.value) { e.preventDefault(); f.value = ''; paint(); }
 });
-// aba escondida não consulta o docker (a não ser com as notificações ligadas: é para elas que serve); ao voltar, atualiza na hora
-document.addEventListener('visibilitychange', () => document.hidden || load());
+// aba escondida solta o stream de eventos (e o docker events do servidor); ao voltar, atualiza na hora
+document.addEventListener('visibilitychange', () => {
+  if (watching()) connectEvents(); else closeEvents();
+  if (!document.hidden) load();
+});
 $('#notify').hidden = !canAsk();
-readHash(); render(); load(); setInterval(() => (document.hidden && !notifying()) || load(), 2000); statsLoop();
+readHash(); render(); load(); connectEvents(); statsLoop();
+// o tique é sempre de 2 s; com o stream de eventos no ar, só consulta se a última consulta tem mais de 30 s
+setInterval(() => { if (watching() && Date.now() - lastLoad > (live ? POLL_LIVE : POLL) - 500) load(); }, POLL);
