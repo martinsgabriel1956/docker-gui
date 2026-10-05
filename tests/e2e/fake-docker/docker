@@ -3,7 +3,7 @@
 
 Cenários que o Docker de verdade não reproduz sob demanda (healthcheck falhando, loop de reinício,
 ação que falha ou demora) viram dados. Campos extras por container, fora do formato do `docker ps`:
-  logs    texto do `docker logs`; com -f, o que for acrescentado depois sai na hora
+  logs    texto do `docker logs` (respeita o --tail); com -f, o que for acrescentado depois sai na hora
   health  objeto do `inspect --format {{json .State.Health}}`
   inspect objeto do `inspect --format {{json .}}` (HostConfig, NetworkSettings, Mounts, Config...)
   fail    {ação: stderr}: a ação falha com essa mensagem
@@ -60,14 +60,21 @@ def save(f, state):
     json.dump(state, f)
 
 
-def follow(path, ref):
+def tail(logs, args):
+    """--tail N: só as últimas N linhas; sem ele, tudo (como o docker)."""
+    if "--tail" not in args:
+        return logs
+    return "".join(logs.splitlines(keepends=True)[-int(args[args.index("--tail") + 1]):])
+
+
+def follow(path, ref, args):
     """logs -f: manda o que já tem, depois só o que for acrescentado; termina quando o container para, como o docker."""
-    sent = 0
+    sent = None
     while True:
         with locked(path, exclusive=False) as (_, state):
             c = find(state, ref)
         logs = c.get("logs", "")
-        sys.stdout.write(logs[sent:])
+        sys.stdout.write(tail(logs, args) if sent is None else logs[sent:])
         sys.stdout.flush()
         sent = len(logs)
         if c["State"] not in ("running", "paused"):
@@ -99,7 +106,7 @@ def main(args):
     cmd, ref = args[0], args[-1]
     action = "remove" if cmd == "rm" else cmd
     if cmd == "logs" and "-f" in args:
-        return follow(path, ref)
+        return follow(path, ref, args)
 
     if cmd == "exec":
         # terminal: confere o argv que o servidor monta e roda um sh local no lugar do container
@@ -147,7 +154,7 @@ def main(args):
             # o builder prune resume diferente dos outros
             print(f"Total:\t{freed}" if cmd == "builder" else f"Total reclaimed space: {freed}")
         elif cmd == "logs":
-            sys.stdout.write(find(state, ref).get("logs", ""))
+            sys.stdout.write(tail(find(state, ref).get("logs", ""), args))
         elif cmd == "inspect":
             c = find(state, ref)
             print(json.dumps(c.get("health") if ".State.Health" in args[-2] else c.get("inspect", {})))

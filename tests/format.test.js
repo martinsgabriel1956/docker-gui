@@ -164,3 +164,15 @@ test('usage mostra CPU e a memória usada; o limite fica no title', () => {
   assert.deepEqual(f.usage({ID: 'a', CPUPerc: '0.52%', MemUsage: '10.5MiB / 1.944GiB', MemPerc: '0.53%'}),
                    ['CPU 0.52% · RAM 10.5MiB', 'Memória: 10.5MiB / 1.944GiB (0.53%)']);
 });
+
+test('logFilter busca o texto literal, sem diferenciar maiúsculas', () => {
+  assert.equal(f.logFilter(''), null);
+  const re = f.logFilter('erro');
+  assert.deepEqual('Erro: deu ERRO e erro'.split(re), ['', 'Erro', ': deu ', 'ERRO', ' e ', 'erro', '']);
+  assert.deepEqual('tudo certo'.split(re), ['tudo certo']);  // não casou: a linha inteira, sozinha
+  // caractere especial de regex vale como texto
+  assert.deepEqual('GET /a?b=1 (x) [y] a.b*c'.split(f.logFilter('?b=1 (x) [y]')), ['GET /a', '?b=1 (x) [y]', ' a.b*c']);
+  assert.deepEqual('a.b axb'.split(f.logFilter('a.b')), ['', 'a.b', ' axb']);
+  assert.deepEqual('C:\\tmp\\x $HOME ^|'.split(f.logFilter('\\tmp\\')), ['C:', '\\tmp\\', 'x $HOME ^|']);
+  assert.deepEqual('${x} ^|'.split(f.logFilter('${x} ^|')), ['', '${x} ^|', '']);
+});

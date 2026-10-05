@@ -33,12 +33,14 @@ A saída do `podman ps` tem outro formato (`Names` em lista, portas como objetos
 - **`compose up` / `pull` / `down` por projeto**, com a pasta e os arquivos do compose lidos dos labels dos containers (o servidor nunca confia num caminho vindo da página). O `down` pede confirmação em 2 passos: os volumes ficam, mas o projeto some da lista e só volta com `up` pelo terminal.
 - **Ações por container:** iniciar, parar, reiniciar, pausar, retomar e remover (com confirmação em 2 passos). Depois de iniciar, a ferramenta confere se o container ficou de pé. Depois de pausar, o aviso oferece "Retomar" (atalho `Z`).
 - **Logs** com timestamps, acompanhamento ao vivo, botões de copiar e de baixar (.log) e ações no próprio modal. Mostra também a saída do último healthcheck.
+- **Filtro nos logs:** mostra só as linhas que contêm o texto (sem diferenciar maiúsculas, sem regex), com o trecho marcado e a contagem de ocorrências. Vale também para o que chega ao vivo. Copiar e Baixar levam o que está na tela, então com o filtro saem só as linhas filtradas. `Esc` no campo limpa o filtro; com o campo vazio, fecha o modal.
+- **Mais histórico nos logs:** o modal abre com as últimas 500 linhas, e "Carregar mais" pede 2.000, 10.000 e depois o log inteiro. Ao vivo, vai até 10.000 (o limite de linhas na tela acompanha); para o log inteiro, desligue o ao vivo. Quando o log é menor que o pedido, o botão avisa que já está tudo ali.
 - **Configuração** no modal de logs: restart policy, redes, mounts e env, do `docker inspect`. Os valores do env chegam mascarados e só saem do servidor quando você clica em Revelar.
 - **Portas:** as HTTP abrem no navegador; as outras (Postgres, Redis…) copiam `localhost:porta`.
 - **Terminal no navegador** pelo menu "⋯" ("Abrir terminal"): um `docker exec -it` com bash (ou sh, se a imagem não tiver bash) num terminal [xterm.js](https://xtermjs.org) embutido. Redimensiona junto com a janela, e o `Esc` vai para o programa (vim, less), não fecha o modal. Só em Linux e macOS.
 - **Copiar `docker exec -it <nome> sh`** pelo menu "⋯".
 - **Uso de disco** (`docker system df`) de imagens, volumes e build cache, com **limpeza** (`prune`) de cada categoria, confirmada em 2 passos como a remoção. Imagens e build cache saem com `-a` (tudo que está sem uso); volumes sem `-a`, então no Docker 23+ os nomeados ficam.
-- **Teclado:** `/` vai para a busca, `↑` `↓` andam entre os botões Logs e `Z` aciona o "desfazer". Os filtros ficam na URL.
+- **Teclado:** `/` vai para a busca (com o modal de logs aberto, para o filtro das linhas), `↑` `↓` andam entre os botões Logs e `Z` aciona o "desfazer". O `Ctrl+F` continua sendo a busca do navegador. Os filtros ficam na URL.
 - Tema **claro e escuro** automático, layout de **cards no celular** e acessibilidade AA (contraste, foco, leitores de tela, `prefers-reduced-motion`).
 
 ## Requisitos
@@ -58,9 +60,9 @@ O servidor só escuta em `127.0.0.1` e foi pensado para uso local em máquina de
 | Token aleatório por execução, exigido no cabeçalho `X-Docker-GUI-Token` | Containers com `network_mode: host`, outros usuários e outros processos na máquina |
 | Cabeçalho próprio, sem CORS | Sites maliciosos chamando a API pelo seu navegador (CSRF) |
 | Validação do cabeçalho `Host` | DNS rebinding |
-| IDs só em hex, lista fixa de ações e nenhum shell no host | Injeção de comando |
+| IDs só em hex, listas fixas de ações e de parâmetros (o histórico dos logs só aceita 500, 2000, 10000 ou tudo) e nenhum shell no host | Injeção de comando |
 | Terminal: `Origin` conferido (só a própria página) e token na query do WebSocket | Sites maliciosos abrindo um shell no container pelo seu navegador (cross-site WebSocket hijacking) |
-| Timeout em toda chamada ao `docker` (15 s para leitura, 120 s para ações) | Daemon travado acumulando threads presas |
+| Timeout em toda chamada ao `docker` (15 s para leitura, 120 s para ações e para o log inteiro) | Daemon travado acumulando threads presas |
 
 O token chega à página pelo `#fragmento` do link: o fragmento não é enviado ao servidor e sai da URL assim que a página carrega. Ele fica no `localStorage`, que é isolado por porta, e não em cookie, que vazaria para outros servidores em `localhost`. Cada execução gera um token novo. Se a página mostrar "sem token", abra o link impresso no terminal.
 
@@ -111,7 +113,7 @@ As funções de `src/format.ts` têm testes próprios. O Node (22.18+) importa o
 node --test tests/format.test.js
 ```
 
-Os testes de UI usam o [Playwright](https://playwright.dev) e cobrem o que a página faz na tela: agrupamento e faixa de atenção, filtros e atalhos, ações (incluindo a remoção em 2 passos e o "conferindo se ficou de pé"), modal de logs, terminal, healthcheck, estados de erro e o que o redesenho a cada 2 s preserva (foco, seleção de texto, menus abertos). Cada teste sobe o próprio `docker_gui.py` contra um `docker` falso (`tests/e2e/fake-docker/docker`), que lê os containers de um JSON. Assim dá para montar cenários exatos (healthcheck falhando, loop de reinício, ação que falha ou demora) sem precisar de daemon:
+Os testes de UI usam o [Playwright](https://playwright.dev) e cobrem o que a página faz na tela: agrupamento e faixa de atenção, filtros e atalhos, ações (incluindo a remoção em 2 passos e o "conferindo se ficou de pé"), modal de logs (filtro e mais histórico, também ao vivo), terminal, healthcheck, estados de erro e o que o redesenho a cada 2 s preserva (foco, seleção de texto, menus abertos). Cada teste sobe o próprio `docker_gui.py` contra um `docker` falso (`tests/e2e/fake-docker/docker`), que lê os containers de um JSON. Assim dá para montar cenários exatos (healthcheck falhando, loop de reinício, ação que falha ou demora) sem precisar de daemon:
 
 ```bash
 npx playwright install chromium   # uma vez
