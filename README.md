@@ -24,20 +24,27 @@ A saída do `podman ps` tem outro formato (`Names` em lista, portas como objetos
 
 ## O que faz
 
-- **Lista ao vivo** de todos os containers, atualizada a cada 2s. Só as linhas que mudaram são redesenhadas, e o poll pausa quando a aba fica escondida.
+- **Lista ao vivo** de todos os containers, atualizada a cada 2s. Só as linhas que mudaram são redesenhadas, e o poll pausa quando a aba fica escondida (a não ser com as notificações ligadas).
 - **CPU e memória** de cada container rodando, do `docker stats`, atualizadas a cada 5s (num poll à parte, porque o stats leva uns 2s para medir).
 - **Faixa "Precisa de atenção"** com o que está quebrado: healthcheck falhando, loop de reinício e saída com código diferente de zero. O status vem traduzido, por exemplo "Saiu com código 137 · morto à força ou sem memória (OOM)".
+- **Favicon com a contagem** da faixa de atenção (`9+` acima de 9) e `!` quando a lista não consegue atualizar.
+- **Notificação do sistema** quando um container entra na faixa de atenção, só se você pedir pelo botão "Notificar quando algo der problema", abaixo da busca. O botão aparece em contexto seguro (`localhost` é) enquanto a permissão não foi decidida. A notificação só sai com a página em segundo plano (aba escondida ou janela sem foco): `<nome> precisa de atenção`, com o status no corpo, ou `N containers precisam de atenção`, com os nomes, quando entram vários juntos. Quem já estava na faixa ao abrir a página não notifica e quem continua nela não repete; sair e voltar conta como entrada nova. Clicar na notificação traz a página para a frente. No Chrome do Android ela não aparece, e fica só o favicon.
 - **Agrupamento por projeto do compose** (`com.docker.compose.project`), com **Iniciar / Reiniciar / Parar tudo** e "Iniciar de novo" para desfazer.
-- **`compose up` / `pull` / `down` por projeto**, com a pasta e os arquivos do compose lidos dos labels dos containers (o servidor nunca confia num caminho vindo da página). O `down` pede confirmação em 2 passos: os volumes ficam, mas o projeto some da lista e só volta com `up` pelo terminal.
+- **`compose up` / `up --build` / `pull` / `down` por projeto**, com a pasta e os arquivos do compose lidos dos labels dos containers (o servidor nunca confia num caminho vindo da página). O `down` pede confirmação em 2 passos: os volumes ficam, mas o projeto some da lista e só volta com `up` pelo terminal.
+- **Reiniciar um serviço** pelo menu "⋯" de um container do compose: `docker compose restart <serviço>`, que reinicia todas as réplicas do serviço e depois confere se ficaram de pé. O nome do serviço também sai dos labels: o servidor só aceita um serviço que exista no projeto.
+- **Logs do projeto inteiro** pelo botão Logs do cabeçalho do projeto: `docker compose logs`, no mesmo modal dos logs de um container, com o prefixo do serviço em cada linha (`api-1  | …`) e em ordem cronológica. O ao vivo também funciona e para quando todos os containers do projeto param. O filtro e o "Carregar mais" valem aqui também, mas o histórico conta por container: "últimas 500 linhas" são 500 de cada um.
+- Projetos compose só aparecem enquanto têm algum container (rodando ou parado): a pasta do projeto vem dos labels, então um projeto que nunca subiu ou que levou `down` não tem de onde ser lido.
 - **Ações por container:** iniciar, parar, reiniciar, pausar, retomar e remover (com confirmação em 2 passos). Depois de iniciar, a ferramenta confere se o container ficou de pé. Depois de pausar, o aviso oferece "Retomar" (atalho `Z`).
 - **Logs** com timestamps, acompanhamento ao vivo, botões de copiar e de baixar (.log) e ações no próprio modal. Mostra também a saída do último healthcheck.
+- **Filtro nos logs:** mostra só as linhas que contêm o texto (sem diferenciar maiúsculas, sem regex), com o trecho marcado e a contagem de ocorrências. Vale também para o que chega ao vivo. Copiar e Baixar levam o que está na tela, então com o filtro saem só as linhas filtradas. `Esc` no campo limpa o filtro; com o campo vazio, fecha o modal.
+- **Mais histórico nos logs:** o modal abre com as últimas 500 linhas, e "Carregar mais" pede 2.000, 10.000 e depois o log inteiro. Ao vivo, vai até 10.000 (o limite de linhas na tela acompanha); para o log inteiro, desligue o ao vivo. Quando o log é menor que o pedido, o botão avisa que já está tudo ali.
 - **Configuração** no modal de logs: restart policy, redes, mounts e env, do `docker inspect`. Os valores do env chegam mascarados e só saem do servidor quando você clica em Revelar.
 - **Portas:** as HTTP abrem no navegador; as outras (Postgres, Redis…) copiam `localhost:porta`.
 - **Terminal no navegador** pelo menu "⋯" ("Abrir terminal"): um `docker exec -it` com bash (ou sh, se a imagem não tiver bash) num terminal [xterm.js](https://xtermjs.org) embutido. Redimensiona junto com a janela, e o `Esc` vai para o programa (vim, less), não fecha o modal. Só em Linux e macOS.
 - **Copiar `docker exec -it <nome> sh`** pelo menu "⋯".
 - **Uso de disco** (`docker system df`) de imagens, volumes e build cache, com **limpeza** (`prune`) de cada categoria, confirmada em 2 passos como a remoção. Imagens e build cache saem com `-a` (tudo que está sem uso); volumes sem `-a`, então no Docker 23+ os nomeados ficam.
 - **Imagens, volumes e redes um a um**, na mesma seção: imagens com tags, ID, tamanho, idade e "sem tag" (dangling); volumes com driver; redes com driver e escopo, com as padrão (`bridge`, `host`, `none`) marcadas. Cada item diz quais containers o usam (parados também). Cada lista só consulta o docker quando é aberta. **Remover** usa a mesma confirmação em 2 passos, sem `-f`: o que está em uso o docker recusa, e o erro aparece no item com uma explicação ("Em uso: remova o container que usa antes"). As redes padrão não têm o botão, e o servidor recusa removê-las. Uma imagem com mais de uma tag o docker só remove com `-f`, que a página não usa: remova as tags pelo terminal.
-- **Teclado:** `/` vai para a busca, `↑` `↓` andam entre os botões Logs e `Z` aciona o "desfazer". Os filtros ficam na URL.
+- **Teclado:** `/` vai para a busca (com o modal de logs aberto, para o filtro das linhas), `↑` `↓` andam entre os botões Logs e `Z` aciona o "desfazer". O `Ctrl+F` continua sendo a busca do navegador. Os filtros ficam na URL.
 - Tema **claro e escuro** automático, layout de **cards no celular** e acessibilidade AA (contraste, foco, leitores de tela, `prefers-reduced-motion`).
 
 ## Requisitos
@@ -57,14 +64,15 @@ O servidor só escuta em `127.0.0.1` e foi pensado para uso local em máquina de
 | Token aleatório por execução, exigido no cabeçalho `X-Docker-GUI-Token` | Containers com `network_mode: host`, outros usuários e outros processos na máquina |
 | Cabeçalho próprio, sem CORS | Sites maliciosos chamando a API pelo seu navegador (CSRF) |
 | Validação do cabeçalho `Host` | DNS rebinding |
-| IDs só em hex (nome de volume só com `[a-zA-Z0-9][a-zA-Z0-9_.-]*`), lista fixa de ações e nenhum shell no host | Injeção de comando |
+| IDs só em hex (nome de volume só com `[a-zA-Z0-9][a-zA-Z0-9_.-]*`), listas fixas de ações e de parâmetros (o histórico dos logs só aceita 500, 2000, 10000 ou tudo) e nenhum shell no host | Injeção de comando |
+| Compose: pasta, arquivos e serviços só dos labels dos containers; o nome do serviço vai depois de um `--` | Página (ou script) apontando o `docker compose` para outra pasta, outro arquivo ou uma flag |
 | Remoção de rede confere o nome pelo próprio docker e recusa `bridge`, `host`, `none` (e a `podman`) | Derrubar a rede padrão do daemon |
 | Terminal: `Origin` conferido (só a própria página) e token na query do WebSocket | Sites maliciosos abrindo um shell no container pelo seu navegador (cross-site WebSocket hijacking) |
-| Timeout em toda chamada ao `docker` (15 s para leitura, 120 s para ações) | Daemon travado acumulando threads presas |
+| Timeout em toda chamada ao `docker` (15 s para leitura, 120 s para ações e para o log inteiro) | Daemon travado acumulando threads presas |
 
 O token chega à página pelo `#fragmento` do link: o fragmento não é enviado ao servidor e sai da URL assim que a página carrega. Ele fica no `localStorage`, que é isolado por porta, e não em cookie, que vazaria para outros servidores em `localhost`. Cada execução gera um token novo. Se a página mostrar "sem token", abra o link impresso no terminal.
 
-O WebSocket do navegador não manda cabeçalho próprio, por isso o terminal leva o token na query (`/api/exec/<id>?t=…`). O servidor não registra URLs. Fechar o terminal mata o `docker exec`, mas o shell dentro do container nem sempre morre junto ([moby#9098](https://github.com/moby/moby/issues/9098)): um processo que você deixou rodando nele pode continuar até o container parar.
+O WebSocket do navegador não manda cabeçalho próprio, por isso o terminal leva o token na query (`/api/exec/<id>?t=…`). Os logs ao vivo (Server-Sent Events) também: só as rotas de stream, que só leem, aceitam o token assim. O servidor não registra URLs. Fechar o terminal mata o `docker exec`, mas o shell dentro do container nem sempre morre junto ([moby#9098](https://github.com/moby/moby/issues/9098)): um processo que você deixou rodando nele pode continuar até o container parar.
 
 > Quem consegue rodar `docker` na sua máquina já tem poder equivalente ao de root. O token impede que a GUI amplie esse acesso, mas não substitui o cuidado com quem está no grupo `docker`.
 
@@ -111,7 +119,7 @@ As funções de `src/format.ts` têm testes próprios. O Node (22.18+) importa o
 node --test tests/format.test.js
 ```
 
-Os testes de UI usam o [Playwright](https://playwright.dev) e cobrem o que a página faz na tela: agrupamento e faixa de atenção, filtros e atalhos, ações (incluindo a remoção em 2 passos e o "conferindo se ficou de pé"), modal de logs, terminal, healthcheck, estados de erro e o que o redesenho a cada 2 s preserva (foco, seleção de texto, menus abertos). Cada teste sobe o próprio `docker_gui.py` contra um `docker` falso (`tests/e2e/fake-docker/docker`), que lê os containers de um JSON. Assim dá para montar cenários exatos (healthcheck falhando, loop de reinício, ação que falha ou demora) sem precisar de daemon:
+Os testes de UI usam o [Playwright](https://playwright.dev) e cobrem o que a página faz na tela: agrupamento e faixa de atenção, filtros e atalhos, ações (incluindo a remoção em 2 passos e o "conferindo se ficou de pé"), modal de logs (filtro e mais histórico, também ao vivo), terminal, healthcheck, estados de erro e o que o redesenho a cada 2 s preserva (foco, seleção de texto, menus abertos). Cada teste sobe o próprio `docker_gui.py` contra um `docker` falso (`tests/e2e/fake-docker/docker`), que lê os containers de um JSON. Assim dá para montar cenários exatos (healthcheck falhando, loop de reinício, ação que falha ou demora) sem precisar de daemon:
 
 ```bash
 npx playwright install chromium   # uma vez

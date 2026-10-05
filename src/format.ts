@@ -64,6 +64,9 @@ export const project = (c: Pick<Container, 'Labels'>): string =>
 // pasta do projeto compose (vai para o compose up/down/pull; o servidor confere contra os labels)
 export const workingDir = (c: Pick<Container, 'Labels'>): string =>
   (c.Labels || '').match(/(?:^|,)com\.docker\.compose\.project\.working_dir=([^,]*)/)?.[1] || '';
+// serviço do compose (vai para o compose restart; o servidor confere contra os serviços do projeto)
+export const service = (c: Pick<Container, 'Labels'>): string =>
+  (c.Labels || '').match(/(?:^|,)com\.docker\.compose\.service=([^,]*)/)?.[1] || '';
 
 // "About an hour" -> "~1 h", "23 minutes" -> "23 min", "Less than a second" -> "<1 s"
 export function dur(s: string): string {
@@ -118,6 +121,11 @@ export interface Stats {
 // [texto curto, title com o limite de memória]
 export const usage = (s: Stats): StatusText =>
   [`CPU ${s.CPUPerc} · RAM ${s.MemUsage.split(' / ')[0]}`, `Memória: ${s.MemUsage} (${s.MemPerc})`];
+
+// filtro do modal de logs: texto literal (nada de regex do usuário), sem diferenciar maiúsculas; '' = sem filtro.
+// O grupo faz o split devolver os trechos que casaram: "erro e Erro".split(re) -> ['', 'erro', ' e ', 'Erro', '']
+export const logFilter = (q: string): RegExp | null =>
+  q ? new RegExp(`(${q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'i') : null;
 
 // /api/images, /api/volumes e /api/networks: o servidor já põe docker e podman num formato só.
 // Containers = nomes dos containers que usam (parados também)

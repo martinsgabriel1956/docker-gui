@@ -47,15 +47,25 @@ WS_MAX = 1 << 20  # maior mensagem aceita do navegador (colar um texto grande ca
 CLI = ["docker"]  # binário + flags globais; main() troca por --cli (ex.: podman) e --context
 # estados do podman que o docker não tem -> o equivalente que a página entende
 PODMAN_STATE = {"configured": "created", "initialized": "created", "stopping": "running", "stopped": "exited"}
-# por projeto compose; pull e up baixam imagens, por isso o prazo longo
-COMPOSE = {"up": ["up", "-d"], "down": ["down"], "pull": ["pull"]}
+# por projeto compose; pull e up baixam imagens (e o --build compila), por isso o prazo longo
+COMPOSE = {"up": ["up", "-d"], "rebuild": ["up", "-d", "--build"], "down": ["down"], "pull": ["pull"]}
+# por serviço: o nome vai no fim do argv e só vale se for um serviço do projeto (label com.docker.compose.service)
+COMPOSE_SERVICE = {"restart": ["restart"]}
 COMPOSE_TIMEOUT = 600
+# logs do projeto inteiro (+ o --tail de LOG_TAIL): o compose prefixa cada linha com o serviço ("api-1  | ...") e aplica
+# o --tail por container
+COMPOSE_LOGS = ["logs", "--no-color", "--timestamps"]
 # .Label (um por vez) e não .Labels: este junta tudo com vírgula, e config_files já tem vírgula
 COMPOSE_FORMAT = ('[{{json (.Label "com.docker.compose.project")}},{{json (.Label "com.docker.compose.project.working_dir")}},'
-                  '{{json (.Label "com.docker.compose.project.config_files")}}]')
+                  '{{json (.Label "com.docker.compose.project.config_files")}},{{json (.Label "com.docker.compose.service")}}]')
+# timestamp do docker logs logo depois do prefixo do compose
+LOG_TIME = re.compile(r"\|\s(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?")
 MAX_BODY = 64 * 1024
 # comandos que imprimem um JSON por linha; o stats só lista os rodando e leva ~2 s para medir a CPU
 LISTS = {"/api/containers": ["ps", "-a"], "/api/stats": ["stats", "--no-stream"]}
+# quanto histórico dos logs a página pode pedir (?tail=): o argv sai daqui, nunca da query. "all" é sem --tail
+# (o padrão do docker e do podman; o podman não aceita "--tail all")
+LOG_TAIL = {"500": ["--tail", "500"], "2000": ["--tail", "2000"], "10000": ["--tail", "10000"], "all": []}
 
 
 def docker(*args, timeout=READ_TIMEOUT):
@@ -180,6 +190,16 @@ OBJECTS = {"images": (["image", "ls", "--no-trunc"], images), "volumes": (["volu
            "networks": (["network", "ls", "--no-trunc"], networks)}
 
 
+def by_time(text):
+    """Saída do `compose logs` em ordem cronológica: sem -f, ele despeja um container de cada vez.
+    A fração vem sem os zeros do fim (RFC3339Nano) e é completada antes de comparar; sem timestamp, vai para o topo."""
+    def key(line):
+        m = LOG_TIME.search(line)
+        return (m[1], (m[2] or "").ljust(9, "0")) if m else ("", "")
+    # split e não splitlines: um \r (ou outro separador) no meio do log é parte da linha, não uma linha nova
+    return "".join(f"{line}\n" for line in sorted(filter(None, text.split("\n")), key=key))
+
+
 def summary(info, reveal=False):
     """Resumo do `docker inspect`: restart policy, redes, mounts e env.
     O env costuma ter senha e token: sem reveal, os valores nem saem do servidor (vão como null)."""
@@ -251,13 +271,28 @@ class Handler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/exec/([0-9a-f]{12,64})", path)
         if m:
             return self.terminal(m[1])
-        m = re.fullmatch(r"/api/logs/([0-9a-f]{12,64})/stream", path)
-        if m:  # EventSource não manda header custom: só esta rota (GET, só leitura) aceita o token na query
-            if not hmac.compare_digest(parse_qs(query).get("t", [""])[0].encode(), TOKEN.encode()):
+        m = re.fullmatch(r"/api/(?:logs/([0-9a-f]{12,64})|compose/logs)/stream", path)
+        if m:  # EventSource não manda header custom: só estas rotas (GET, só leitura) aceitam o token na query
+            qs = parse_qs(query, keep_blank_values=True)  # "?tail=" vazio é inválido, não o padrão
+            if not hmac.compare_digest(qs.get("t", [""])[0].encode(), TOKEN.encode()):
                 return self.send(401, '"token ausente ou inválido"')
-            return self.stream_logs(m[1])
+            tail = self.log_tail(qs)
+            if tail is None:
+                return None
+            if m[1]:
+                return self.stream_logs(["logs", "-f", "--timestamps", *tail, m[1]])
+            base = self.compose_query(query)
+            return None if base is None else self.stream_logs([*base, *COMPOSE_LOGS, *tail, "--follow"])
         if not self.token_ok():
             return self.send(401, '"token ausente ou inválido"')
+        if path == "/api/compose/logs":  # todos os serviços juntos, em ordem cronológica
+            tail = self.log_tail(parse_qs(query, keep_blank_values=True))
+            base = None if tail is None else self.compose_query(query)
+            if base is None:
+                return None
+            # sem --tail, o log inteiro de todos os containers: o prazo das ações
+            r = docker(*base, *COMPOSE_LOGS, *tail, timeout=READ_TIMEOUT if tail else ACTION_TIMEOUT)
+            return self.send(500, json.dumps(r.stderr.strip())) if r.returncode else self.send(200, json.dumps(by_time(r.stdout)))
         if self.path in LISTS or self.path == "/api/df":
             ps = self.path == "/api/containers"
             # o ps do podman só sai completo em "json" (um array); containers() converte para o formato do docker
@@ -273,9 +308,13 @@ class Handler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/(\w+)", self.path)
         if m and m[1] in OBJECTS:
             return self.objects(*OBJECTS[m[1]])
-        m = re.fullmatch(r"/api/logs/([0-9a-f]{12,64})", self.path)
+        m = re.fullmatch(r"/api/logs/([0-9a-f]{12,64})(?:\?tail=([^&]*))?", self.path)
         if m:
-            r = docker("logs", "--timestamps", "--tail", "500", m[1])
+            tail = "500" if m[2] is None else m[2]
+            if tail not in LOG_TAIL:
+                return self.send(400, '"tail inválido"')
+            # o log inteiro pode ser grande: o "all" tem o prazo das ações
+            r = docker("logs", "--timestamps", *LOG_TAIL[tail], m[1], timeout=ACTION_TIMEOUT if tail == "all" else READ_TIMEOUT)
             return self.send(500 if r.returncode else 200, json.dumps(r.stdout + r.stderr))
         m = re.fullmatch(r"/api/health/([0-9a-f]{12,64})", self.path)
         if m:  # saída dos probes do healthcheck (não aparece em docker logs)
@@ -300,8 +339,9 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, KeyError, TypeError, AttributeError):  # versão do CLI com outro formato: erro legível
             return self.send(500, json.dumps(f"formato inesperado na saída do {CLI[0]} {' '.join(argv)}"))
 
-    def stream_logs(self, cid):
-        """Server-Sent Events com o `docker logs -f`: uma linha por evento e um "end" quando o docker termina."""
+    def stream_logs(self, args):
+        """Server-Sent Events com o `docker logs -f` (ou o `compose logs -f` do projeto, de argv já validado):
+        uma linha por evento e um "end" quando o docker termina."""
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
@@ -312,7 +352,7 @@ class Handler(BaseHTTPRequestHandler):
 
         # cada conexão tem a própria thread (ThreadingHTTPServer): um stream longo não trava as outras requisições.
         # O with fecha o pipe e espera o processo morto (sem zumbi nem fd vazando)
-        with subprocess.Popen([*CLI, "logs", "-f", "--timestamps", "--tail", "500", cid],
+        with subprocess.Popen([*CLI, *args],
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as p:
             rest = b""
             try:
@@ -339,7 +379,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.token_ok():
             return self.send(401, '"token ausente ou inválido"')
         m = re.fullmatch(r"/api/compose/(\w+)", self.path)
-        if m and m[1] in COMPOSE:
+        if m and (m[1] in COMPOSE or m[1] in COMPOSE_SERVICE):
             return self.compose(m[1])
         m = re.fullmatch(r"/api/prune/(\w+)", self.path)
         if m and m[1] in PRUNE:  # devolve o stdout: a última linha diz quanto espaço foi liberado
@@ -457,27 +497,61 @@ class Handler(BaseHTTPRequestHandler):
             os.close(master)
 
     def compose(self, action):
-        """Corpo {project, dir}. O par só vale se existir nos labels de algum container: o diretório e os
-        arquivos do compose vêm sempre do docker, nunca do cliente."""
+        """Corpo {project, dir}, mais o service nas ações por serviço (COMPOSE_SERVICE)."""
+        service = action in COMPOSE_SERVICE
         try:
             n = int(self.headers.get("Content-Length") or 0)
             if not 0 < n <= MAX_BODY:
                 raise ValueError
             body = json.loads(self.rfile.read(n))
-            key = [body["project"], body["dir"]]
+            key = [body["project"], body["dir"], *([body["service"]] if service else [])]
             if not all(isinstance(v, str) and v for v in key):
                 raise ValueError
         except (ValueError, KeyError, TypeError):
-            return self.send(400, '"corpo inválido: esperado {project, dir}"')
+            return self.send(400, '"corpo inválido: esperado {project, dir, service}"' if service
+                             else '"corpo inválido: esperado {project, dir}"')
+        base = self.compose_base(*key)
+        if base is None:
+            return None
+        # o "--" encerra as flags: mesmo vindo de um label, o nome do serviço nunca vira opção do compose
+        args = [*COMPOSE_SERVICE[action], "--", key[2]] if service else COMPOSE[action]
+        r = docker(*base, *args, timeout=COMPOSE_TIMEOUT)
+        return self.send(500 if r.returncode else 200, json.dumps(r.stderr.strip()))
+
+    def log_tail(self, qs):
+        """?tail= (padrão 500) -> as flags da whitelist LOG_TAIL; fora dela responde 400 e devolve None."""
+        tail = qs.get("tail", ["500"])
+        if len(tail) != 1 or tail[0] not in LOG_TAIL:
+            self.send(400, '"tail inválido"')
+            return None
+        return LOG_TAIL[tail[0]]
+
+    def compose_query(self, query):
+        """{project, dir} na query das rotas GET (os logs do projeto) -> compose_base."""
+        q = parse_qs(query)
+        key = [q.get(k, [""])[0] for k in ("project", "dir")]
+        if not all(key):
+            self.send(400, '"query inválida: esperado ?project=...&dir=..."')
+            return None
+        return self.compose_base(*key)
+
+    def compose_base(self, project, wd, service=None):
+        """Começo do argv (compose -p, --project-directory e os -f) montado só com os labels dos containers: o par
+        {project, dir} tem que existir neles e o service, se veio, ser um dos serviços desse projeto. O diretório e os
+        arquivos do compose vêm sempre do docker, nunca do cliente. Se não achar, responde o erro e devolve None."""
         r = docker("ps", "-a", "--filter", "label=com.docker.compose.project", "--format", COMPOSE_FORMAT)
         if r.returncode:
-            return self.send(500, json.dumps(r.stderr.strip()))
-        files = next((f for p, wd, f in map(json.loads, r.stdout.splitlines()) if [p, wd] == key), None)
-        if files is None:
-            return self.send(404, '"projeto compose não encontrado"')
-        r = docker("compose", "-p", key[0], "--project-directory", key[1],
-                   *[a for f in files.split(",") if f for a in ("-f", f)], *COMPOSE[action], timeout=COMPOSE_TIMEOUT)
-        self.send(500 if r.returncode else 200, json.dumps(r.stderr.strip()))
+            self.send(500, json.dumps(r.stderr.strip()))
+            return None
+        rows = [row for row in map(json.loads, r.stdout.splitlines()) if row[:2] == [project, wd]]
+        if not rows:
+            self.send(404, '"projeto compose não encontrado"')
+            return None
+        if service is not None and service not in {row[3] for row in rows}:
+            self.send(404, '"serviço não encontrado no projeto"')
+            return None
+        return ["compose", "-p", project, "--project-directory", wd,
+                *[a for f in rows[0][2].split(",") if f for a in ("-f", f)]]
 
     def log_message(self, *args):
         pass
@@ -521,7 +595,7 @@ def main():
 # A fonte fica em src/; para mudar o visual ou o comportamento da página, veja o README.
 # >>> gerado por build.py a partir de src/: não edite à mão, mude src/ e rode python3 build.py
 CSS = r"""/*! tailwindcss v4.3.3 | MIT License | https://tailwindcss.com */
-@layer properties{@supports (((-webkit-hyphens:none)) and (not (margin-trim:inline))) or ((-moz-orient:inline) and (not (color:rgb(from red r g b)))){*,:before,:after,::backdrop{--tw-space-y-reverse:0;--tw-divide-y-reverse:0;--tw-border-style:solid;--tw-leading:initial;--tw-font-weight:initial;--tw-tracking:initial;--tw-shadow:0 0 #0000;--tw-shadow-color:initial;--tw-shadow-alpha:100%;--tw-inset-shadow:0 0 #0000;--tw-inset-shadow-color:initial;--tw-inset-shadow-alpha:100%;--tw-ring-color:initial;--tw-ring-shadow:0 0 #0000;--tw-inset-ring-color:initial;--tw-inset-ring-shadow:0 0 #0000;--tw-ring-inset:initial;--tw-ring-offset-width:0px;--tw-ring-offset-color:#fff;--tw-ring-offset-shadow:0 0 #0000;--tw-blur:initial;--tw-brightness:initial;--tw-contrast:initial;--tw-grayscale:initial;--tw-hue-rotate:initial;--tw-invert:initial;--tw-opacity:initial;--tw-saturate:initial;--tw-sepia:initial;--tw-drop-shadow:initial;--tw-drop-shadow-color:initial;--tw-drop-shadow-alpha:100%;--tw-drop-shadow-size:initial;--tw-outline-style:solid}}}@layer theme{:root,:host{--font-sans:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";--font-mono:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;--color-black:#000;--color-white:#fff;--spacing:.25rem;--container-md:28rem;--container-7xl:80rem;--text-xs:.75rem;--text-xs--line-height:calc(1 / .75);--text-sm:.875rem;--text-sm--line-height:calc(1.25 / .875);--text-lg:1.125rem;--text-lg--line-height:calc(1.75 / 1.125);--text-2xl:1.5rem;--text-2xl--line-height:calc(2 / 1.5);--font-weight-normal:400;--font-weight-medium:500;--font-weight-semibold:600;--tracking-tight:-.025em;--tracking-normal:0em;--tracking-wider:.05em;--leading-relaxed:1.625;--radius-md:.375rem;--radius-lg:.5rem;--radius-xl:.75rem;--animate-pulse:pulse 2s cubic-bezier(.4, 0, .6, 1) infinite;--default-transition-duration:.15s;--default-transition-timing-function:cubic-bezier(.4, 0, .2, 1);--default-font-family:var(--font-sans);--default-mono-font-family:var(--font-mono);--color-canvas:oklch(14.1% .005 285.823);--color-raised:oklch(21% .006 285.885);--color-hover:oklch(27.4% .006 286.033);--color-line:oklch(27.4% .006 286.033);--color-line-strong:oklch(37% .013 285.805);--color-dim:oklch(55.2% .016 285.938);--color-muted:oklch(70.5% .015 286.067);--color-fg-soft:oklch(87.1% .006 286.286);--color-fg:oklch(92% .004 286.32);--color-fg-strong:oklch(96.7% .001 286.375);--color-ok:oklch(76.5% .177 163.223);--color-ok-fg:oklch(84.5% .143 164.978);--color-ok-soft:oklch(90.5% .093 164.15);--color-warn:oklch(82.8% .189 84.429);--color-warn-fg:oklch(87.9% .169 91.605);--color-warn-soft:oklch(92.4% .12 95.746);--color-warn-strong:oklch(96.2% .059 95.617);--color-bad:oklch(70.4% .191 22.216);--color-bad-fg:oklch(80.8% .114 19.571);--color-bad-soft:oklch(88.5% .062 18.334);--color-danger:oklch(50.5% .213 27.518);--color-danger-hover:oklch(44.4% .177 26.899);--color-pause:oklch(70.2% .183 293.541);--color-pause-fg:oklch(81.1% .111 293.571);--color-accent:oklch(74.6% .16 232.661);--color-accent-fg:oklch(82.8% .111 230.318);--color-accent-soft:oklch(90.1% .058 230.902)}}@layer base{*,:after,:before,::backdrop{box-sizing:border-box;border:0 solid;margin:0;padding:0}::file-selector-button{box-sizing:border-box;border:0 solid;margin:0;padding:0}html,:host{-webkit-text-size-adjust:100%;tab-size:4;line-height:1.5;font-family:var(--default-font-family,-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji");font-feature-settings:var(--default-font-feature-settings,normal);font-variation-settings:var(--default-font-variation-settings,normal);-webkit-tap-highlight-color:transparent}hr{height:0;color:inherit;border-top-width:1px}abbr:where([title]){-webkit-text-decoration:underline dotted;text-decoration:underline dotted}h1,h2,h3,h4,h5,h6{font-size:inherit;font-weight:inherit}a{color:inherit;-webkit-text-decoration:inherit;-webkit-text-decoration:inherit;-webkit-text-decoration:inherit;text-decoration:inherit}b,strong{font-weight:bolder}code,kbd,samp,pre{font-family:var(--default-mono-font-family,ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);font-feature-settings:var(--default-mono-font-feature-settings,normal);font-variation-settings:var(--default-mono-font-variation-settings,normal);font-size:1em}small{font-size:80%}sub,sup{vertical-align:baseline;font-size:75%;line-height:0;position:relative}sub{bottom:-.25em}sup{top:-.5em}table{text-indent:0;border-color:inherit;border-collapse:collapse}:-moz-focusring:where(:not(iframe)){outline:auto}progress{vertical-align:baseline}summary{display:list-item}ol,ul,menu{list-style:none}img,svg,video,canvas,audio,iframe,embed,object{vertical-align:middle;display:block}img,video{max-width:100%;height:auto}button,input,select,optgroup,textarea{font:inherit;font-feature-settings:inherit;font-variation-settings:inherit;letter-spacing:inherit;color:inherit;opacity:1;background-color:#0000;border-radius:0}::file-selector-button{font:inherit;font-feature-settings:inherit;font-variation-settings:inherit;letter-spacing:inherit;color:inherit;opacity:1;background-color:#0000;border-radius:0}:where(select:is([multiple],[size])) optgroup{font-weight:bolder}:where(select:is([multiple],[size])) optgroup option{padding-inline-start:20px}::file-selector-button{margin-inline-end:4px}::placeholder{opacity:1}@supports (not ((-webkit-appearance:-apple-pay-button))) or (contain-intrinsic-size:1px){::placeholder{color:currentColor}@supports (color:color-mix(in lab, red, red)){::placeholder{color:color-mix(in oklab, currentcolor 50%, transparent)}}}textarea{resize:vertical}::-webkit-search-decoration{-webkit-appearance:none}::-webkit-date-and-time-value{min-height:1lh;text-align:inherit}::-webkit-datetime-edit{display:inline-flex}::-webkit-datetime-edit-fields-wrapper{padding:0}::-webkit-datetime-edit{padding-block:0}::-webkit-datetime-edit-year-field{padding-block:0}::-webkit-datetime-edit-month-field{padding-block:0}::-webkit-datetime-edit-day-field{padding-block:0}::-webkit-datetime-edit-hour-field{padding-block:0}::-webkit-datetime-edit-minute-field{padding-block:0}::-webkit-datetime-edit-second-field{padding-block:0}::-webkit-datetime-edit-millisecond-field{padding-block:0}::-webkit-datetime-edit-meridiem-field{padding-block:0}::-webkit-calendar-picker-indicator{line-height:1}:-moz-ui-invalid{box-shadow:none}button,input:where([type=button],[type=reset],[type=submit]){appearance:button}::file-selector-button{appearance:button}::-webkit-inner-spin-button{height:auto}::-webkit-outer-spin-button{height:auto}[hidden]:where(:not([hidden=until-found])){display:none!important}}@layer components;@layer utilities{.sr-only{clip-path:inset(50%);white-space:nowrap;border-width:0;width:1px;height:1px;margin:-1px;padding:0;position:absolute;overflow:hidden}.fixed{position:fixed}.right-4{right:calc(var(--spacing) * 4)}.bottom-4{bottom:calc(var(--spacing) * 4)}.z-30{z-index:30}.container{width:100%}@media (min-width:40rem){.container{max-width:40rem}}@media (min-width:48rem){.container{max-width:48rem}}@media (min-width:64rem){.container{max-width:64rem}}@media (min-width:80rem){.container{max-width:80rem}}@media (min-width:96rem){.container{max-width:96rem}}.m-auto{margin:auto}.mx-1{margin-inline:var(--spacing)}.mx-auto{margin-inline:auto}.-mt-0\.5{margin-top:calc(var(--spacing) * -.5)}.mt-0\.5{margin-top:calc(var(--spacing) * .5)}.mt-1{margin-top:var(--spacing)}.mt-1\.5{margin-top:calc(var(--spacing) * 1.5)}.mt-2{margin-top:calc(var(--spacing) * 2)}.mt-4{margin-top:calc(var(--spacing) * 4)}.mr-1\.5{margin-right:calc(var(--spacing) * 1.5)}.mr-auto{margin-right:auto}.mb-4{margin-bottom:calc(var(--spacing) * 4)}.mb-6{margin-bottom:calc(var(--spacing) * 6)}.ml-1{margin-left:var(--spacing)}.ml-1\.5{margin-left:calc(var(--spacing) * 1.5)}.ml-auto{margin-left:auto}.block{display:block}.contents{display:contents}.flex{display:flex}.grid{display:grid}.hidden{display:none}.inline{display:inline}.table{display:table}.size-1\.5{width:calc(var(--spacing) * 1.5);height:calc(var(--spacing) * 1.5)}.size-2{width:calc(var(--spacing) * 2);height:calc(var(--spacing) * 2)}.size-3{width:calc(var(--spacing) * 3);height:calc(var(--spacing) * 3)}.size-4{width:calc(var(--spacing) * 4);height:calc(var(--spacing) * 4)}.size-6{width:calc(var(--spacing) * 6);height:calc(var(--spacing) * 6)}.size-8{width:calc(var(--spacing) * 8);height:calc(var(--spacing) * 8)}.h-5{height:calc(var(--spacing) * 5)}.h-\[65vh\]{height:65vh}.max-h-\[30vh\]{max-height:30vh}.min-h-screen{min-height:100vh}.w-\[min\(1100px\,95vw\)\]{width:min(1100px,95vw)}.w-fit{width:fit-content}.w-full{width:100%}.w-px{width:1px}.max-w-7xl{max-width:var(--container-7xl)}.max-w-md{max-width:var(--container-md)}.min-w-0{min-width:0}.min-w-48{min-width:calc(var(--spacing) * 48)}.shrink-0{flex-shrink:0}.animate-pulse{animation:var(--animate-pulse)}.cursor-pointer{cursor:pointer}.resize{resize:both}.list-none{list-style-type:none}.grid-cols-\[auto_1fr\]{grid-template-columns:auto 1fr}.flex-wrap{flex-wrap:wrap}.place-items-center{place-items:center}.items-center{align-items:center}.items-start{align-items:flex-start}.justify-between{justify-content:space-between}.justify-end{justify-content:flex-end}.gap-1{gap:var(--spacing)}.gap-1\.5{gap:calc(var(--spacing) * 1.5)}.gap-2{gap:calc(var(--spacing) * 2)}.gap-2\.5{gap:calc(var(--spacing) * 2.5)}.gap-3{gap:calc(var(--spacing) * 3)}.gap-4{gap:calc(var(--spacing) * 4)}:where(.space-y-2>:not(:last-child)){--tw-space-y-reverse:0;margin-block-start:calc(calc(var(--spacing) * 2) * var(--tw-space-y-reverse));margin-block-end:calc(calc(var(--spacing) * 2) * calc(1 - var(--tw-space-y-reverse)))}:where(.space-y-3>:not(:last-child)){--tw-space-y-reverse:0;margin-block-start:calc(calc(var(--spacing) * 3) * var(--tw-space-y-reverse));margin-block-end:calc(calc(var(--spacing) * 3) * calc(1 - var(--tw-space-y-reverse)))}.gap-x-3{column-gap:calc(var(--spacing) * 3)}.gap-x-4{column-gap:calc(var(--spacing) * 4)}.gap-y-1\.5{row-gap:calc(var(--spacing) * 1.5)}.gap-y-2{row-gap:calc(var(--spacing) * 2)}:where(.divide-y>:not(:last-child)){--tw-divide-y-reverse:0;border-bottom-style:var(--tw-border-style);border-top-style:var(--tw-border-style);border-top-width:calc(1px * var(--tw-divide-y-reverse));border-bottom-width:calc(1px * calc(1 - var(--tw-divide-y-reverse)))}:where(.divide-line\/70>:not(:last-child)){border-color:#27272ab3}@supports (color:color-mix(in lab, red, red)){:where(.divide-line\/70>:not(:last-child)){border-color:color-mix(in oklab, var(--color-line) 70%, transparent)}}.truncate{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.overflow-auto{overflow:auto}.overflow-x-auto{overflow-x:auto}.rounded{border-radius:.25rem}.rounded-full{border-radius:3.40282e38px}.rounded-lg{border-radius:var(--radius-lg)}.rounded-md{border-radius:var(--radius-md)}.rounded-xl{border-radius:var(--radius-xl)}.border-t{border-top-style:var(--tw-border-style);border-top-width:1px}.border-b{border-bottom-style:var(--tw-border-style);border-bottom-width:1px}.border-line{border-color:var(--color-line)}.border-line\/70{border-color:#27272ab3}@supports (color:color-mix(in lab, red, red)){.border-line\/70{border-color:color-mix(in oklab, var(--color-line) 70%, transparent)}}.bg-accent{background-color:var(--color-accent)}.bg-accent\/10{background-color:#00bcfe1a}@supports (color:color-mix(in lab, red, red)){.bg-accent\/10{background-color:color-mix(in oklab, var(--color-accent) 10%, transparent)}}.bg-bad{background-color:var(--color-bad)}.bg-bad\/5{background-color:#ff65680d}@supports (color:color-mix(in lab, red, red)){.bg-bad\/5{background-color:color-mix(in oklab, var(--color-bad) 5%, transparent)}}.bg-bad\/10{background-color:#ff65681a}@supports (color:color-mix(in lab, red, red)){.bg-bad\/10{background-color:color-mix(in oklab, var(--color-bad) 10%, transparent)}}.bg-black{background-color:var(--color-black)}.bg-canvas{background-color:var(--color-canvas)}.bg-danger{background-color:var(--color-danger)}.bg-dim{background-color:var(--color-dim)}.bg-fg{background-color:var(--color-fg)}.bg-hover{background-color:var(--color-hover)}.bg-hover\/60{background-color:#27272a99}@supports (color:color-mix(in lab, red, red)){.bg-hover\/60{background-color:color-mix(in oklab, var(--color-hover) 60%, transparent)}}.bg-ok{background-color:var(--color-ok)}.bg-ok\/10{background-color:#00d2941a}@supports (color:color-mix(in lab, red, red)){.bg-ok\/10{background-color:color-mix(in oklab, var(--color-ok) 10%, transparent)}}.bg-ok\/40{background-color:#00d29466}@supports (color:color-mix(in lab, red, red)){.bg-ok\/40{background-color:color-mix(in oklab, var(--color-ok) 40%, transparent)}}.bg-pause{background-color:var(--color-pause)}.bg-raised{background-color:var(--color-raised)}.bg-raised\/40{background-color:#18181b66}@supports (color:color-mix(in lab, red, red)){.bg-raised\/40{background-color:color-mix(in oklab, var(--color-raised) 40%, transparent)}}.bg-warn{background-color:var(--color-warn)}.bg-warn\/10{background-color:#fcbb001a}@supports (color:color-mix(in lab, red, red)){.bg-warn\/10{background-color:color-mix(in oklab, var(--color-warn) 10%, transparent)}}.p-0{padding:0}.p-1{padding:var(--spacing)}.p-2{padding:calc(var(--spacing) * 2)}.p-4{padding:calc(var(--spacing) * 4)}.px-1{padding-inline:var(--spacing)}.px-1\.5{padding-inline:calc(var(--spacing) * 1.5)}.px-2{padding-inline:calc(var(--spacing) * 2)}.px-2\.5{padding-inline:calc(var(--spacing) * 2.5)}.px-3{padding-inline:calc(var(--spacing) * 3)}.px-4{padding-inline:calc(var(--spacing) * 4)}.py-0\.5{padding-block:calc(var(--spacing) * .5)}.py-1{padding-block:var(--spacing)}.py-2{padding-block:calc(var(--spacing) * 2)}.py-3{padding-block:calc(var(--spacing) * 3)}.py-8{padding-block:calc(var(--spacing) * 8)}.py-16{padding-block:calc(var(--spacing) * 16)}.pt-4{padding-top:calc(var(--spacing) * 4)}.pt-5{padding-top:calc(var(--spacing) * 5)}.pr-4{padding-right:calc(var(--spacing) * 4)}.pr-6{padding-right:calc(var(--spacing) * 6)}.pb-1{padding-bottom:var(--spacing)}.pb-2{padding-bottom:calc(var(--spacing) * 2)}.pb-4{padding-bottom:calc(var(--spacing) * 4)}.pl-4{padding-left:calc(var(--spacing) * 4)}.text-center{text-align:center}.text-left{text-align:left}.align-middle{vertical-align:middle}.font-mono{font-family:var(--font-mono)}.font-sans{font-family:var(--font-sans)}.text-2xl{font-size:var(--text-2xl);line-height:var(--tw-leading,var(--text-2xl--line-height))}.text-lg{font-size:var(--text-lg);line-height:var(--tw-leading,var(--text-lg--line-height))}.text-sm{font-size:var(--text-sm);line-height:var(--tw-leading,var(--text-sm--line-height))}.text-xs{font-size:var(--text-xs);line-height:var(--tw-leading,var(--text-xs--line-height))}.leading-relaxed{--tw-leading:var(--leading-relaxed);line-height:var(--leading-relaxed)}.font-medium{--tw-font-weight:var(--font-weight-medium);font-weight:var(--font-weight-medium)}.font-normal{--tw-font-weight:var(--font-weight-normal);font-weight:var(--font-weight-normal)}.font-semibold{--tw-font-weight:var(--font-weight-semibold);font-weight:var(--font-weight-semibold)}.tracking-normal{--tw-tracking:var(--tracking-normal);letter-spacing:var(--tracking-normal)}.tracking-tight{--tw-tracking:var(--tracking-tight);letter-spacing:var(--tracking-tight)}.tracking-wider{--tw-tracking:var(--tracking-wider);letter-spacing:var(--tracking-wider)}.\[overflow-wrap\:anywhere\]{overflow-wrap:anywhere}.whitespace-nowrap{white-space:nowrap}.whitespace-pre-wrap{white-space:pre-wrap}.text-accent{color:var(--color-accent)}.text-accent-fg{color:var(--color-accent-fg)}.text-bad-fg{color:var(--color-bad-fg)}.text-bad-soft{color:var(--color-bad-soft)}.text-fg{color:var(--color-fg)}.text-fg-soft{color:var(--color-fg-soft)}.text-fg-strong{color:var(--color-fg-strong)}.text-muted{color:var(--color-muted)}.text-ok-fg{color:var(--color-ok-fg)}.text-ok-soft{color:var(--color-ok-soft)}.text-pause-fg{color:var(--color-pause-fg)}.text-warn-fg{color:var(--color-warn-fg)}.text-warn-soft{color:var(--color-warn-soft)}.text-warn-strong{color:var(--color-warn-strong)}.text-white{color:var(--color-white)}.normal-case{text-transform:none}.uppercase{text-transform:uppercase}.underline{text-decoration-line:underline}.underline-offset-4{text-underline-offset:4px}.antialiased{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}.opacity-40{opacity:.4}.opacity-70{opacity:.7}.shadow-lg{--tw-shadow:0 10px 15px -3px var(--tw-shadow-color,#0000001a), 0 4px 6px -4px var(--tw-shadow-color,#0000001a);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}.ring-1{--tw-ring-shadow:var(--tw-ring-inset,) 0 0 0 calc(1px + var(--tw-ring-offset-width)) var(--tw-ring-color,currentcolor);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}.shadow-black\/40{--tw-shadow-color:#0006}@supports (color:color-mix(in lab, red, red)){.shadow-black\/40{--tw-shadow-color:color-mix(in oklab, color-mix(in oklab, var(--color-black) 40%, transparent) var(--tw-shadow-alpha), transparent)}}.ring-accent\/20{--tw-ring-color:#00bcfe33}@supports (color:color-mix(in lab, red, red)){.ring-accent\/20{--tw-ring-color:color-mix(in oklab, var(--color-accent) 20%, transparent)}}.ring-bad\/40{--tw-ring-color:#ff656866}@supports (color:color-mix(in lab, red, red)){.ring-bad\/40{--tw-ring-color:color-mix(in oklab, var(--color-bad) 40%, transparent)}}.ring-current{--tw-ring-color:currentcolor}.ring-danger{--tw-ring-color:var(--color-danger)}.ring-line{--tw-ring-color:var(--color-line)}.ring-line-strong{--tw-ring-color:var(--color-line-strong)}.ring-line-strong\/80{--tw-ring-color:#3f3f46cc}@supports (color:color-mix(in lab, red, red)){.ring-line-strong\/80{--tw-ring-color:color-mix(in oklab, var(--color-line-strong) 80%, transparent)}}.ring-ok\/40{--tw-ring-color:#00d29466}@supports (color:color-mix(in lab, red, red)){.ring-ok\/40{--tw-ring-color:color-mix(in oklab, var(--color-ok) 40%, transparent)}}.ring-warn\/30{--tw-ring-color:#fcbb004d}@supports (color:color-mix(in lab, red, red)){.ring-warn\/30{--tw-ring-color:color-mix(in oklab, var(--color-warn) 30%, transparent)}}.filter{filter:var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,)}.transition{transition-property:color,background-color,border-color,outline-color,text-decoration-color,fill,stroke,--tw-gradient-from,--tw-gradient-via,--tw-gradient-to,opacity,box-shadow,transform,translate,scale,rotate,filter,-webkit-backdrop-filter,backdrop-filter,display,content-visibility,overlay,pointer-events;transition-timing-function:var(--tw-ease,var(--default-transition-timing-function));transition-duration:var(--tw-duration,var(--default-transition-duration))}.transition-opacity{transition-property:opacity;transition-timing-function:var(--tw-ease,var(--default-transition-timing-function));transition-duration:var(--tw-duration,var(--default-transition-duration))}.group-aria-pressed\:inline-block:is(:where(.group)[aria-pressed=true] *){display:inline-block}.selection\:bg-accent\/30 ::selection{background-color:#00bcfe4d}@supports (color:color-mix(in lab, red, red)){.selection\:bg-accent\/30 ::selection{background-color:color-mix(in oklab, var(--color-accent) 30%, transparent)}}.selection\:bg-accent\/30::selection{background-color:#00bcfe4d}@supports (color:color-mix(in lab, red, red)){.selection\:bg-accent\/30::selection{background-color:color-mix(in oklab, var(--color-accent) 30%, transparent)}}.placeholder\:text-muted::placeholder{color:var(--color-muted)}.backdrop\:bg-black\/70::backdrop{background-color:#000000b3}@supports (color:color-mix(in lab, red, red)){.backdrop\:bg-black\/70::backdrop{background-color:color-mix(in oklab, var(--color-black) 70%, transparent)}}.empty\:hidden:empty{display:none}@media (hover:hover){.hover\:bg-accent\/20:hover{background-color:#00bcfe33}@supports (color:color-mix(in lab, red, red)){.hover\:bg-accent\/20:hover{background-color:color-mix(in oklab, var(--color-accent) 20%, transparent)}}.hover\:bg-danger-hover:hover{background-color:var(--color-danger-hover)}.hover\:bg-hover:hover{background-color:var(--color-hover)}.hover\:bg-ok\/10:hover{background-color:#00d2941a}@supports (color:color-mix(in lab, red, red)){.hover\:bg-ok\/10:hover{background-color:color-mix(in oklab, var(--color-ok) 10%, transparent)}}.hover\:bg-raised\/70:hover{background-color:#18181bb3}@supports (color:color-mix(in lab, red, red)){.hover\:bg-raised\/70:hover{background-color:color-mix(in oklab, var(--color-raised) 70%, transparent)}}.hover\:text-accent-soft:hover{color:var(--color-accent-soft)}.hover\:text-fg:hover{color:var(--color-fg)}.hover\:text-fg-strong:hover{color:var(--color-fg-strong)}}.focus\:not-sr-only:focus{clip-path:none;white-space:normal;width:auto;height:auto;margin:0;padding:0;position:static;overflow:visible}.focus\:fixed:focus{position:fixed}.focus\:top-3:focus{top:calc(var(--spacing) * 3)}.focus\:left-3:focus{left:calc(var(--spacing) * 3)}.focus\:z-50:focus{z-index:50}.focus\:rounded-md:focus{border-radius:var(--radius-md)}.focus\:bg-fg-strong:focus{background-color:var(--color-fg-strong)}.focus\:px-3:focus{padding-inline:calc(var(--spacing) * 3)}.focus\:py-2:focus{padding-block:calc(var(--spacing) * 2)}.focus\:text-sm:focus{font-size:var(--text-sm);line-height:var(--tw-leading,var(--text-sm--line-height))}.focus\:text-canvas:focus{color:var(--color-canvas)}.focus\:ring-accent:focus{--tw-ring-color:var(--color-accent)}.focus\:outline-none:focus{--tw-outline-style:none;outline-style:none}.focus-visible\:outline-2:focus-visible{outline-style:var(--tw-outline-style);outline-width:2px}.focus-visible\:-outline-offset-2:focus-visible{outline-offset:calc(2px * -1)}.focus-visible\:outline-offset-2:focus-visible{outline-offset:2px}.focus-visible\:outline-accent:focus-visible{outline-color:var(--color-accent)}.aria-disabled\:cursor-wait[aria-disabled=true]{cursor:wait}.aria-disabled\:opacity-40[aria-disabled=true]{opacity:.4}.aria-pressed\:bg-accent\/15[aria-pressed=true]{background-color:#00bcfe26}@supports (color:color-mix(in lab, red, red)){.aria-pressed\:bg-accent\/15[aria-pressed=true]{background-color:color-mix(in oklab, var(--color-accent) 15%, transparent)}}.aria-pressed\:bg-fg-strong[aria-pressed=true]{background-color:var(--color-fg-strong)}.aria-pressed\:text-accent-soft[aria-pressed=true]{color:var(--color-accent-soft)}.aria-pressed\:text-canvas[aria-pressed=true]{color:var(--color-canvas)}.aria-pressed\:ring-accent\/40[aria-pressed=true]{--tw-ring-color:#00bcfe66}@supports (color:color-mix(in lab, red, red)){.aria-pressed\:ring-accent\/40[aria-pressed=true]{--tw-ring-color:color-mix(in oklab, var(--color-accent) 40%, transparent)}}.aria-pressed\:ring-fg-strong[aria-pressed=true]{--tw-ring-color:var(--color-fg-strong)}@media (prefers-reduced-motion:reduce){.motion-reduce\:animate-none{animation:none}.motion-reduce\:transition-none{transition-property:none}}@media not all and (min-width:64rem){.max-lg\:block{display:block}.max-lg\:hidden{display:none}.max-lg\:size-11{width:calc(var(--spacing) * 11);height:calc(var(--spacing) * 11)}.max-lg\:min-h-11{min-height:calc(var(--spacing) * 11)}.max-lg\:w-11{width:calc(var(--spacing) * 11)}.max-lg\:justify-start{justify-content:flex-start}.max-lg\:gap-2{gap:calc(var(--spacing) * 2)}:where(.max-lg\:space-y-1\.5>:not(:last-child)){--tw-space-y-reverse:0;margin-block-start:calc(calc(var(--spacing) * 1.5) * var(--tw-space-y-reverse));margin-block-end:calc(calc(var(--spacing) * 1.5) * calc(1 - var(--tw-space-y-reverse)))}.max-lg\:p-0{padding:0}.max-lg\:px-3{padding-inline:calc(var(--spacing) * 3)}.max-lg\:px-4{padding-inline:calc(var(--spacing) * 4)}.max-lg\:py-3{padding-block:calc(var(--spacing) * 3)}.max-lg\:py-3\.5{padding-block:calc(var(--spacing) * 3.5)}.max-lg\:py-4{padding-block:calc(var(--spacing) * 4)}.max-lg\:pt-1{padding-top:var(--spacing)}.max-lg\:pt-2{padding-top:calc(var(--spacing) * 2)}.max-lg\:pl-5{padding-left:calc(var(--spacing) * 5)}.max-lg\:text-sm{font-size:var(--text-sm);line-height:var(--tw-leading,var(--text-sm--line-height))}.max-lg\:text-xs{font-size:var(--text-xs);line-height:var(--tw-leading,var(--text-xs--line-height))}.max-lg\:has-\[div\]\:block:has(:is(div)){display:block}}@media (min-width:40rem){.sm\:w-72{width:calc(var(--spacing) * 72)}}@media (min-width:64rem){.lg\:hidden{display:none}.lg\:w-9{width:calc(var(--spacing) * 9)}.lg\:w-20{width:calc(var(--spacing) * 20)}.lg\:max-w-\[24ch\]{max-width:24ch}.lg\:min-w-\[24ch\]{min-width:24ch}.lg\:truncate{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.lg\:text-left{text-align:left}.lg\:text-right{text-align:right}.lg\:\[direction\:rtl\]{direction:rtl}}.\[\&\:\:-webkit-details-marker\]\:hidden::-webkit-details-marker{display:none}}@media (prefers-color-scheme:light){:root{--color-canvas:oklch(98.5% 0 none);--color-raised:#fff;--color-hover:oklch(96.7% .001 286.375);--color-line:oklch(92% .004 286.32);--color-line-strong:oklch(87.1% .006 286.286);--color-dim:oklch(70.5% .015 286.067);--color-muted:oklch(44.2% .017 285.786);--color-fg-soft:oklch(37% .013 285.805);--color-fg:oklch(27.4% .006 286.033);--color-fg-strong:oklch(14.1% .005 285.823);--color-ok:oklch(69.6% .17 162.48);--color-ok-fg:oklch(50.8% .118 165.612);--color-ok-soft:oklch(43.2% .095 166.913);--color-warn:oklch(76.9% .188 70.08);--color-warn-fg:oklch(55.5% .163 48.998);--color-warn-soft:oklch(47.3% .137 46.201);--color-warn-strong:oklch(41.4% .112 45.904);--color-bad:oklch(63.7% .237 25.331);--color-bad-fg:oklch(50.5% .213 27.518);--color-bad-soft:oklch(44.4% .177 26.899);--color-danger:oklch(50.5% .213 27.518);--color-danger-hover:oklch(44.4% .177 26.899);--color-pause:oklch(60.6% .25 292.717);--color-pause-fg:oklch(49.1% .27 292.581);--color-accent:oklch(58.8% .158 241.966);--color-accent-fg:oklch(50% .134 242.749);--color-accent-soft:oklch(44.3% .11 240.79)}}@property --tw-space-y-reverse{syntax:"*";inherits:false;initial-value:0}@property --tw-divide-y-reverse{syntax:"*";inherits:false;initial-value:0}@property --tw-border-style{syntax:"*";inherits:false;initial-value:solid}@property --tw-leading{syntax:"*";inherits:false}@property --tw-font-weight{syntax:"*";inherits:false}@property --tw-tracking{syntax:"*";inherits:false}@property --tw-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-shadow-color{syntax:"*";inherits:false}@property --tw-shadow-alpha{syntax:"<percentage>";inherits:false;initial-value:100%}@property --tw-inset-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-inset-shadow-color{syntax:"*";inherits:false}@property --tw-inset-shadow-alpha{syntax:"<percentage>";inherits:false;initial-value:100%}@property --tw-ring-color{syntax:"*";inherits:false}@property --tw-ring-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-inset-ring-color{syntax:"*";inherits:false}@property --tw-inset-ring-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-ring-inset{syntax:"*";inherits:false}@property --tw-ring-offset-width{syntax:"<length>";inherits:false;initial-value:0}@property --tw-ring-offset-color{syntax:"*";inherits:false;initial-value:#fff}@property --tw-ring-offset-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-blur{syntax:"*";inherits:false}@property --tw-brightness{syntax:"*";inherits:false}@property --tw-contrast{syntax:"*";inherits:false}@property --tw-grayscale{syntax:"*";inherits:false}@property --tw-hue-rotate{syntax:"*";inherits:false}@property --tw-invert{syntax:"*";inherits:false}@property --tw-opacity{syntax:"*";inherits:false}@property --tw-saturate{syntax:"*";inherits:false}@property --tw-sepia{syntax:"*";inherits:false}@property --tw-drop-shadow{syntax:"*";inherits:false}@property --tw-drop-shadow-color{syntax:"*";inherits:false}@property --tw-drop-shadow-alpha{syntax:"<percentage>";inherits:false;initial-value:100%}@property --tw-drop-shadow-size{syntax:"*";inherits:false}@property --tw-outline-style{syntax:"*";inherits:false;initial-value:solid}@keyframes pulse{50%{opacity:.5}}"""
+@layer properties{@supports (((-webkit-hyphens:none)) and (not (margin-trim:inline))) or ((-moz-orient:inline) and (not (color:rgb(from red r g b)))){*,:before,:after,::backdrop{--tw-space-y-reverse:0;--tw-divide-y-reverse:0;--tw-border-style:solid;--tw-leading:initial;--tw-font-weight:initial;--tw-tracking:initial;--tw-shadow:0 0 #0000;--tw-shadow-color:initial;--tw-shadow-alpha:100%;--tw-inset-shadow:0 0 #0000;--tw-inset-shadow-color:initial;--tw-inset-shadow-alpha:100%;--tw-ring-color:initial;--tw-ring-shadow:0 0 #0000;--tw-inset-ring-color:initial;--tw-inset-ring-shadow:0 0 #0000;--tw-ring-inset:initial;--tw-ring-offset-width:0px;--tw-ring-offset-color:#fff;--tw-ring-offset-shadow:0 0 #0000;--tw-blur:initial;--tw-brightness:initial;--tw-contrast:initial;--tw-grayscale:initial;--tw-hue-rotate:initial;--tw-invert:initial;--tw-opacity:initial;--tw-saturate:initial;--tw-sepia:initial;--tw-drop-shadow:initial;--tw-drop-shadow-color:initial;--tw-drop-shadow-alpha:100%;--tw-drop-shadow-size:initial;--tw-outline-style:solid}}}@layer theme{:root,:host{--font-sans:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";--font-mono:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;--color-black:#000;--color-white:#fff;--spacing:.25rem;--container-md:28rem;--container-7xl:80rem;--text-xs:.75rem;--text-xs--line-height:calc(1 / .75);--text-sm:.875rem;--text-sm--line-height:calc(1.25 / .875);--text-lg:1.125rem;--text-lg--line-height:calc(1.75 / 1.125);--text-2xl:1.5rem;--text-2xl--line-height:calc(2 / 1.5);--font-weight-normal:400;--font-weight-medium:500;--font-weight-semibold:600;--tracking-tight:-.025em;--tracking-normal:0em;--tracking-wider:.05em;--leading-relaxed:1.625;--radius-sm:.25rem;--radius-md:.375rem;--radius-lg:.5rem;--radius-xl:.75rem;--animate-pulse:pulse 2s cubic-bezier(.4, 0, .6, 1) infinite;--default-transition-duration:.15s;--default-transition-timing-function:cubic-bezier(.4, 0, .2, 1);--default-font-family:var(--font-sans);--default-mono-font-family:var(--font-mono);--color-canvas:oklch(14.1% .005 285.823);--color-raised:oklch(21% .006 285.885);--color-hover:oklch(27.4% .006 286.033);--color-line:oklch(27.4% .006 286.033);--color-line-strong:oklch(37% .013 285.805);--color-dim:oklch(55.2% .016 285.938);--color-muted:oklch(70.5% .015 286.067);--color-fg-soft:oklch(87.1% .006 286.286);--color-fg:oklch(92% .004 286.32);--color-fg-strong:oklch(96.7% .001 286.375);--color-ok:oklch(76.5% .177 163.223);--color-ok-fg:oklch(84.5% .143 164.978);--color-ok-soft:oklch(90.5% .093 164.15);--color-warn:oklch(82.8% .189 84.429);--color-warn-fg:oklch(87.9% .169 91.605);--color-warn-soft:oklch(92.4% .12 95.746);--color-warn-strong:oklch(96.2% .059 95.617);--color-bad:oklch(70.4% .191 22.216);--color-bad-fg:oklch(80.8% .114 19.571);--color-bad-soft:oklch(88.5% .062 18.334);--color-danger:oklch(50.5% .213 27.518);--color-danger-hover:oklch(44.4% .177 26.899);--color-pause:oklch(70.2% .183 293.541);--color-pause-fg:oklch(81.1% .111 293.571);--color-accent:oklch(74.6% .16 232.661);--color-accent-fg:oklch(82.8% .111 230.318);--color-accent-soft:oklch(90.1% .058 230.902)}}@layer base{*,:after,:before,::backdrop{box-sizing:border-box;border:0 solid;margin:0;padding:0}::file-selector-button{box-sizing:border-box;border:0 solid;margin:0;padding:0}html,:host{-webkit-text-size-adjust:100%;tab-size:4;line-height:1.5;font-family:var(--default-font-family,-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji");font-feature-settings:var(--default-font-feature-settings,normal);font-variation-settings:var(--default-font-variation-settings,normal);-webkit-tap-highlight-color:transparent}hr{height:0;color:inherit;border-top-width:1px}abbr:where([title]){-webkit-text-decoration:underline dotted;text-decoration:underline dotted}h1,h2,h3,h4,h5,h6{font-size:inherit;font-weight:inherit}a{color:inherit;-webkit-text-decoration:inherit;-webkit-text-decoration:inherit;-webkit-text-decoration:inherit;text-decoration:inherit}b,strong{font-weight:bolder}code,kbd,samp,pre{font-family:var(--default-mono-font-family,ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);font-feature-settings:var(--default-mono-font-feature-settings,normal);font-variation-settings:var(--default-mono-font-variation-settings,normal);font-size:1em}small{font-size:80%}sub,sup{vertical-align:baseline;font-size:75%;line-height:0;position:relative}sub{bottom:-.25em}sup{top:-.5em}table{text-indent:0;border-color:inherit;border-collapse:collapse}:-moz-focusring:where(:not(iframe)){outline:auto}progress{vertical-align:baseline}summary{display:list-item}ol,ul,menu{list-style:none}img,svg,video,canvas,audio,iframe,embed,object{vertical-align:middle;display:block}img,video{max-width:100%;height:auto}button,input,select,optgroup,textarea{font:inherit;font-feature-settings:inherit;font-variation-settings:inherit;letter-spacing:inherit;color:inherit;opacity:1;background-color:#0000;border-radius:0}::file-selector-button{font:inherit;font-feature-settings:inherit;font-variation-settings:inherit;letter-spacing:inherit;color:inherit;opacity:1;background-color:#0000;border-radius:0}:where(select:is([multiple],[size])) optgroup{font-weight:bolder}:where(select:is([multiple],[size])) optgroup option{padding-inline-start:20px}::file-selector-button{margin-inline-end:4px}::placeholder{opacity:1}@supports (not ((-webkit-appearance:-apple-pay-button))) or (contain-intrinsic-size:1px){::placeholder{color:currentColor}@supports (color:color-mix(in lab, red, red)){::placeholder{color:color-mix(in oklab, currentcolor 50%, transparent)}}}textarea{resize:vertical}::-webkit-search-decoration{-webkit-appearance:none}::-webkit-date-and-time-value{min-height:1lh;text-align:inherit}::-webkit-datetime-edit{display:inline-flex}::-webkit-datetime-edit-fields-wrapper{padding:0}::-webkit-datetime-edit{padding-block:0}::-webkit-datetime-edit-year-field{padding-block:0}::-webkit-datetime-edit-month-field{padding-block:0}::-webkit-datetime-edit-day-field{padding-block:0}::-webkit-datetime-edit-hour-field{padding-block:0}::-webkit-datetime-edit-minute-field{padding-block:0}::-webkit-datetime-edit-second-field{padding-block:0}::-webkit-datetime-edit-millisecond-field{padding-block:0}::-webkit-datetime-edit-meridiem-field{padding-block:0}::-webkit-calendar-picker-indicator{line-height:1}:-moz-ui-invalid{box-shadow:none}button,input:where([type=button],[type=reset],[type=submit]){appearance:button}::file-selector-button{appearance:button}::-webkit-inner-spin-button{height:auto}::-webkit-outer-spin-button{height:auto}[hidden]:where(:not([hidden=until-found])){display:none!important}}@layer components;@layer utilities{.sr-only{clip-path:inset(50%);white-space:nowrap;border-width:0;width:1px;height:1px;margin:-1px;padding:0;position:absolute;overflow:hidden}.fixed{position:fixed}.right-4{right:calc(var(--spacing) * 4)}.bottom-4{bottom:calc(var(--spacing) * 4)}.z-30{z-index:30}.container{width:100%}@media (min-width:40rem){.container{max-width:40rem}}@media (min-width:48rem){.container{max-width:48rem}}@media (min-width:64rem){.container{max-width:64rem}}@media (min-width:80rem){.container{max-width:80rem}}@media (min-width:96rem){.container{max-width:96rem}}.m-auto{margin:auto}.mx-1{margin-inline:var(--spacing)}.mx-auto{margin-inline:auto}.-mt-0\.5{margin-top:calc(var(--spacing) * -.5)}.mt-0\.5{margin-top:calc(var(--spacing) * .5)}.mt-1{margin-top:var(--spacing)}.mt-1\.5{margin-top:calc(var(--spacing) * 1.5)}.mt-2{margin-top:calc(var(--spacing) * 2)}.mt-4{margin-top:calc(var(--spacing) * 4)}.mr-1\.5{margin-right:calc(var(--spacing) * 1.5)}.mr-auto{margin-right:auto}.mb-4{margin-bottom:calc(var(--spacing) * 4)}.mb-6{margin-bottom:calc(var(--spacing) * 6)}.ml-1{margin-left:var(--spacing)}.ml-1\.5{margin-left:calc(var(--spacing) * 1.5)}.ml-auto{margin-left:auto}.block{display:block}.contents{display:contents}.flex{display:flex}.grid{display:grid}.hidden{display:none}.inline{display:inline}.table{display:table}.size-1\.5{width:calc(var(--spacing) * 1.5);height:calc(var(--spacing) * 1.5)}.size-2{width:calc(var(--spacing) * 2);height:calc(var(--spacing) * 2)}.size-3{width:calc(var(--spacing) * 3);height:calc(var(--spacing) * 3)}.size-4{width:calc(var(--spacing) * 4);height:calc(var(--spacing) * 4)}.size-6{width:calc(var(--spacing) * 6);height:calc(var(--spacing) * 6)}.size-8{width:calc(var(--spacing) * 8);height:calc(var(--spacing) * 8)}.h-5{height:calc(var(--spacing) * 5)}.h-\[65vh\]{height:65vh}.max-h-\[30vh\]{max-height:30vh}.min-h-screen{min-height:100vh}.w-\[min\(1100px\,95vw\)\]{width:min(1100px,95vw)}.w-fit{width:fit-content}.w-full{width:100%}.w-px{width:1px}.max-w-7xl{max-width:var(--container-7xl)}.max-w-md{max-width:var(--container-md)}.min-w-0{min-width:0}.min-w-48{min-width:calc(var(--spacing) * 48)}.shrink-0{flex-shrink:0}.animate-pulse{animation:var(--animate-pulse)}.cursor-pointer{cursor:pointer}.resize{resize:both}.list-none{list-style-type:none}.grid-cols-\[auto_1fr\]{grid-template-columns:auto 1fr}.flex-wrap{flex-wrap:wrap}.place-items-center{place-items:center}.items-center{align-items:center}.items-start{align-items:flex-start}.justify-between{justify-content:space-between}.justify-end{justify-content:flex-end}.gap-1{gap:var(--spacing)}.gap-1\.5{gap:calc(var(--spacing) * 1.5)}.gap-2{gap:calc(var(--spacing) * 2)}.gap-2\.5{gap:calc(var(--spacing) * 2.5)}.gap-3{gap:calc(var(--spacing) * 3)}.gap-4{gap:calc(var(--spacing) * 4)}:where(.space-y-2>:not(:last-child)){--tw-space-y-reverse:0;margin-block-start:calc(calc(var(--spacing) * 2) * var(--tw-space-y-reverse));margin-block-end:calc(calc(var(--spacing) * 2) * calc(1 - var(--tw-space-y-reverse)))}:where(.space-y-3>:not(:last-child)){--tw-space-y-reverse:0;margin-block-start:calc(calc(var(--spacing) * 3) * var(--tw-space-y-reverse));margin-block-end:calc(calc(var(--spacing) * 3) * calc(1 - var(--tw-space-y-reverse)))}.gap-x-3{column-gap:calc(var(--spacing) * 3)}.gap-x-4{column-gap:calc(var(--spacing) * 4)}.gap-y-1\.5{row-gap:calc(var(--spacing) * 1.5)}.gap-y-2{row-gap:calc(var(--spacing) * 2)}:where(.divide-y>:not(:last-child)){--tw-divide-y-reverse:0;border-bottom-style:var(--tw-border-style);border-top-style:var(--tw-border-style);border-top-width:calc(1px * var(--tw-divide-y-reverse));border-bottom-width:calc(1px * calc(1 - var(--tw-divide-y-reverse)))}:where(.divide-line\/70>:not(:last-child)){border-color:#27272ab3}@supports (color:color-mix(in lab, red, red)){:where(.divide-line\/70>:not(:last-child)){border-color:color-mix(in oklab, var(--color-line) 70%, transparent)}}.truncate{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.overflow-auto{overflow:auto}.overflow-x-auto{overflow-x:auto}.rounded{border-radius:.25rem}.rounded-full{border-radius:3.40282e38px}.rounded-lg{border-radius:var(--radius-lg)}.rounded-md{border-radius:var(--radius-md)}.rounded-sm{border-radius:var(--radius-sm)}.rounded-xl{border-radius:var(--radius-xl)}.border-t{border-top-style:var(--tw-border-style);border-top-width:1px}.border-b{border-bottom-style:var(--tw-border-style);border-bottom-width:1px}.border-line{border-color:var(--color-line)}.border-line\/70{border-color:#27272ab3}@supports (color:color-mix(in lab, red, red)){.border-line\/70{border-color:color-mix(in oklab, var(--color-line) 70%, transparent)}}.bg-accent{background-color:var(--color-accent)}.bg-accent\/10{background-color:#00bcfe1a}@supports (color:color-mix(in lab, red, red)){.bg-accent\/10{background-color:color-mix(in oklab, var(--color-accent) 10%, transparent)}}.bg-bad{background-color:var(--color-bad)}.bg-bad\/5{background-color:#ff65680d}@supports (color:color-mix(in lab, red, red)){.bg-bad\/5{background-color:color-mix(in oklab, var(--color-bad) 5%, transparent)}}.bg-bad\/10{background-color:#ff65681a}@supports (color:color-mix(in lab, red, red)){.bg-bad\/10{background-color:color-mix(in oklab, var(--color-bad) 10%, transparent)}}.bg-black{background-color:var(--color-black)}.bg-canvas{background-color:var(--color-canvas)}.bg-danger{background-color:var(--color-danger)}.bg-dim{background-color:var(--color-dim)}.bg-fg{background-color:var(--color-fg)}.bg-hover{background-color:var(--color-hover)}.bg-hover\/60{background-color:#27272a99}@supports (color:color-mix(in lab, red, red)){.bg-hover\/60{background-color:color-mix(in oklab, var(--color-hover) 60%, transparent)}}.bg-ok{background-color:var(--color-ok)}.bg-ok\/10{background-color:#00d2941a}@supports (color:color-mix(in lab, red, red)){.bg-ok\/10{background-color:color-mix(in oklab, var(--color-ok) 10%, transparent)}}.bg-ok\/40{background-color:#00d29466}@supports (color:color-mix(in lab, red, red)){.bg-ok\/40{background-color:color-mix(in oklab, var(--color-ok) 40%, transparent)}}.bg-pause{background-color:var(--color-pause)}.bg-raised{background-color:var(--color-raised)}.bg-raised\/40{background-color:#18181b66}@supports (color:color-mix(in lab, red, red)){.bg-raised\/40{background-color:color-mix(in oklab, var(--color-raised) 40%, transparent)}}.bg-warn{background-color:var(--color-warn)}.bg-warn\/10{background-color:#fcbb001a}@supports (color:color-mix(in lab, red, red)){.bg-warn\/10{background-color:color-mix(in oklab, var(--color-warn) 10%, transparent)}}.bg-warn\/30{background-color:#fcbb004d}@supports (color:color-mix(in lab, red, red)){.bg-warn\/30{background-color:color-mix(in oklab, var(--color-warn) 30%, transparent)}}.p-0{padding:0}.p-1{padding:var(--spacing)}.p-2{padding:calc(var(--spacing) * 2)}.p-4{padding:calc(var(--spacing) * 4)}.px-1{padding-inline:var(--spacing)}.px-1\.5{padding-inline:calc(var(--spacing) * 1.5)}.px-2{padding-inline:calc(var(--spacing) * 2)}.px-2\.5{padding-inline:calc(var(--spacing) * 2.5)}.px-3{padding-inline:calc(var(--spacing) * 3)}.px-4{padding-inline:calc(var(--spacing) * 4)}.py-0\.5{padding-block:calc(var(--spacing) * .5)}.py-1{padding-block:var(--spacing)}.py-2{padding-block:calc(var(--spacing) * 2)}.py-3{padding-block:calc(var(--spacing) * 3)}.py-8{padding-block:calc(var(--spacing) * 8)}.py-16{padding-block:calc(var(--spacing) * 16)}.pt-4{padding-top:calc(var(--spacing) * 4)}.pt-5{padding-top:calc(var(--spacing) * 5)}.pr-4{padding-right:calc(var(--spacing) * 4)}.pr-6{padding-right:calc(var(--spacing) * 6)}.pb-1{padding-bottom:var(--spacing)}.pb-2{padding-bottom:calc(var(--spacing) * 2)}.pb-4{padding-bottom:calc(var(--spacing) * 4)}.pl-4{padding-left:calc(var(--spacing) * 4)}.text-center{text-align:center}.text-left{text-align:left}.align-middle{vertical-align:middle}.font-mono{font-family:var(--font-mono)}.font-sans{font-family:var(--font-sans)}.text-2xl{font-size:var(--text-2xl);line-height:var(--tw-leading,var(--text-2xl--line-height))}.text-lg{font-size:var(--text-lg);line-height:var(--tw-leading,var(--text-lg--line-height))}.text-sm{font-size:var(--text-sm);line-height:var(--tw-leading,var(--text-sm--line-height))}.text-xs{font-size:var(--text-xs);line-height:var(--tw-leading,var(--text-xs--line-height))}.leading-relaxed{--tw-leading:var(--leading-relaxed);line-height:var(--leading-relaxed)}.font-medium{--tw-font-weight:var(--font-weight-medium);font-weight:var(--font-weight-medium)}.font-normal{--tw-font-weight:var(--font-weight-normal);font-weight:var(--font-weight-normal)}.font-semibold{--tw-font-weight:var(--font-weight-semibold);font-weight:var(--font-weight-semibold)}.tracking-normal{--tw-tracking:var(--tracking-normal);letter-spacing:var(--tracking-normal)}.tracking-tight{--tw-tracking:var(--tracking-tight);letter-spacing:var(--tracking-tight)}.tracking-wider{--tw-tracking:var(--tracking-wider);letter-spacing:var(--tracking-wider)}.\[overflow-wrap\:anywhere\]{overflow-wrap:anywhere}.whitespace-nowrap{white-space:nowrap}.whitespace-pre-wrap{white-space:pre-wrap}.text-accent{color:var(--color-accent)}.text-accent-fg{color:var(--color-accent-fg)}.text-bad-fg{color:var(--color-bad-fg)}.text-bad-soft{color:var(--color-bad-soft)}.text-fg{color:var(--color-fg)}.text-fg-soft{color:var(--color-fg-soft)}.text-fg-strong{color:var(--color-fg-strong)}.text-muted{color:var(--color-muted)}.text-ok-fg{color:var(--color-ok-fg)}.text-ok-soft{color:var(--color-ok-soft)}.text-pause-fg{color:var(--color-pause-fg)}.text-warn-fg{color:var(--color-warn-fg)}.text-warn-soft{color:var(--color-warn-soft)}.text-warn-strong{color:var(--color-warn-strong)}.text-white{color:var(--color-white)}.normal-case{text-transform:none}.uppercase{text-transform:uppercase}.underline{text-decoration-line:underline}.underline-offset-4{text-underline-offset:4px}.antialiased{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}.opacity-40{opacity:.4}.opacity-70{opacity:.7}.shadow-lg{--tw-shadow:0 10px 15px -3px var(--tw-shadow-color,#0000001a), 0 4px 6px -4px var(--tw-shadow-color,#0000001a);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}.ring-1{--tw-ring-shadow:var(--tw-ring-inset,) 0 0 0 calc(1px + var(--tw-ring-offset-width)) var(--tw-ring-color,currentcolor);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}.shadow-black\/40{--tw-shadow-color:#0006}@supports (color:color-mix(in lab, red, red)){.shadow-black\/40{--tw-shadow-color:color-mix(in oklab, color-mix(in oklab, var(--color-black) 40%, transparent) var(--tw-shadow-alpha), transparent)}}.ring-accent\/20{--tw-ring-color:#00bcfe33}@supports (color:color-mix(in lab, red, red)){.ring-accent\/20{--tw-ring-color:color-mix(in oklab, var(--color-accent) 20%, transparent)}}.ring-bad\/40{--tw-ring-color:#ff656866}@supports (color:color-mix(in lab, red, red)){.ring-bad\/40{--tw-ring-color:color-mix(in oklab, var(--color-bad) 40%, transparent)}}.ring-current{--tw-ring-color:currentcolor}.ring-danger{--tw-ring-color:var(--color-danger)}.ring-line{--tw-ring-color:var(--color-line)}.ring-line-strong{--tw-ring-color:var(--color-line-strong)}.ring-line-strong\/80{--tw-ring-color:#3f3f46cc}@supports (color:color-mix(in lab, red, red)){.ring-line-strong\/80{--tw-ring-color:color-mix(in oklab, var(--color-line-strong) 80%, transparent)}}.ring-ok\/40{--tw-ring-color:#00d29466}@supports (color:color-mix(in lab, red, red)){.ring-ok\/40{--tw-ring-color:color-mix(in oklab, var(--color-ok) 40%, transparent)}}.ring-warn\/30{--tw-ring-color:#fcbb004d}@supports (color:color-mix(in lab, red, red)){.ring-warn\/30{--tw-ring-color:color-mix(in oklab, var(--color-warn) 30%, transparent)}}.filter{filter:var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,)}.transition{transition-property:color,background-color,border-color,outline-color,text-decoration-color,fill,stroke,--tw-gradient-from,--tw-gradient-via,--tw-gradient-to,opacity,box-shadow,transform,translate,scale,rotate,filter,-webkit-backdrop-filter,backdrop-filter,display,content-visibility,overlay,pointer-events;transition-timing-function:var(--tw-ease,var(--default-transition-timing-function));transition-duration:var(--tw-duration,var(--default-transition-duration))}.transition-opacity{transition-property:opacity;transition-timing-function:var(--tw-ease,var(--default-transition-timing-function));transition-duration:var(--tw-duration,var(--default-transition-duration))}.group-aria-pressed\:inline-block:is(:where(.group)[aria-pressed=true] *){display:inline-block}.selection\:bg-accent\/30 ::selection{background-color:#00bcfe4d}@supports (color:color-mix(in lab, red, red)){.selection\:bg-accent\/30 ::selection{background-color:color-mix(in oklab, var(--color-accent) 30%, transparent)}}.selection\:bg-accent\/30::selection{background-color:#00bcfe4d}@supports (color:color-mix(in lab, red, red)){.selection\:bg-accent\/30::selection{background-color:color-mix(in oklab, var(--color-accent) 30%, transparent)}}.placeholder\:text-muted::placeholder{color:var(--color-muted)}.backdrop\:bg-black\/70::backdrop{background-color:#000000b3}@supports (color:color-mix(in lab, red, red)){.backdrop\:bg-black\/70::backdrop{background-color:color-mix(in oklab, var(--color-black) 70%, transparent)}}.empty\:hidden:empty{display:none}@media (hover:hover){.hover\:bg-accent\/20:hover{background-color:#00bcfe33}@supports (color:color-mix(in lab, red, red)){.hover\:bg-accent\/20:hover{background-color:color-mix(in oklab, var(--color-accent) 20%, transparent)}}.hover\:bg-danger-hover:hover{background-color:var(--color-danger-hover)}.hover\:bg-hover:hover{background-color:var(--color-hover)}.hover\:bg-ok\/10:hover{background-color:#00d2941a}@supports (color:color-mix(in lab, red, red)){.hover\:bg-ok\/10:hover{background-color:color-mix(in oklab, var(--color-ok) 10%, transparent)}}.hover\:bg-raised\/70:hover{background-color:#18181bb3}@supports (color:color-mix(in lab, red, red)){.hover\:bg-raised\/70:hover{background-color:color-mix(in oklab, var(--color-raised) 70%, transparent)}}.hover\:text-accent-soft:hover{color:var(--color-accent-soft)}.hover\:text-fg:hover{color:var(--color-fg)}.hover\:text-fg-strong:hover{color:var(--color-fg-strong)}}.focus\:not-sr-only:focus{clip-path:none;white-space:normal;width:auto;height:auto;margin:0;padding:0;position:static;overflow:visible}.focus\:fixed:focus{position:fixed}.focus\:top-3:focus{top:calc(var(--spacing) * 3)}.focus\:left-3:focus{left:calc(var(--spacing) * 3)}.focus\:z-50:focus{z-index:50}.focus\:rounded-md:focus{border-radius:var(--radius-md)}.focus\:bg-fg-strong:focus{background-color:var(--color-fg-strong)}.focus\:px-3:focus{padding-inline:calc(var(--spacing) * 3)}.focus\:py-2:focus{padding-block:calc(var(--spacing) * 2)}.focus\:text-sm:focus{font-size:var(--text-sm);line-height:var(--tw-leading,var(--text-sm--line-height))}.focus\:text-canvas:focus{color:var(--color-canvas)}.focus\:ring-accent:focus{--tw-ring-color:var(--color-accent)}.focus\:outline-none:focus{--tw-outline-style:none;outline-style:none}.focus-visible\:outline-2:focus-visible{outline-style:var(--tw-outline-style);outline-width:2px}.focus-visible\:-outline-offset-2:focus-visible{outline-offset:calc(2px * -1)}.focus-visible\:outline-offset-2:focus-visible{outline-offset:2px}.focus-visible\:outline-accent:focus-visible{outline-color:var(--color-accent)}.aria-disabled\:cursor-wait[aria-disabled=true]{cursor:wait}.aria-disabled\:opacity-40[aria-disabled=true]{opacity:.4}.aria-pressed\:bg-accent\/15[aria-pressed=true]{background-color:#00bcfe26}@supports (color:color-mix(in lab, red, red)){.aria-pressed\:bg-accent\/15[aria-pressed=true]{background-color:color-mix(in oklab, var(--color-accent) 15%, transparent)}}.aria-pressed\:bg-fg-strong[aria-pressed=true]{background-color:var(--color-fg-strong)}.aria-pressed\:text-accent-soft[aria-pressed=true]{color:var(--color-accent-soft)}.aria-pressed\:text-canvas[aria-pressed=true]{color:var(--color-canvas)}.aria-pressed\:ring-accent\/40[aria-pressed=true]{--tw-ring-color:#00bcfe66}@supports (color:color-mix(in lab, red, red)){.aria-pressed\:ring-accent\/40[aria-pressed=true]{--tw-ring-color:color-mix(in oklab, var(--color-accent) 40%, transparent)}}.aria-pressed\:ring-fg-strong[aria-pressed=true]{--tw-ring-color:var(--color-fg-strong)}@media (prefers-reduced-motion:reduce){.motion-reduce\:animate-none{animation:none}.motion-reduce\:transition-none{transition-property:none}}@media not all and (min-width:64rem){.max-lg\:block{display:block}.max-lg\:hidden{display:none}.max-lg\:size-11{width:calc(var(--spacing) * 11);height:calc(var(--spacing) * 11)}.max-lg\:min-h-11{min-height:calc(var(--spacing) * 11)}.max-lg\:w-11{width:calc(var(--spacing) * 11)}.max-lg\:justify-start{justify-content:flex-start}.max-lg\:gap-2{gap:calc(var(--spacing) * 2)}:where(.max-lg\:space-y-1\.5>:not(:last-child)){--tw-space-y-reverse:0;margin-block-start:calc(calc(var(--spacing) * 1.5) * var(--tw-space-y-reverse));margin-block-end:calc(calc(var(--spacing) * 1.5) * calc(1 - var(--tw-space-y-reverse)))}.max-lg\:p-0{padding:0}.max-lg\:px-3{padding-inline:calc(var(--spacing) * 3)}.max-lg\:px-4{padding-inline:calc(var(--spacing) * 4)}.max-lg\:py-3{padding-block:calc(var(--spacing) * 3)}.max-lg\:py-3\.5{padding-block:calc(var(--spacing) * 3.5)}.max-lg\:py-4{padding-block:calc(var(--spacing) * 4)}.max-lg\:pt-1{padding-top:var(--spacing)}.max-lg\:pt-2{padding-top:calc(var(--spacing) * 2)}.max-lg\:pl-5{padding-left:calc(var(--spacing) * 5)}.max-lg\:text-sm{font-size:var(--text-sm);line-height:var(--tw-leading,var(--text-sm--line-height))}.max-lg\:text-xs{font-size:var(--text-xs);line-height:var(--tw-leading,var(--text-xs--line-height))}.max-lg\:has-\[div\]\:block:has(:is(div)){display:block}}@media (min-width:40rem){.sm\:w-72{width:calc(var(--spacing) * 72)}}@media (min-width:64rem){.lg\:hidden{display:none}.lg\:w-9{width:calc(var(--spacing) * 9)}.lg\:w-20{width:calc(var(--spacing) * 20)}.lg\:max-w-\[24ch\]{max-width:24ch}.lg\:min-w-\[24ch\]{min-width:24ch}.lg\:truncate{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.lg\:text-left{text-align:left}.lg\:text-right{text-align:right}.lg\:\[direction\:rtl\]{direction:rtl}}.\[\&\:\:-webkit-details-marker\]\:hidden::-webkit-details-marker{display:none}}@media (prefers-color-scheme:light){:root{--color-canvas:oklch(98.5% 0 none);--color-raised:#fff;--color-hover:oklch(96.7% .001 286.375);--color-line:oklch(92% .004 286.32);--color-line-strong:oklch(87.1% .006 286.286);--color-dim:oklch(70.5% .015 286.067);--color-muted:oklch(44.2% .017 285.786);--color-fg-soft:oklch(37% .013 285.805);--color-fg:oklch(27.4% .006 286.033);--color-fg-strong:oklch(14.1% .005 285.823);--color-ok:oklch(69.6% .17 162.48);--color-ok-fg:oklch(50.8% .118 165.612);--color-ok-soft:oklch(43.2% .095 166.913);--color-warn:oklch(76.9% .188 70.08);--color-warn-fg:oklch(55.5% .163 48.998);--color-warn-soft:oklch(47.3% .137 46.201);--color-warn-strong:oklch(41.4% .112 45.904);--color-bad:oklch(63.7% .237 25.331);--color-bad-fg:oklch(50.5% .213 27.518);--color-bad-soft:oklch(44.4% .177 26.899);--color-danger:oklch(50.5% .213 27.518);--color-danger-hover:oklch(44.4% .177 26.899);--color-pause:oklch(60.6% .25 292.717);--color-pause-fg:oklch(49.1% .27 292.581);--color-accent:oklch(58.8% .158 241.966);--color-accent-fg:oklch(50% .134 242.749);--color-accent-soft:oklch(44.3% .11 240.79)}}@property --tw-space-y-reverse{syntax:"*";inherits:false;initial-value:0}@property --tw-divide-y-reverse{syntax:"*";inherits:false;initial-value:0}@property --tw-border-style{syntax:"*";inherits:false;initial-value:solid}@property --tw-leading{syntax:"*";inherits:false}@property --tw-font-weight{syntax:"*";inherits:false}@property --tw-tracking{syntax:"*";inherits:false}@property --tw-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-shadow-color{syntax:"*";inherits:false}@property --tw-shadow-alpha{syntax:"<percentage>";inherits:false;initial-value:100%}@property --tw-inset-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-inset-shadow-color{syntax:"*";inherits:false}@property --tw-inset-shadow-alpha{syntax:"<percentage>";inherits:false;initial-value:100%}@property --tw-ring-color{syntax:"*";inherits:false}@property --tw-ring-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-inset-ring-color{syntax:"*";inherits:false}@property --tw-inset-ring-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-ring-inset{syntax:"*";inherits:false}@property --tw-ring-offset-width{syntax:"<length>";inherits:false;initial-value:0}@property --tw-ring-offset-color{syntax:"*";inherits:false;initial-value:#fff}@property --tw-ring-offset-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-blur{syntax:"*";inherits:false}@property --tw-brightness{syntax:"*";inherits:false}@property --tw-contrast{syntax:"*";inherits:false}@property --tw-grayscale{syntax:"*";inherits:false}@property --tw-hue-rotate{syntax:"*";inherits:false}@property --tw-invert{syntax:"*";inherits:false}@property --tw-opacity{syntax:"*";inherits:false}@property --tw-saturate{syntax:"*";inherits:false}@property --tw-sepia{syntax:"*";inherits:false}@property --tw-drop-shadow{syntax:"*";inherits:false}@property --tw-drop-shadow-color{syntax:"*";inherits:false}@property --tw-drop-shadow-alpha{syntax:"<percentage>";inherits:false;initial-value:100%}@property --tw-drop-shadow-size{syntax:"*";inherits:false}@property --tw-outline-style{syntax:"*";inherits:false;initial-value:solid}@keyframes pulse{50%{opacity:.5}}"""
 PAGE = r"""<!doctype html>
 <html lang="pt-BR" class="bg-canvas" data-cli="docker">
 <head>
@@ -604,7 +678,15 @@ PAGE = r"""<!doctype html>
       <button id="follow" aria-pressed="false" onclick="toggleFollow()" class="group px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover aria-pressed:bg-accent/15 aria-pressed:text-accent-soft aria-pressed:ring-accent/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"><span aria-hidden="true" class="hidden group-aria-pressed:inline-block size-1.5 mr-1.5 align-middle rounded-full bg-accent animate-pulse motion-reduce:animate-none"></span>Acompanhar ao vivo</button>
       <button onclick="copyLogs()" class="px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Copiar</button>
       <button onclick="downloadLogs()" class="px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Baixar .log</button>
+    </div>
+    <!-- filtro só na página (o docker não vê o texto); / foca o campo, como a busca da lista -->
+    <div class="flex flex-wrap items-center gap-2">
+      <label for="lf" class="sr-only">Filtrar linhas dos logs</label>
+      <input id="lf" type="search" placeholder="Filtrar linhas… (atalho /)" aria-keyshortcuts="/" aria-describedby="lcount" autocomplete="off" spellcheck="false"
+        class="w-full sm:w-72 rounded-md bg-canvas ring-1 ring-line-strong/80 px-2.5 py-1 max-lg:py-3 text-xs max-lg:text-sm text-fg-strong placeholder:text-muted focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+      <span id="lcount" aria-live="polite" aria-atomic="true" class="text-xs text-muted"></span>
       <span id="lmeta" class="ml-auto text-xs text-muted">Últimas 500 linhas</span>
+      <button id="more" onclick="loadMore()" class="px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover aria-disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Carregar 2.000 linhas</button>
     </div>
     <details id="insp" ontoggle="this.open && loadInspect()" class="text-xs">
       <summary class="cursor-pointer w-fit py-1 max-lg:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent text-muted hover:text-fg">Configuração: restart, redes, mounts e env</summary>
@@ -659,6 +741,7 @@ PAGE = r"""<!doctype html>
   var newProblems = (before, cs2) => before ? cs2.filter((c) => isProblem(c) && !before.has(c.ID)) : [];
   var project = (c) => (c.Labels || "").match(/(?:^|,)com\.docker\.compose\.project=([^,]*)/)?.[1] || "";
   var workingDir = (c) => (c.Labels || "").match(/(?:^|,)com\.docker\.compose\.project\.working_dir=([^,]*)/)?.[1] || "";
+  var service = (c) => (c.Labels || "").match(/(?:^|,)com\.docker\.compose\.service=([^,]*)/)?.[1] || "";
   function dur(s15) {
     if (/less than a second/i.test(s15)) return "<1 s";
     const m = s15.match(/(about )?(an?|\d+) (second|minute|hour|day|week|month|year)/i);
@@ -690,6 +773,7 @@ PAGE = r"""<!doctype html>
   var shortImage = (img) => img.replace(/^[^/]+[.:][^/]*\//, "");
   var hasHealth = (c) => /\((un)?healthy\)|health: starting/.test(c.Status);
   var usage = (s15) => [`CPU ${s15.CPUPerc} · RAM ${s15.MemUsage.split(" / ")[0]}`, `Memória: ${s15.MemUsage} (${s15.MemPerc})`];
+  var logFilter = (q2) => q2 ? new RegExp(`(${q2.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "i") : null;
   function age(t, now = Date.now() / 1e3) {
     const s15 = now - t, d = s15 / 86400, n = (x) => Math.floor(x);
     return s15 < 60 ? "<1 min" : s15 < 3600 ? `${n(s15 / 60)} min` : s15 < 172800 ? `${n(s15 / 3600)} h` : d < 14 ? `${n(d)} d` : d < 60 ? `${n(d / 7)} sem` : d < 730 ? `${n(d / 30)} meses` : `${n(d / 365)} anos`;
@@ -10142,7 +10226,8 @@ ${h2.join(`
   var LABEL = { start: "Iniciar", stop: "Parar", restart: "Reiniciar", pause: "Pausar", unpause: "Retomar", logs: "Logs", remove: "Remover" };
   var VERB = { start: "Iniciando…", stop: "Parando…", restart: "Reiniciando…", pause: "Pausando…", unpause: "Retomando…", remove: "Removendo…" };
   var DONE = { start: "iniciado", stop: "parado", restart: "reiniciado", pause: "pausado", unpause: "retomado", remove: "removido" };
-  var COMPOSE_VERB = { up: "Subindo…", down: "Derrubando…", pull: "Baixando…" };
+  var COMPOSE_VERB = { up: "Subindo…", rebuild: "Reconstruindo…", down: "Derrubando…", pull: "Baixando…", restart: "Reiniciando…" };
+  var COMPOSE_CMD = { up: "compose up", rebuild: "compose up --build", down: "compose down", pull: "compose pull", restart: "compose restart" };
   var PRIMARY = { running: "stop", restarting: "stop", paused: "unpause", exited: "start", created: "start" };
   var SECONDARY = { running: "restart", paused: "stop" };
   var STOPPABLE = ["running", "paused", "restarting"];
@@ -10207,6 +10292,7 @@ ${h2.join(`
   var lastSay = "";
   var dirty = false;
   var seen = null;
+  var logProject = null;
   var toastFn = null;
   function toast(msg, ok = false, action = null) {
     toastFn = action?.[1] || null;
@@ -10387,7 +10473,17 @@ ${h2.join(`
   }
   var rowCache = /* @__PURE__ */ new Map();
   function row(c, withProject = false) {
-    const sig = JSON.stringify([c, withProject, busy.get(c.ID), arming?.id === c.ID, errors.get(c.ID), health[c.ID + c.Status], stats[c.ID], TOUCH]);
+    const sig = JSON.stringify([
+      c,
+      withProject,
+      busy.get(c.ID),
+      arming?.id === c.ID,
+      errors.get(c.ID),
+      health[c.ID + c.Status],
+      stats[c.ID],
+      composing.has(project(c)),
+      TOUCH
+    ]);
     const hit = rowCache.get(c.ID);
     if (hit?.sig === sig) return hit.html;
     const html = rowHtml(c, withProject);
@@ -10401,8 +10497,10 @@ ${h2.join(`
     const slot = (w = "lg:w-20") => `<span aria-hidden="true" class="${w} shrink-0 max-lg:hidden"></span>`;
     const btn = (a, cls = "text-fg hover:bg-hover", text = LABEL[a], aria = `${LABEL[a]} ${esc(c.Names)}`) => `<button data-id="${c.ID}" data-a="${a}" ${b2 && a !== "logs" ? 'aria-disabled="true"' : ""}
       aria-label="${aria}" aria-describedby="st-${c.ID}" onclick="act('${a}','${c.ID}')" class="lg:w-20 shrink-0 ${BTN} ${cls}">${text}</button>`;
+    const svc = p && workingDir(c) && service(c);
     const more = [
       sec && [sec, LABEL[sec]],
+      svc && ["srestart", `Reiniciar serviço ${esc(svc)}`],
       c.State === "running" && ["pause", "Pausar"],
       c.State === "running" && ["shell", "Abrir terminal"],
       c.State === "running" && ["exec", "Copiar docker exec"],
@@ -10414,7 +10512,7 @@ ${h2.join(`
         class="list-none [&::-webkit-details-marker]:hidden cursor-pointer grid place-items-center lg:w-9 max-lg:w-11 ${BTN} text-fg hover:bg-hover">
         <svg aria-hidden="true" viewBox="0 0 16 16" fill="currentColor" class="size-4"><circle cx="3.5" cy="8" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="12.5" cy="8" r="1.3"/></svg></summary>
       <div class="fixed z-30 min-w-48 rounded-lg bg-raised ring-1 ring-line-strong p-1 shadow-lg shadow-black/40">
-        ${more.map(([a, text]) => `<button data-id="${c.ID}" data-a="m-${a}" ${b2 ? 'aria-disabled="true"' : ""} onclick="menuPick(this); ${a === "exec" ? `copyExec('${c.ID}')` : a === "shell" ? `openShell('${c.ID}')` : `act('${a}','${c.ID}')`}"
+        ${more.map(([a, text]) => `<button data-id="${c.ID}" data-a="m-${a}" ${b2 || a === "srestart" && composing.has(p) ? 'aria-disabled="true"' : ""} onclick="menuPick(this); ${a === "exec" ? `copyExec('${c.ID}')` : a === "shell" ? `openShell('${c.ID}')` : a === "srestart" ? `restartService('${c.ID}')` : `act('${a}','${c.ID}')`}"
           class="${item} ${a === "remove" ? "text-bad-fg" : "text-fg"}">${text}</button>`).join("")}
       </div></details>`;
     const healthBox = hasHealth(c) && !b2 ? `<details data-keep="health" class="mt-1 text-xs" ontoggle="this.open && loadHealth('${c.ID}')">
@@ -10468,7 +10566,8 @@ ${h2.join(`
       <span class="text-xs font-medium uppercase tracking-wider text-fg">${label}</span>
       ${k ? `<span class="text-xs text-muted">compose · ${on2} de ${all.length} rodando</span>` : ""}
       ${k && inBand ? `<span class="text-xs text-bad-fg">${inBand} na faixa de atenção ↑</span>` : ""}
-      <span class="ml-auto flex flex-wrap gap-1.5">${STACK.map(([a, text]) => sbtn(a, stackList(a, k).length, text)).join("")}${dir ? cbtn("up", "compose up") + cbtn("pull", "compose pull") + (armed ? cbtn("down", "Confirmar down", "bg-danger text-white ring-danger hover:bg-danger-hover", `Confirmar compose down do projeto ${esc(k)}`) : cbtn("down", "compose down…")) : ""}</span>
+      <span class="ml-auto flex flex-wrap gap-1.5">${STACK.map(([a, text]) => sbtn(a, stackList(a, k).length, text)).join("")}${dir ? `<button data-id="stack-${esc(k)}" data-a="plogs" data-p="${esc(k)}" aria-label="Logs do projeto ${esc(k)}" onclick="projectLogs(this.dataset.p)"
+            class="${BTN} text-fg hover:bg-hover normal-case tracking-normal">Logs</button>` + cbtn("up", "compose up") + cbtn("rebuild", "compose up --build") + cbtn("pull", "compose pull") + (armed ? cbtn("down", "Confirmar down", "bg-danger text-white ring-danger hover:bg-danger-hover", `Confirmar compose down do projeto ${esc(k)}`) : cbtn("down", "compose down…")) : ""}</span>
       ${armed ? `<p aria-hidden="true" class="w-full text-xs text-bad-soft lg:text-right">Derrubar o projeto? Os volumes ficam; o projeto some da lista e só volta com up. ${TOUCH ? "Cancela sozinho em 8 s." : "Esc cancela."}</p>` : ""}
     </div></th></tr>`;
   }
@@ -10619,28 +10718,39 @@ ${h2.join(`
     disarm(false);
     return true;
   }
-  async function composeAct(a, p) {
+  async function composeAct(a, p, svc = "") {
     const c = data.find((c2) => project(c2) === p);
     if (!c || composing.has(p) || data.some((c2) => project(c2) === p && busy.has(c2.ID))) return;
     if (a === "down" && !confirmed(`stack-${p}`, p, "down", "Os volumes ficam; o projeto some da lista e só volta com up.")) return;
+    const ids = svc ? data.filter((c2) => project(c2) === p && service(c2) === svc).map((c2) => c2.ID) : [];
+    const what = `${COMPOSE_CMD[a]}${svc ? ` ${svc}` : ""}`;
+    let ok = false;
     composing.set(p, a);
+    ids.forEach((id) => busy.set(id, "restart"));
     render();
-    $2("#shown").textContent = `${COMPOSE_VERB[a]} ${p}`;
+    $2("#shown").textContent = `${COMPOSE_VERB[a]} ${svc || p}`;
     try {
       const r = await api(`/api/compose/${a}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ project: p, dir: workingDir(c) })
+        body: JSON.stringify({ project: p, dir: workingDir(c), ...svc ? { service: svc } : {} })
       });
       const msg = await r.json();
-      toast(r.ok ? `${p}: compose ${a} concluído.` : `${p}: compose ${a} falhou. ${msg.trim().split("\n").at(-1) || "Erro sem mensagem."}`, r.ok);
+      ok = r.ok;
+      toast(r.ok ? `${p}: ${what} concluído${ids.length ? ", conferindo se ficou de pé…" : "."}` : `${p}: ${what} falhou. ${msg.trim().split("\n").at(-1) || "Erro sem mensagem."}`, r.ok);
     } catch {
       toast(`${p}: sem resposta do servidor do Docker GUI.`);
     }
     composing.delete(p);
+    ids.forEach((id) => busy.delete(id));
     render();
+    if (ok && ids.length) return confirmUp(ids);
     await load();
     if (a === "down") $2("#q").focus();
+  }
+  function restartService(id) {
+    const c = data.find((c2) => c2.ID === id);
+    if (c) composeAct("restart", project(c), service(c));
   }
   function armTick() {
     if (!arming) return;
@@ -10657,8 +10767,15 @@ ${h2.join(`
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") closeMenus();
     if (e.key === "Escape" && arming) return disarm();
-    if ($2("#dlg").open || $2("#shell").open || e.ctrlKey || e.metaKey || e.altKey) return;
+    if ($2("#shell").open || e.ctrlKey || e.metaKey || e.altKey) return;
     const el2 = document.activeElement, typing = /^(INPUT|TEXTAREA|SELECT)$/.test(el2.tagName);
+    if ($2("#dlg").open) {
+      if (e.key === "/" && !typing) {
+        e.preventDefault();
+        $2("#lf").focus();
+      }
+      return;
+    }
     if (e.key === "/" && !typing) {
       e.preventDefault();
       return $2("#q").focus();
@@ -10674,6 +10791,12 @@ ${h2.join(`
   });
   function renderDlg() {
     if (!$2("#dlg").open) return;
+    if (logProject) {
+      const p = logProject.project, all = data.filter((c2) => project(c2) === p), on2 = all.filter((c2) => c2.State === "running").length;
+      $2("#dlg-status").innerHTML = `<span class="text-muted">${all.length ? `Projeto compose · ${on2} de ${all.length} rodando · todos os serviços` : "Este projeto não tem mais containers."}</span>`;
+      $2("#dlg-acts").innerHTML = "";
+      return;
+    }
     const c = data.find((c2) => c2.ID === logId);
     if (!c) {
       $2("#dlg-status").innerHTML = '<span class="text-muted">Este container não existe mais.</span>';
@@ -10687,33 +10810,133 @@ ${h2.join(`
     $2("#dlg-acts").innerHTML = [PRIMARY[c.State], SECONDARY[c.State]].filter((a) => !!a).map((a) => `<button data-id="dlg" data-a="${a}" ${b2 ? 'aria-disabled="true"' : ""} aria-label="${LABEL[a]} ${esc(c.Names)}" onclick="act('${a}', '${c.ID}')"
       class="${BTN} ${a === "start" ? "text-ok-fg hover:bg-ok/10" : "text-fg hover:bg-hover"}">${LABEL[a]}</button>`).join("") + (c.State === "running" ? `<button data-id="dlg" data-a="exec" onclick="copyExec('${c.ID}')" class="${BTN} text-fg hover:bg-hover">Copiar docker exec</button>` : "");
   }
-  async function fetchLogs() {
-    const lb = $2("#lb"), atEnd = lb.scrollHeight - lb.scrollTop - lb.clientHeight < 40;
-    try {
-      const r = await api("/api/logs/" + logId), j2 = await r.json();
-      if (stream) return;
-      lb.textContent = r.ok ? j2 || "(sem logs)" : `Não consegui ler os logs: ${j2}`;
-      $2("#lmeta").textContent = `Últimas 500 linhas · atualizado às ${(/* @__PURE__ */ new Date()).toLocaleTimeString("pt-BR")}`;
-    } catch {
-      lb.textContent = "Não consegui carregar os logs. O servidor do Docker GUI está rodando?";
-    }
+  var TAILS = ["500", "2000", "10000", "all"];
+  var LIVE_TAILS = 3;
+  var MARK = "rounded-sm bg-warn/30 text-fg-strong";
+  var tailAt = 0;
+  var buf = [];
+  var hits = 0;
+  var hitLines = 0;
+  var complete = false;
+  var fmt = (n) => n.toLocaleString("pt-BR");
+  var hist = () => TAILS[tailAt] === "all" ? "todas as linhas" : `últimas ${fmt(+TAILS[tailAt])} linhas${logProject ? " de cada container" : ""}`;
+  var filterRe = () => logFilter($2("#lf").value);
+  function hitNode(line, re2) {
+    const parts = line.split(re2);
+    if (parts.length < 2) return null;
+    hits += (parts.length - 1) / 2;
+    hitLines++;
+    const span = document.createElement("span");
+    parts.forEach((p, i) => {
+      if (i % 2 === 0) return p && span.append(p);
+      const m = document.createElement("mark");
+      m.className = MARK;
+      m.textContent = p;
+      span.append(m);
+    });
+    return span;
+  }
+  function renderHits() {
+    const txt = !filterRe() ? "" : hits ? `${fmt(hits)} ${hits === 1 ? "ocorrência" : "ocorrências"} em ${fmt(hitLines)} ${hitLines === 1 ? "linha" : "linhas"}` : "Nenhuma ocorrência";
+    if ($2("#lcount").textContent !== txt) $2("#lcount").textContent = txt;
+  }
+  function paint() {
+    const lb = $2("#lb"), re2 = filterRe(), atEnd = lb.scrollHeight - lb.scrollTop - lb.clientHeight < 40;
+    hits = hitLines = 0;
+    if (buf.length && (re2 || stream)) {
+      const frag = document.createDocumentFragment();
+      for (const l of buf) {
+        const n = re2 ? hitNode(l, re2) : l;
+        if (n) frag.append(n);
+      }
+      lb.replaceChildren(frag);
+    } else if (buf.length) lb.textContent = buf.join("");
+    renderHits();
     if (atEnd) lb.scrollTop = lb.scrollHeight;
   }
-  function logs(id) {
-    logId = id;
-    $2("#lt").textContent = data.find((c) => c.ID === id).Names;
+  function renderMore() {
+    const next = TAILS[tailAt + 1], b2 = $2("#more");
+    b2.textContent = !next || complete ? "Tudo carregado" : next === "all" ? "Carregar tudo" : `Carregar ${fmt(+next)} linhas`;
+    b2.setAttribute("aria-disabled", String(!next || complete || !!stream && tailAt + 1 >= LIVE_TAILS));
+  }
+  async function fetchLogs(more = false) {
+    const lb = $2("#lb"), atEnd = lb.scrollHeight - lb.scrollTop - lb.clientHeight < 40;
+    const fromEnd = lb.scrollHeight - lb.scrollTop, tail = TAILS[tailAt], who = logProject ?? logId;
+    try {
+      const r = await api(logProject ? `/api/compose/logs?${new URLSearchParams({ ...logProject, tail })}` : `/api/logs/${logId}?tail=${tail}`);
+      const j2 = await r.json();
+      if (stream) return;
+      if (who !== (logProject ?? logId) || tail !== TAILS[tailAt]) return;
+      buf = r.ok && j2 ? j2.match(/[^\n]*\n|[^\n]+$/g) : [];
+      complete = r.ok && (tail === "all" || buf.length < +tail);
+      if (buf.length) paint();
+      else {
+        lb.textContent = r.ok ? "(sem logs)" : `Não consegui ler os logs: ${j2}`;
+        renderHits();
+      }
+      $2("#lmeta").textContent = `${hist().replace(/^./, (c) => c.toUpperCase())} · atualizado às ${(/* @__PURE__ */ new Date()).toLocaleTimeString("pt-BR")}`;
+    } catch {
+      buf = [];
+      lb.textContent = "Não consegui carregar os logs. O servidor do Docker GUI está rodando?";
+    }
+    renderMore();
+    if (more) lb.scrollTop = lb.scrollHeight - fromEnd;
+    else if (atEnd) lb.scrollTop = lb.scrollHeight;
+  }
+  function openLogs(title) {
+    tailAt = 0;
+    buf = [];
+    complete = false;
+    $2("#lt").textContent = title;
+    $2("#lf").value = "";
     $2("#lb").textContent = "Carregando…";
-    $2("#lmeta").textContent = "Últimas 500 linhas";
+    $2("#lmeta").textContent = hist().replace(/^./, (c) => c.toUpperCase());
     $2("#dlg-msg").innerHTML = "";
+    $2("#insp").hidden = !!logProject;
+    renderHits();
+    renderMore();
     $2("#dlg").showModal();
     renderDlg();
     fetchLogs();
   }
+  function logs(id) {
+    logId = id;
+    logProject = null;
+    openLogs(data.find((c) => c.ID === id).Names);
+  }
+  function projectLogs(p) {
+    const c = data.find((c2) => project(c2) === p);
+    if (!c) return;
+    logId = null;
+    logProject = { project: p, dir: workingDir(c) };
+    openLogs(p);
+  }
+  function loadMore() {
+    if ($2("#more").getAttribute("aria-disabled") === "true") {
+      if (stream && TAILS[tailAt + 1]) toast(`Ao vivo, o histórico vai até ${fmt(+TAILS[LIVE_TAILS - 1])} linhas. Para carregar tudo, desligue o ao vivo.`);
+      return;
+    }
+    tailAt++;
+    if (stream) toggleFollow(true);
+    else fetchLogs(true);
+    renderMore();
+  }
   var MAX_LINES = 5e3;
   function flushLogs() {
-    const lb = $2("#lb"), atEnd = lb.scrollHeight - lb.scrollTop - lb.clientHeight < 40;
-    lb.append(...pending.splice(0));
-    for (let n = lb.childNodes.length - MAX_LINES; n > 0; n--) lb.firstChild.remove();
+    const lb = $2("#lb"), atEnd = lb.scrollHeight - lb.scrollTop - lb.clientHeight < 40, re2 = filterRe();
+    const add = pending.splice(0);
+    buf.push(...add);
+    lb.append(...re2 ? add.map((l) => hitNode(l, re2)).filter((n) => !!n) : add);
+    for (const l of buf.splice(0, Math.max(0, buf.length - Math.max(MAX_LINES, +TAILS[tailAt])))) {
+      const n = re2 ? (l.split(re2).length - 1) / 2 : 1;
+      if (!n) continue;
+      lb.firstChild.remove();
+      if (re2) {
+        hits -= n;
+        hitLines--;
+      }
+    }
+    if (re2) renderHits();
     if (atEnd) lb.scrollTop = lb.scrollHeight;
   }
   function toggleFollow(on2 = !stream, why = "") {
@@ -10722,16 +10945,22 @@ ${h2.join(`
     stream = null;
     if (was) flushLogs();
     if (on2) {
-      const es2 = stream = new EventSource(`/api/logs/${logId}/stream?t=${encodeURIComponent(TOKEN)}`);
+      tailAt = Math.min(tailAt, LIVE_TAILS - 1);
+      complete = false;
+      const q2 = new URLSearchParams({ ...logProject, t: TOKEN, tail: TAILS[tailAt] });
+      const es2 = stream = new EventSource(logProject ? `/api/compose/logs/stream?${q2}` : `/api/logs/${logId}/stream?${q2}`);
       es2.onopen = () => {
         pending = [];
+        buf = [];
+        hits = hitLines = 0;
         $2("#lb").textContent = "";
-        $2("#lmeta").textContent = "Ao vivo · últimas 500 linhas e as novas";
+        renderHits();
+        $2("#lmeta").textContent = `Ao vivo · ${hist()} e as novas`;
       };
       es2.onmessage = (e) => {
         if (pending.push(JSON.parse(e.data)) === 1) setTimeout(flushLogs, 50);
       };
-      es2.addEventListener("end", () => toggleFollow(false, "o container parou"));
+      es2.addEventListener("end", () => toggleFollow(false, logProject ? "os containers pararam" : "o container parou"));
       es2.onerror = () => {
         if (es2.readyState === EventSource.CLOSED) toggleFollow(false, "falhou");
         else $2("#lmeta").textContent = "Ao vivo · reconectando…";
@@ -10739,6 +10968,7 @@ ${h2.join(`
     } else if (was) $2("#lmeta").textContent = `Ao vivo parado às ${(/* @__PURE__ */ new Date()).toLocaleTimeString("pt-BR")}${why ? ` · ${why}` : ""}`;
     $2("#follow").setAttribute("aria-pressed", String(on2));
     $2("#refresh").setAttribute("aria-disabled", String(on2));
+    renderMore();
   }
   function refreshLogs() {
     if (!stream) fetchLogs();
@@ -10783,7 +11013,7 @@ ${h2.join(`
     toggleFollow(false);
     $2("#insp").removeAttribute("open");
     $2("#insp-body").textContent = "Carregando…";
-    document.querySelector(`[data-id="${logId}"][data-a="logs"]`)?.focus();
+    document.querySelector(logProject ? `[data-id="${CSS.escape(`stack-${logProject.project}`)}"][data-a="plogs"]` : `[data-id="${logId}"][data-a="logs"]`)?.focus();
   }
   var xtermCss = document.createElement("style");
   xtermCss.textContent = xterm_default;
@@ -10984,12 +11214,15 @@ ${h2.join(`
     loadDisk,
     loadHealth,
     loadInspect,
+    loadMore,
     loadObjects,
     menuPick,
     openShell,
     placeMenu,
+    projectLogs,
     prune,
     refreshLogs,
+    restartService,
     rmObj,
     runToastAction,
     stackAct,
@@ -10999,6 +11232,15 @@ ${h2.join(`
   $2("#shell").addEventListener("close", closeShell);
   $2("#shell").addEventListener("cancel", (e) => e.preventDefault());
   $2("#q").oninput = render;
+  $2("#lf").oninput = paint;
+  $2("#lf").addEventListener("keydown", (e) => {
+    const f = e.target;
+    if (e.key === "Escape" && f.value) {
+      e.preventDefault();
+      f.value = "";
+      paint();
+    }
+  });
   document.addEventListener("visibilitychange", () => document.hidden || load());
   $2("#notify").hidden = !canAsk();
   readHash();

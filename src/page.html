@@ -80,7 +80,15 @@
       <button id="follow" aria-pressed="false" onclick="toggleFollow()" class="group px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover aria-pressed:bg-accent/15 aria-pressed:text-accent-soft aria-pressed:ring-accent/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"><span aria-hidden="true" class="hidden group-aria-pressed:inline-block size-1.5 mr-1.5 align-middle rounded-full bg-accent animate-pulse motion-reduce:animate-none"></span>Acompanhar ao vivo</button>
       <button onclick="copyLogs()" class="px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Copiar</button>
       <button onclick="downloadLogs()" class="px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Baixar .log</button>
+    </div>
+    <!-- filtro só na página (o docker não vê o texto); / foca o campo, como a busca da lista -->
+    <div class="flex flex-wrap items-center gap-2">
+      <label for="lf" class="sr-only">Filtrar linhas dos logs</label>
+      <input id="lf" type="search" placeholder="Filtrar linhas… (atalho /)" aria-keyshortcuts="/" aria-describedby="lcount" autocomplete="off" spellcheck="false"
+        class="w-full sm:w-72 rounded-md bg-canvas ring-1 ring-line-strong/80 px-2.5 py-1 max-lg:py-3 text-xs max-lg:text-sm text-fg-strong placeholder:text-muted focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+      <span id="lcount" aria-live="polite" aria-atomic="true" class="text-xs text-muted"></span>
       <span id="lmeta" class="ml-auto text-xs text-muted">Últimas 500 linhas</span>
+      <button id="more" onclick="loadMore()" class="px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover aria-disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Carregar 2.000 linhas</button>
     </div>
     <details id="insp" ontoggle="this.open && loadInspect()" class="text-xs">
       <summary class="cursor-pointer w-fit py-1 max-lg:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent text-muted hover:text-fg">Configuração: restart, redes, mounts e env</summary>

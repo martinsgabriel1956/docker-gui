@@ -143,6 +143,16 @@ test('workingDir lê a pasta do projeto compose', () => {
   assert.equal(f.workingDir({}), '');
 });
 
+test('service lê o serviço do compose sem confundir com outros labels', () => {
+  const labels = 'com.docker.compose.depends_on=db:service_started:false,redis:service_started:false,'
+               + 'com.docker.compose.project=shop,com.docker.compose.service=api,com.docker.compose.service.extra=x';
+  assert.equal(f.service({Labels: labels}), 'api');
+  assert.equal(f.service({Labels: 'com.docker.compose.service=db'}), 'db');
+  assert.equal(f.service({Labels: 'xcom.docker.compose.service=falso'}), '');
+  assert.equal(f.service({Labels: 'com.docker.compose.project=shop'}), '');
+  assert.equal(f.service({}), '');
+});
+
 test('shortImage tira o host do registry e mantém a tag', () => {
   assert.equal(f.shortImage('ghcr.io/acme/api:1.4'), 'acme/api:1.4');
   assert.equal(f.shortImage('localhost:5000/app:dev'), 'app:dev');
@@ -192,4 +202,16 @@ test('rmHint explica por que a remoção falhou', () => {
   assert.match(f.rmHint('Error response from daemon: conflict: unable to delete 3e58ae0f7a49 (must be forced) - image is referenced in multiple repositories'), /mais de uma tag/);
   assert.match(f.rmHint('Error response from daemon: conflict: unable to delete 3e58ae0f7a49 (cannot be forced) - image has dependent child images'), /construídas sobre esta/);
   assert.equal(f.rmHint('Error response from daemon: get pgdata: no such volume'), '');
+});
+
+test('logFilter busca o texto literal, sem diferenciar maiúsculas', () => {
+  assert.equal(f.logFilter(''), null);
+  const re = f.logFilter('erro');
+  assert.deepEqual('Erro: deu ERRO e erro'.split(re), ['', 'Erro', ': deu ', 'ERRO', ' e ', 'erro', '']);
+  assert.deepEqual('tudo certo'.split(re), ['tudo certo']);  // não casou: a linha inteira, sozinha
+  // caractere especial de regex vale como texto
+  assert.deepEqual('GET /a?b=1 (x) [y] a.b*c'.split(f.logFilter('?b=1 (x) [y]')), ['GET /a', '?b=1 (x) [y]', ' a.b*c']);
+  assert.deepEqual('a.b axb'.split(f.logFilter('a.b')), ['', 'a.b', ' axb']);
+  assert.deepEqual('C:\\tmp\\x $HOME ^|'.split(f.logFilter('\\tmp\\')), ['C:', '\\tmp\\', 'x $HOME ^|']);
+  assert.deepEqual('${x} ^|'.split(f.logFilter('${x} ^|')), ['', '${x} ^|', '']);
 });
