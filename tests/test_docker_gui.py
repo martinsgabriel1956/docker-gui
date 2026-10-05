@@ -5,6 +5,7 @@ import io
 import json
 import os
 import shutil
+import signal
 import socket
 import struct
 import subprocess
@@ -1292,24 +1293,8 @@ echo "got:$line"
 """
 
 
-@unittest.skipUnless(os.name == "posix", "PTY só existe em Unix")
-class TerminalTest(ServerTest):
-    """WebSocket de /api/exec contra um docker falso no PATH: grava pid e argv, lê uma linha e mostra o tamanho."""
-
-    mock_docker = False
-
-    def setUp(self):
-        super().setUp()
-        self.dir = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, self.dir)
-        fake = os.path.join(self.dir, "docker")
-        with open(fake, "w") as f:
-            f.write(FAKE_EXEC)
-        os.chmod(fake, 0o755)
-        env = {"PATH": self.dir + os.pathsep + os.environ.get("PATH", ""), "FAKE_EXEC_DIR": self.dir}
-        patcher = mock.patch.dict(os.environ, env)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+class WsClient:
+    """Cliente WebSocket cru para o /api/exec (junto com ServerTest, que dá o self.port)."""
 
     def connect(self, path=None, origin="", headers=None):
         """Handshake cru. Devolve (status, headers, socket, arquivo de leitura)."""
@@ -1341,6 +1326,59 @@ class TerminalTest(ServerTest):
             n = int.from_bytes(f.read(2 if n == 126 else 8), "big")
         return head[0] & 0x0F, f.read(n)
 
+    def open_session(self, path=None):
+        status, headers, sock, f = self.connect(path)
+        self.assertEqual(status, 101)
+        self.assertEqual(headers["sec-websocket-accept"], "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
+        sock.sendall(client_frame(b'{"cols": 80, "rows": 24}', 1))
+        return sock, f
+
+    def until(self, f, needle=None):
+        """Junta a saída do terminal até aparecer needle (sem needle: até o close). Devolve (saída, avisos em texto)."""
+        out, notes = b"", []
+        while needle is None or needle not in out:
+            op, data = self.recv(f)
+            if op == 8:
+                if needle is None:
+                    return out, notes
+                self.fail(f"o terminal fechou antes de {needle!r}: {out!r}")
+            if op == 1:
+                notes.append(data.decode())
+            else:
+                out += data
+        return out, notes
+
+    def resize_and_wait(self, sock, f):
+        """Redimensiona com um programa que imprime o tamanho no SIGWINCH já rodando, e espera o tamanho novo."""
+        # pro''nto: o eco da linha digitada não tem "pronto"; só a saída do echo, depois do trap instalado
+        sock.sendall(client_frame(b"sh -c 'trap \"stty size\" WINCH; echo pro''nto; while :; do sleep 0.1; done'\r"))
+        self.until(f, b"pronto\r\n")
+        sock.sendall(client_frame(b'{"cols": 100, "rows": 30}', 1))
+        self.until(f, b"30 100\r\n")
+        sock.sendall(client_frame(b"\x03"))  # Ctrl+C: o TTY manda SIGINT ao laço
+        sock.sendall(client_frame(b"exit\r"))
+        self.until(f)
+
+
+@unittest.skipUnless(os.name == "posix", "PTY só existe em Unix")
+class TerminalTest(WsClient, ServerTest):
+    """WebSocket de /api/exec contra um docker falso no PATH: grava pid e argv, lê uma linha e mostra o tamanho."""
+
+    mock_docker = False
+
+    def setUp(self):
+        super().setUp()
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir)
+        fake = os.path.join(self.dir, "docker")
+        with open(fake, "w") as f:
+            f.write(FAKE_EXEC)
+        os.chmod(fake, 0o755)
+        env = {"PATH": self.dir + os.pathsep + os.environ.get("PATH", ""), "FAKE_EXEC_DIR": self.dir}
+        patcher = mock.patch.dict(os.environ, env)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def no_process(self):
         self.assertFalse(os.path.exists(os.path.join(self.dir, "pid")), "o docker exec não devia ter rodado")
 
@@ -1354,13 +1392,6 @@ class TerminalTest(ServerTest):
                     return int(pid)
             time.sleep(0.05)
         self.fail("o docker exec não rodou")
-
-    def open_session(self):
-        status, headers, sock, f = self.connect()
-        self.assertEqual(status, 101)
-        self.assertEqual(headers["sec-websocket-accept"], "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
-        sock.sendall(client_frame(b'{"cols": 80, "rows": 24}', 1))
-        return sock, f
 
     def test_origin_rejected(self):
         p = self.port
@@ -1431,6 +1462,157 @@ class TerminalTest(ServerTest):
         self.no_process()
 
 
+FAKE_PIPE_EXEC = """#!/usr/bin/env python3
+# docker falso do modo pipe: roda aqui mesmo o que iria para dentro do container (o script, o sh, o stty)
+import json, os, sys
+d, args = os.environ["FAKE_EXEC_DIR"], sys.argv[1:]
+with open(os.path.join(d, "calls"), "a") as f:
+    f.write(json.dumps(args) + "\\n")
+if os.environ.get("FAKE_EXEC_FAIL"):
+    sys.exit("Error response from daemon: container 0123456789ab is not running")
+main = args[1] == "-i"  # o exec da sessão; o outro é o stty do redimensionamento
+if main:
+    with open(os.path.join(d, "pid"), "w") as f:
+        f.write(str(os.getpid()))
+if os.environ.get("FAKE_NO_SCRIPT"):  # imagem sem script (alpine): só o sh no PATH
+    os.environ["PATH"] = os.path.join(d, "bin")
+cmd = args[3:] if main else args[2:]
+os.execvp(cmd[0], cmd)
+"""
+
+
+class PipeTerminalTest(TerminalTest):
+    """O terminal do Windows (DOCKER_GUI_TERMINAL=pipe), em Linux: o docker falso roda o PIPE_SHELL aqui, com o
+    script de verdade. Herda os testes de Origin, token, IDs e fechamento do TerminalTest."""
+
+    def setUp(self):
+        super().setUp()
+        with open(os.path.join(self.dir, "docker"), "w") as f:
+            f.write(FAKE_PIPE_EXEC)
+        os.mkdir(os.path.join(self.dir, "bin"))
+        os.symlink(shutil.which("sh"), os.path.join(self.dir, "bin", "sh"))
+        # HOME vazio: o bash do teste não lê o .bashrc de quem roda. Sem HISTFILE, o bash morto por SIGHUP
+        # gravaria o histórico na pasta enquanto ela é apagada
+        os.environ.update({"DOCKER_GUI_TERMINAL": "pipe", "HOME": self.dir, "HISTFILE": os.devnull, "SHELL": "/bin/sh"})
+
+    def calls(self):
+        with open(os.path.join(self.dir, "calls")) as f:
+            return [json.loads(line) for line in f]
+
+    def test_ping_pong(self):  # aqui o shell é de verdade e já escreve o prompt: pula a saída até o pong
+        sock, f = self.open_session()
+        sock.sendall(client_frame(b"abc", 9))
+        frame = self.recv(f)
+        while frame[0] == 2:
+            frame = self.recv(f)
+        self.assertEqual(frame, (10, b"abc"))
+
+    @unittest.skipUnless(shutil.which("script"), "precisa do script (util-linux ou busybox)")
+    def test_session(self):
+        sock, f = self.open_session()
+        sock.sendall(client_frame(b"stty size; echo $((6*7))\r"))
+        out, notes = self.until(f, b"42\r\n")
+        self.assertIn(b"24 80\r\n", out)  # o tamanho chegou ao TTY antes do shell
+        self.assertNotIn(b"\x1b_docker-gui", out)  # a marca não vai para a tela
+        self.assertEqual(notes, [])
+        self.resize_and_wait(sock, f)
+        main, resize = self.calls()
+        self.assertEqual(main, ["exec", "-i", HEX_ID, *docker_gui.PIPE_SHELL, docker_gui.TTY_INIT.format(80, 24)])
+        self.assertEqual(resize[:-1], ["exec", HEX_ID, *docker_gui.TTY_RESIZE, "100", "30"])
+        self.assertRegex(resize[-1], r"^/dev/pts/\d+$")
+
+    def test_without_script_server_echoes_and_edits_line(self):
+        os.environ["FAKE_NO_SCRIPT"] = "1"
+        sock, f = self.open_session()
+        # seta para cima (sem TTY não faz nada), "a" apagado com Backspace
+        sock.sendall(client_frame(b"echo $((6*7))\x1b[Aa\x7f\r"))
+        out, notes = self.until(f, b"42\r\n")
+        self.assertEqual(notes, [docker_gui.NO_TTY])  # a página mostra o aviso
+        self.assertIn(b"echo $((6*7))a\b \b\r\n", out)  # eco feito pelo servidor
+        sock.sendall(client_frame(b'{"cols": 100, "rows": 30}', 1))  # sem TTY, nada a redimensionar
+        sock.sendall(client_frame(b"exit\r"))
+        self.until(f)
+        self.assertEqual(len(self.calls()), 1)
+
+    def test_docker_error_reaches_the_screen(self):
+        os.environ["FAKE_EXEC_FAIL"] = "1"
+        _sock, f = self.open_session()
+        out, _ = self.until(f)
+        self.assertIn(b"is not running\r\n", out)  # sem TTY, o servidor põe o \r
+
+    @unittest.skipUnless(shutil.which("script"), "precisa do script (util-linux ou busybox)")
+    def test_windows_never_touches_unix_apis(self):
+        """Com os.name == "nt" o modo é o pipe, sem PTY no host, fcntl, termios nem grupo de processos."""
+        del os.environ["DOCKER_GUI_TERMINAL"]
+        done, real_kill = threading.Event(), docker_gui.kill
+
+        def kill(proc):
+            real_kill(proc)
+            done.set()
+
+        with mock.patch.object(docker_gui.os, "name", "nt"), mock.patch.object(os, "openpty") as openpty, \
+                mock.patch.object(os, "killpg") as killpg, mock.patch.object(docker_gui, "kill", kill), \
+                mock.patch.dict(sys.modules, {"fcntl": None, "termios": None}):  # import fcntl falharia
+            sock, f = self.open_session()
+            sock.sendall(client_frame(b"echo $((6*7))\r"))
+            self.until(f, b"42\r\n")
+            sock.sendall(client_frame(b"", 8))
+            self.assertTrue(done.wait(10), "a sessão não terminou")
+        openpty.assert_not_called()
+        killpg.assert_not_called()
+        self.assertEqual(self.calls()[0][:2], ["exec", "-i"])
+
+
+class TerminalHelpersTest(unittest.TestCase):
+
+    def test_mode_by_platform(self):
+        for name, env, mode in (("posix", None, "pty"), ("nt", None, "pipe"), ("posix", "pipe", "pipe"),
+                                ("nt", "pty", "pipe"), ("posix", "outro", "pty")):
+            with mock.patch.object(docker_gui.os, "name", name), mock.patch.dict(os.environ):
+                os.environ.pop("DOCKER_GUI_TERMINAL", None)
+                if env:
+                    os.environ["DOCKER_GUI_TERMINAL"] = env
+                self.assertEqual(docker_gui.terminal_mode(), mode, (name, env))
+
+    def test_term_size(self):
+        self.assertEqual(docker_gui.term_size(b'{"cols": 80, "rows": 24}'), (80, 24))
+        # no modo pipe o tamanho entra no comando do shell: só inteiros
+        for bad in (b'{"cols": "80; reboot", "rows": 24}', b'{"cols": 80.5, "rows": 24}', b'{"cols": true, "rows": 24}',
+                    b'{"cols": -1, "rows": 24}', b'{"cols": 80, "rows": 65536}', b'{"cols": 80}', b"[80, 24]", b"oi",
+                    b'{"cols": 80, "rows": 24}\xff'):
+            with self.assertRaises((ValueError, KeyError, TypeError), msg=bad):
+                docker_gui.term_size(bad)
+
+    def test_cook(self):
+        for line, typed, want in (
+                ("", b"ls -l\r", ("", b"ls -l\n", b"ls -l\r\n")),
+                ("", b"ec", ("ec", b"", b"ec")),
+                ("ec", b"ho\r", ("", b"echo\n", b"ho\r\n")),
+                ("ab", b"\x7f\x7f\x7f", ("", b"", b"\b \b\b \b")),  # Backspace na linha vazia não apaga o prompt
+                ("abc", b"\x03", ("", b"", b"^C\r\n")),
+                ("", b"\x1b[A\x1bOPx\t\x1b", ("x", b"", b"x")),  # setas, F1, Tab e Esc somem
+                ("", b"a\rb\r", ("", b"a\nb\n", b"a\r\nb\r\n")),  # colar várias linhas
+                ("", "ação\r".encode(), ("", "ação\n".encode(), "ação\r\n".encode()))):
+            self.assertEqual(docker_gui.cook(line, typed), want, (line, typed))
+
+    def test_kill_on_windows_terminates_the_process(self):
+        proc = mock.Mock()
+        with mock.patch.object(docker_gui.os, "name", "nt"), mock.patch.object(os, "killpg", create=True) as killpg:
+            docker_gui.kill(proc)
+        killpg.assert_not_called()
+        proc.kill.assert_called_once_with()
+        proc.wait.assert_called_once_with()
+
+    @unittest.skipUnless(os.name == "posix", "grupo de processos só existe em Unix")
+    def test_kill_on_unix_kills_the_group(self):
+        proc = mock.Mock(pid=1234)
+        with mock.patch.object(os, "killpg") as killpg:
+            docker_gui.kill(proc)
+        killpg.assert_called_once_with(1234, signal.SIGKILL)
+        proc.kill.assert_not_called()
+        proc.wait.assert_called_once_with()
+
+
 class MainTest(unittest.TestCase):
 
     def test_cli_from_env_and_context_flag(self):
@@ -1447,7 +1629,7 @@ class MainTest(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("DOCKER_GUI_E2E") == "1" and shutil.which("docker"),
                      "defina DOCKER_GUI_E2E=1 (precisa de um daemon Docker)")
-class RealDockerTest(ServerTest):
+class RealDockerTest(WsClient, ServerTest):
     """Fluxo completo contra o Docker de verdade: garante que o formato do CLI ainda é o que a página espera."""
 
     mock_docker = False
@@ -1471,6 +1653,19 @@ class RealDockerTest(ServerTest):
     def state(self):
         _, rows = self.request("GET", "/api/containers")
         return next(c for c in rows if self.cid.startswith(c["ID"]))
+
+    def test_exec_terminal(self):  # antes do test_lifecycle (ordem alfabética), que remove o container
+        # o modo do Windows (pipe: TTY aberto pelo script do busybox, dentro do container) roda em qualquer sistema
+        for mode in ("pty", "pipe") if os.name == "posix" else ("pipe",):
+            with self.subTest(mode), mock.patch.dict(os.environ, {"DOCKER_GUI_TERMINAL": mode}):
+                sock, f = self.open_session(f"/api/exec/{self.cid}?t={docker_gui.TOKEN}")
+                sock.sendall(client_frame(b"stty size; echo $((6*7))\r"))
+                out, notes = self.until(f, b"42\r\n")
+                self.assertIn(b"24 80\r\n", out)
+                self.assertNotIn(b"\x1b_docker-gui", out)
+                self.assertEqual(notes, [])
+                self.resize_and_wait(sock, f)
+                sock.close()
 
     def test_lifecycle(self):
         c = self.state()

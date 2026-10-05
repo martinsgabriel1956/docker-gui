@@ -26,7 +26,9 @@ recusa o que está em uso, com a mensagem do docker, e cada rm que deu certo fic
 `run -d` grava o argv em "run_calls" e cria o container rodando, com nome, imagem e portas do argv; "run_fail"
 faz o run falhar com esse stderr, "run_delay" o faz demorar (segundos) e "run_after" ({State, Status}) é o estado
 do container criado (ex.: um que sobe e cai).
-O `docker exec -it` do terminal vira um sh local. O `docker events` manda uma linha por container que mudou
+O `docker exec -it` do terminal vira um sh local; o `docker exec -i` do modo do Windows roda o comando do
+container aqui mesmo (com o `script` local), e "noscript": true simula uma imagem sem `script` (alpine).
+O `docker events` manda uma linha por container que mudou
 no que o `docker ps` mostra, enquanto o servidor o mantiver vivo.
 """
 import contextlib
@@ -244,13 +246,28 @@ def main(args):
 
     if cmd == "exec":
         # terminal: confere o argv que o servidor monta e roda um sh local no lugar do container
-        if args[:2] != ["exec", "-it"] or args[3:] != ["sh", "-c", "exec $(command -v bash || echo sh)"]:
+        pty = args[:2] == ["exec", "-it"] and args[3:] == ["sh", "-c", "exec $(command -v bash || echo sh)"]
+        # modo do Windows (DOCKER_GUI_TERMINAL=pipe): o comando do container roda aqui, com o script local;
+        # o exec sem -i é o stty do redimensionamento
+        pipe = args[1:2] == ["-i"] and args[3:5] == ["sh", "-c"] or args[2:4] == ["sh", "-c"]
+        if not (pty or pipe):
             fail(f"exec inesperado: {args}")
+        cid = args[2] if args[1].startswith("-") else args[1]
         with locked(path, exclusive=False) as (_, state):
-            if find(state, args[2])["State"] != "running":
-                fail(f"Error response from daemon: container {args[2]} is not running")
-        os.environ["PS1"] = "$ "
-        os.execvp("sh", ["sh"])
+            c = find(state, cid)
+            if c["State"] != "running":
+                fail(f"Error response from daemon: container {cid} is not running")
+        os.environ.update({"PS1": "$ ", "HOME": os.path.dirname(path), "HISTFILE": os.devnull, "SHELL": "/bin/sh"})
+        if pty:
+            os.execvp("sh", ["sh"])
+        if c.get("noscript"):  # imagem sem script (alpine): só o sh no PATH
+            nobin = os.path.join(os.path.dirname(path), "nobin")
+            os.makedirs(nobin, exist_ok=True)
+            with contextlib.suppress(FileExistsError):
+                os.symlink("/bin/sh", os.path.join(nobin, "sh"))
+            os.environ["PATH"] = nobin
+        cmd = args[3:] if args[1] == "-i" else args[2:]
+        os.execvp(cmd[0], cmd)
 
     if cmd == "run":  # dorme fora do lock, como as ações
         with locked(path, exclusive=False) as (_, state):

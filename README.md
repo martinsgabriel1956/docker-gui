@@ -44,7 +44,7 @@ A saída do `podman ps` tem outro formato (`Names` em lista, portas como objetos
 - **Mais histórico nos logs:** o modal abre com as últimas 500 linhas, e "Carregar mais" pede 2.000, 10.000 e depois o log inteiro. Ao vivo, vai até 10.000 (o limite de linhas na tela acompanha); para o log inteiro, desligue o ao vivo. Quando o log é menor que o pedido, o botão avisa que já está tudo ali.
 - **Configuração** no modal de logs: restart policy, redes, mounts e env, do `docker inspect`. Os valores do env chegam mascarados e só saem do servidor quando você clica em Revelar.
 - **Portas:** as HTTP abrem no navegador; as outras (Postgres, Redis…) copiam `localhost:porta`.
-- **Terminal no navegador** pelo menu "⋯" ("Abrir terminal"): um `docker exec -it` com bash (ou sh, se a imagem não tiver bash) num terminal [xterm.js](https://xtermjs.org) embutido. Redimensiona junto com a janela, e o `Esc` vai para o programa (vim, less), não fecha o modal. Só em Linux e macOS.
+- **Terminal no navegador** pelo menu "⋯" ("Abrir terminal"): um `docker exec -it` com bash (ou sh, se a imagem não tiver bash) num terminal [xterm.js](https://xtermjs.org) embutido. Redimensiona junto com a janela, e o `Esc` vai para o programa (vim, less), não fecha o modal. No Windows o Python não tem PTY, então o TTY é aberto dentro do container pelo `script` (util-linux ou busybox: imagens Debian, Ubuntu, busybox…). Em imagem sem `script` (Alpine, por exemplo) o terminal abre sem TTY e avisa: comandos simples funcionam, mas vim, less, Tab e Ctrl+C não.
 - **Copiar `docker exec -it <nome> sh`** pelo menu "⋯".
 - **Uso de disco** (`docker system df`) de imagens, volumes e build cache, com **limpeza** (`prune`) de cada categoria, confirmada em 2 passos como a remoção. Imagens e build cache saem com `-a` (tudo que está sem uso); volumes sem `-a`, então no Docker 23+ os nomeados ficam.
 - **Imagens, volumes e redes um a um**, na mesma seção: imagens com tags, ID, tamanho, idade e "sem tag" (dangling); volumes com driver; redes com driver e escopo, com as padrão (`bridge`, `host`, `none`) marcadas. Cada item diz quais containers o usam (parados também). Cada lista só consulta o docker quando é aberta. **Remover** usa a mesma confirmação em 2 passos, sem `-f`: o que está em uso o docker recusa, e o erro aparece no item com uma explicação ("Em uso: remova o container que usa antes"). As redes padrão não têm o botão, e o servidor recusa removê-las. Uma imagem com mais de uma tag o docker só remove com `-f`, que a página não usa: remova as tags pelo terminal.
@@ -121,6 +121,8 @@ Para rodar também o fluxo completo contra o Docker de verdade (cria e remove um
 ```bash
 DOCKER_GUI_E2E=1 python3 -m unittest
 ```
+
+O terminal do Windows (sem PTY no host) também roda em Linux com `DOCKER_GUI_TERMINAL=pipe`. É assim que os testes o cobrem, inclusive contra o Docker de verdade.
 
 As funções de `src/format.ts` têm testes próprios. O Node (22.18+) importa o `.ts` direto, sem build:
 

@@ -1002,7 +1002,8 @@ function afterClose() {
                                                  : `[data-id="${logId}"][data-a="logs"]`)?.focus();
 }
 
-// terminal no navegador: xterm.js <-> WebSocket <-> `docker exec -it` num PTY do servidor
+// terminal no navegador: xterm.js <-> WebSocket <-> `docker exec` com TTY (num PTY do servidor ou, no Windows,
+// aberto dentro do container)
 const xtermCss = document.createElement('style');
 xtermCss.textContent = XTERM_CSS;
 document.head.append(xtermCss);
@@ -1025,7 +1026,11 @@ function openShell(id: string) {
   // a primeira mensagem tem que ser o tamanho: o servidor só sobe o docker exec depois dela
   const size = () => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({cols: term.cols, rows: term.rows})); };
   ws.onopen = () => { size(); $('#shell-status').textContent = 'Conectado. Esc vai para o terminal; feche pelo ×.'; term.focus(); };
-  ws.onmessage = e => term.write(new Uint8Array(e.data));
+  // binário é a saída do terminal; texto é um aviso do servidor (no Windows, imagem sem TTY), que vai para o status
+  ws.onmessage = e => {
+    if (typeof e.data === 'string') $('#shell-status').textContent = e.data;
+    else term.write(new Uint8Array(e.data));
+  };
   ws.onclose = () => { $('#shell-status').textContent = 'Sessão encerrada.'; };
   term.onData(d => { if (ws.readyState === WebSocket.OPEN) ws.send(enc.encode(d)); });
   term.onResize(size);
