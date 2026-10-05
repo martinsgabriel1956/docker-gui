@@ -15,7 +15,8 @@ No topo do JSON, "ps_error" faz o `docker ps` falhar (daemon fora do ar), "df" �
 "Reclaimable" da categoria e diz que liberou o que estava lá. "compose_fail" faz todo
 `docker compose` falhar com esse stderr, e cada `docker compose` grava o argv em "compose_calls".
 `compose up` deixa os containers do projeto rodando, `down` os remove e `pull` não muda nada.
-O `docker exec -it` do terminal vira um sh local.
+O `docker exec -it` do terminal vira um sh local; o `docker exec -i` do modo do Windows roda o comando do
+container aqui mesmo (com o `script` local), e "noscript": true simula uma imagem sem `script` (alpine).
 """
 import contextlib
 import fcntl
@@ -103,13 +104,28 @@ def main(args):
 
     if cmd == "exec":
         # terminal: confere o argv que o servidor monta e roda um sh local no lugar do container
-        if args[:2] != ["exec", "-it"] or args[3:] != ["sh", "-c", "exec $(command -v bash || echo sh)"]:
+        pty = args[:2] == ["exec", "-it"] and args[3:] == ["sh", "-c", "exec $(command -v bash || echo sh)"]
+        # modo do Windows (DOCKER_GUI_TERMINAL=pipe): o comando do container roda aqui, com o script local;
+        # o exec sem -i é o stty do redimensionamento
+        pipe = args[1:2] == ["-i"] and args[3:5] == ["sh", "-c"] or args[2:4] == ["sh", "-c"]
+        if not (pty or pipe):
             fail(f"exec inesperado: {args}")
+        cid = args[2] if args[1].startswith("-") else args[1]
         with locked(path, exclusive=False) as (_, state):
-            if find(state, args[2])["State"] != "running":
-                fail(f"Error response from daemon: container {args[2]} is not running")
-        os.environ["PS1"] = "$ "
-        os.execvp("sh", ["sh"])
+            c = find(state, cid)
+            if c["State"] != "running":
+                fail(f"Error response from daemon: container {cid} is not running")
+        os.environ.update({"PS1": "$ ", "HOME": os.path.dirname(path), "HISTFILE": os.devnull, "SHELL": "/bin/sh"})
+        if pty:
+            os.execvp("sh", ["sh"])
+        if c.get("noscript"):  # imagem sem script (alpine): só o sh no PATH
+            nobin = os.path.join(os.path.dirname(path), "nobin")
+            os.makedirs(nobin, exist_ok=True)
+            with contextlib.suppress(FileExistsError):
+                os.symlink("/bin/sh", os.path.join(nobin, "sh"))
+            os.environ["PATH"] = nobin
+        cmd = args[3:] if args[1] == "-i" else args[2:]
+        os.execvp(cmd[0], cmd)
 
     if action in AFTER or action == "remove":
         # dorme fora do lock, senão o `docker ps` do poll travaria junto

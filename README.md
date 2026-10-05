@@ -33,7 +33,7 @@ A saída do `podman ps` tem outro formato (`Names` em lista, portas como objetos
 - **Logs** com timestamps, acompanhamento ao vivo, botões de copiar e de baixar (.log) e ações no próprio modal. Mostra também a saída do último healthcheck.
 - **Configuração** no modal de logs: restart policy, redes, mounts e env, do `docker inspect`. Os valores do env chegam mascarados e só saem do servidor quando você clica em Revelar.
 - **Portas:** as HTTP abrem no navegador; as outras (Postgres, Redis…) copiam `localhost:porta`.
-- **Terminal no navegador** pelo menu "⋯" ("Abrir terminal"): um `docker exec -it` com bash (ou sh, se a imagem não tiver bash) num terminal [xterm.js](https://xtermjs.org) embutido. Redimensiona junto com a janela, e o `Esc` vai para o programa (vim, less), não fecha o modal. Só em Linux e macOS.
+- **Terminal no navegador** pelo menu "⋯" ("Abrir terminal"): um `docker exec -it` com bash (ou sh, se a imagem não tiver bash) num terminal [xterm.js](https://xtermjs.org) embutido. Redimensiona junto com a janela, e o `Esc` vai para o programa (vim, less), não fecha o modal. No Windows o Python não tem PTY, então o TTY é aberto dentro do container pelo `script` (util-linux ou busybox: imagens Debian, Ubuntu, busybox…). Em imagem sem `script` (Alpine, por exemplo) o terminal abre sem TTY e avisa: comandos simples funcionam, mas vim, less, Tab e Ctrl+C não.
 - **Copiar `docker exec -it <nome> sh`** pelo menu "⋯".
 - **Uso de disco** (`docker system df`) de imagens, volumes e build cache, com **limpeza** (`prune`) de cada categoria, confirmada em 2 passos como a remoção. Imagens e build cache saem com `-a` (tudo que está sem uso); volumes sem `-a`, então no Docker 23+ os nomeados ficam.
 - **Teclado:** `/` vai para a busca, `↑` `↓` andam entre os botões Logs e `Z` aciona o "desfazer". Os filtros ficam na URL.
@@ -102,6 +102,8 @@ Para rodar também o fluxo completo contra o Docker de verdade (cria e remove um
 ```bash
 DOCKER_GUI_E2E=1 python3 -m unittest
 ```
+
+O terminal do Windows (sem PTY no host) também roda em Linux com `DOCKER_GUI_TERMINAL=pipe`. É assim que os testes o cobrem, inclusive contra o Docker de verdade.
 
 As funções de `src/format.ts` têm testes próprios. O Node (22.18+) importa o `.ts` direto, sem build:
 

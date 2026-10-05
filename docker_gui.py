@@ -35,6 +35,24 @@ PRUNE = {"images": ["image", "prune", "-a", "-f"], "volumes": ["volume", "prune"
 READ_TIMEOUT, ACTION_TIMEOUT = 15, 120
 # terminal: bash se a imagem tiver, senão sh
 SHELL = ["sh", "-c", "exec $(command -v bash || echo sh)"]
+# Terminal sem PTY no host (Windows: a stdlib não tem os.openpty, e o `docker exec -it` com stdin em pipe recusa,
+# "stdin is not a terminal"). O TTY nasce dentro do container: `docker exec -i` com pipes roda o `script`
+# (util-linux ou busybox: debian, ubuntu, busybox...), que abre um PTY lá dentro e põe o shell nele. A primeira
+# saída é uma marca (sequência APC, que terminal nenhum mostra) com o nome desse TTY, para redimensioná-lo por
+# fora com stty (TTY_RESIZE). Sem `script` (alpine...), sobra um sh -i sem TTY: a marca diz isso ao servidor,
+# que faz o eco e a edição de linha (cook). ConPTY via ctypes daria TTY em qualquer imagem, mas seria um bloco
+# grande de Win32 que nem o CI nem quem desenvolve em Linux conseguem rodar
+PIPE_SHELL = ["sh", "-c", ('command -v script >/dev/null 2>&1 && exec script -q -c "$1" /dev/null; '
+                           "printf '\\033_docker-gui:notty\\033\\134'; exec sh -i 2>&1"), "sh"]
+# o "$1" do PIPE_SHELL: roda no PTY do script. O tamanho vai antes do shell subir (como no modo PTY)
+TTY_INIT = ("stty cols {} rows {} 2>/dev/null; printf '\\033_docker-gui:tty=%s\\033\\134' \"$(tty)\"; "
+            "exec $(command -v bash || echo sh)")
+TTY_MARK = re.compile(rb"\x1b_docker-gui:(?:notty|tty=([^\x1b]*))\x1b\\")
+# mudar o tamanho do TTY de outro processo faz o kernel mandar o SIGWINCH ao programa em primeiro plano (vim...)
+TTY_RESIZE = ["sh", "-c", 'stty cols "$1" rows "$2" < "$3"', "sh"]
+NO_TTY = ("Conectado, mas sem TTY: a imagem não tem o script, que o terminal usa no Windows. Comandos simples "
+          "funcionam; vim, less, Tab e Ctrl+C não. Feche pelo ×.")
+KEYS = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|O.|.)?", re.DOTALL)  # setas, F1, Alt+...: sem TTY não fazem nada
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"  # constante do RFC 6455 para o Sec-WebSocket-Accept
 WS_MAX = 1 << 20  # maior mensagem aceita do navegador (colar um texto grande cabe com folga)
 CLI = ["docker"]  # binário + flags globais; main() troca por --cli (ex.: podman) e --context
@@ -125,6 +143,57 @@ def ws_read(rfile):
         return None
     mask = (mask * (n // 4 + 1))[:n]
     return opcode, (int.from_bytes(data, "big") ^ int.from_bytes(mask, "big")).to_bytes(n, "big")
+
+
+def terminal_mode():
+    """"pty" (os.openpty no host) em Linux e macOS; "pipe" (TTY dentro do container, ver PIPE_SHELL) no Windows.
+    DOCKER_GUI_TERMINAL=pipe força o modo do Windows, para testá-lo em Linux."""
+    return "pipe" if os.name == "nt" or os.environ.get("DOCKER_GUI_TERMINAL") == "pipe" else "pty"
+
+
+def term_size(data):
+    """Texto {"cols": .., "rows": ..} da página -> (cols, rows). Só inteiros de 16 bits: no modo pipe eles
+    entram no comando do shell (TTY_INIT)."""
+    size = json.loads(data)
+    cols, rows = size["cols"], size["rows"]
+    if not all(type(v) is int and 0 <= v < 1 << 16 for v in (cols, rows)):
+        raise ValueError("tamanho inválido")
+    return cols, rows
+
+
+def cook(line, data):
+    """Sem TTY ninguém ecoa nem edita a linha: o servidor faz esse papel do terminal (modo canônico).
+    Recebe a linha em edição e o que foi digitado; devolve (linha em edição, o que vai para o shell, eco para a tela)."""
+    out, echo = [], []
+    for ch in KEYS.sub("", data.decode(errors="ignore")):
+        if ch in "\r\n":  # Enter manda a linha inteira
+            out.append(line + "\n")
+            echo.append("\r\n")
+            line = ""
+        elif ch in "\x7f\b":
+            echo.append("\b \b" if line else "")
+            line = line[:-1]
+        elif ch == "\x03":  # Ctrl+C: sem TTY não há SIGINT para mandar; só descarta a linha
+            echo.append("^C\r\n")
+            line = ""
+        elif ch >= " ":
+            line += ch
+            echo.append(ch)
+    return line, "".join(out).encode(), "".join(echo).encode()
+
+
+def kill(proc):
+    """Mata o docker exec e espera. Em Unix, o grupo todo (start_new_session: pgid = pid): um filho que herdou o
+    PTY ou o pipe o manteria aberto e a thread que lê a saída nunca terminaria. No Windows não há grupo, e o
+    docker.exe não deixa filhos."""
+    try:
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except ProcessLookupError:
+        pass
+    proc.wait()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -242,7 +311,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send(500 if r.returncode else 200, json.dumps(r.stderr.strip()))
 
     def terminal(self, cid):
-        """Terminal no navegador: liga um WebSocket a um `docker exec -it` rodando num PTY."""
+        """Terminal no navegador: liga um WebSocket a um `docker exec` com TTY (num PTY do host ou, no Windows,
+        dentro do container)."""
         port = self.server.server_address[1]
         # WebSocket não passa por CORS: sem conferir o Origin, qualquer site aberto no navegador conectaria
         # aqui (cross-site WebSocket hijacking). O navegador sempre manda o Origin e a página não consegue forjá-lo.
@@ -255,8 +325,6 @@ class Handler(BaseHTTPRequestHandler):
         key = self.headers.get("Sec-WebSocket-Key")
         if self.headers.get("Upgrade", "").lower() != "websocket" or not key:
             return self.send(400, '"esperava um WebSocket"')
-        import fcntl  # só Unix; importados aqui para o resto da GUI seguir funcionando sem eles
-        import termios
 
         self.send_response(101)
         self.send_header("Upgrade", "websocket")
@@ -265,30 +333,55 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.close_connection = True
 
-        def winsize(data):  # texto {"cols": .., "rows": ..} -> struct winsize do TIOCSWINSZ
-            size = json.loads(data)
-            return struct.pack("HHHH", size["rows"], size["cols"], 0, 0)
-
-        # a página manda o tamanho logo ao abrir. Ele vai para o PTY antes de o docker subir: um SIGWINCH que
-        # chegasse antes de o docker instalar o handler se perderia e o shell ficaria com o tamanho padrão
+        # a página manda o tamanho logo ao abrir, e o docker só sobe depois dele
         first = ws_read(self.rfile)
         try:
-            size = winsize(first[1]) if first and first[0] == 1 else None
-        except (ValueError, TypeError, KeyError, struct.error):
+            size = term_size(first[1]) if first and first[0] == 1 else None
+        except (ValueError, TypeError, KeyError):
             size = None
         if size is None:
             return
-        master, slave = os.openpty()
-        fcntl.ioctl(master, termios.TIOCSWINSZ, size)
-        # sessão própria: o Ctrl+C no terminal do docker_gui.py não derruba os terminais abertos
-        proc = subprocess.Popen([*CLI, "exec", "-it", cid, *SHELL], stdin=slave, stdout=slave, stderr=slave,
-                                start_new_session=True)
-        os.close(slave)
-        lock = threading.Lock()  # duas threads escrevem no socket: a saída do shell e o pong
+        lock = threading.Lock()  # duas threads escrevem no socket: a saída do shell e o pong (ou o eco)
 
         def send(payload, opcode=2):
             with lock:
                 self.wfile.write(ws_frame(payload, opcode))
+
+        (self.pty_session if terminal_mode() == "pty" else self.pipe_session)(cid, size, send)
+
+    def ws_loop(self, send, resize, write):
+        """Mensagens do navegador até ele fechar: texto é o tamanho novo da tela, binário é o que foi digitado."""
+        try:
+            while True:
+                frame = ws_read(self.rfile)
+                if frame is None or frame[0] == 8:  # conexão caiu ou close
+                    break
+                op, data = frame
+                if op == 1:  # texto: tamanho novo da tela
+                    resize(*term_size(data))
+                elif op in (0, 2):  # binário (ou continuação): o que foi digitado
+                    write(data)
+                elif op == 9:  # ping
+                    send(data, 10)
+        except (OSError, ValueError, TypeError, KeyError, struct.error):  # navegador sumiu ou mensagem inválida: encerra
+            pass
+
+    def pty_session(self, cid, size, send):
+        """Linux e macOS: `docker exec -it` num PTY do host."""
+        import fcntl  # só Unix; importados aqui para o resto da GUI seguir funcionando sem eles
+        import termios
+
+        def winsize(cols, rows):  # struct winsize do TIOCSWINSZ
+            return struct.pack("HHHH", rows, cols, 0, 0)
+
+        # o tamanho vai para o PTY antes de o docker subir: um SIGWINCH que chegasse antes de o docker instalar
+        # o handler se perderia e o shell ficaria com o tamanho padrão
+        master, slave = os.openpty()
+        fcntl.ioctl(master, termios.TIOCSWINSZ, winsize(*size))
+        # sessão própria: o Ctrl+C no terminal do docker_gui.py não derruba os terminais abertos
+        proc = subprocess.Popen([*CLI, "exec", "-it", cid, *SHELL], stdin=slave, stdout=slave, stderr=slave,
+                                start_new_session=True)
+        os.close(slave)
 
         def pump():  # PTY -> navegador, até o docker exec terminar
             try:
@@ -304,33 +397,90 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 pass
 
+        def resize(cols, rows):
+            fcntl.ioctl(master, termios.TIOCSWINSZ, winsize(cols, rows))
+            proc.send_signal(signal.SIGWINCH)  # o PTY não é terminal de controle do docker: avisa à mão
+
         out = threading.Thread(target=pump, daemon=True)
         out.start()
         try:
-            while True:
-                frame = ws_read(self.rfile)
-                if frame is None or frame[0] == 8:  # conexão caiu ou close
-                    break
-                op, data = frame
-                if op == 1:  # texto: tamanho novo da tela
-                    fcntl.ioctl(master, termios.TIOCSWINSZ, winsize(data))
-                    proc.send_signal(signal.SIGWINCH)  # o PTY não é terminal de controle do docker: avisa à mão
-                elif op in (0, 2):  # binário (ou continuação): o que foi digitado
-                    os.write(master, data)
-                elif op == 9:  # ping
-                    send(data, 10)
-        except (OSError, ValueError, TypeError, KeyError, struct.error):  # navegador sumiu ou mensagem inválida: encerra
-            pass
+            self.ws_loop(send, resize, lambda data: os.write(master, data))
         finally:
-            # o grupo todo (start_new_session: pgid = pid): um filho que herdou o PTY o manteria aberto e o
-            # join abaixo nunca voltaria. O shell dentro do container pode sobreviver (moby#9098)
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            proc.wait()
+            kill(proc)  # o grupo todo. O shell dentro do container pode sobreviver (moby#9098)
             out.join()  # sem nenhum lado escravo aberto, o read do pump dá EIO e ele termina
             os.close(master)
+
+    def pipe_session(self, cid, size, send):
+        """Windows: `docker exec -i` com pipes, e o TTY aberto dentro do container (PIPE_SHELL)."""
+        # start_new_session só vale em Unix (os testes forçam este modo em Linux); o Windows o ignora
+        proc = subprocess.Popen([*CLI, "exec", "-i", cid, *PIPE_SHELL, TTY_INIT.format(*size)],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                start_new_session=True)
+        # preenchido pela marca: "tty" (com TTY?) e "pts" (o TTY no container, se der para redimensionar)
+        mode, marked = {}, threading.Event()
+        want, wake = [size], threading.Event()  # último tamanho pedido e o aviso para o resizer
+        line = [""]  # linha em edição, sem TTY
+
+        def pump():  # docker exec -> navegador; antes de tudo, a marca do PIPE_SHELL
+            head = b""
+            try:
+                while True:
+                    data = chunk = os.read(proc.stdout.fileno(), 65536)
+                    if not marked.is_set():
+                        head += chunk
+                        m = TTY_MARK.search(head)
+                        if not m and chunk and len(head) < 4096:
+                            continue
+                        # sem marca (o docker falhou: container parado, imagem sem sh...): a mensagem vai como veio
+                        mode["tty"] = bool(m) and m[1] is not None  # notty não tem o grupo
+                        pts = m[1] if mode["tty"] else b""
+                        mode["pts"] = pts.decode() if re.fullmatch(rb"/dev/pts/\d+", pts) else None
+                        marked.set()
+                        if m and not mode["tty"]:
+                            send(NO_TTY.encode(), 1)  # texto: a página mostra no status
+                        data = head.replace(m[0], b"", 1) if m else head
+                    if data:
+                        send(data if mode["tty"] else data.replace(b"\n", b"\r\n"))  # sem TTY, ninguém faz o \r
+                    if not chunk:
+                        break
+            except OSError:  # o navegador sumiu
+                pass
+            finally:
+                marked.set()
+            try:
+                send(struct.pack("!H", 1000), 8)  # close: o navegador responde e o ws_loop termina
+            except OSError:
+                pass
+
+        def resizer():  # um `docker exec` por vez, sempre com o último tamanho pedido
+            while wake.wait() and marked.wait() and mode.get("pts") and proc.poll() is None:
+                wake.clear()
+                docker("exec", cid, *TTY_RESIZE, *map(str, want[0]), mode["pts"])
+
+        def resize(cols, rows):
+            want[0] = (cols, rows)
+            wake.set()
+
+        def write(data):
+            marked.wait(5)  # o modo (com ou sem TTY) decide o que fazer com o que foi digitado
+            if not mode.get("tty", True):
+                line[0], data, echo = cook(line[0], data)
+                if echo:
+                    send(echo)
+            while data:  # os.write e não proc.stdin.write: nada fica preso no buffer do Python
+                data = data[os.write(proc.stdin.fileno(), data):]
+
+        out = threading.Thread(target=pump, daemon=True)
+        out.start()
+        threading.Thread(target=resizer, daemon=True).start()
+        try:
+            self.ws_loop(send, resize, write)
+        finally:
+            kill(proc)  # o shell dentro do container pode sobreviver (moby#9098)
+            wake.set()  # o resizer vê o processo morto e termina
+            out.join()  # com o docker morto, o pipe fecha e o pump termina
+            proc.stdin.close()
+            proc.stdout.close()
 
     def compose(self, action):
         """Corpo {project, dir}. O par só vale se existir nos labels de algum container: o diretório e os
@@ -10661,7 +10811,10 @@ ${h2.join(`
       $2("#shell-status").textContent = "Conectado. Esc vai para o terminal; feche pelo ×.";
       term.focus();
     };
-    ws2.onmessage = (e) => term.write(new Uint8Array(e.data));
+    ws2.onmessage = (e) => {
+      if (typeof e.data === "string") $2("#shell-status").textContent = e.data;
+      else term.write(new Uint8Array(e.data));
+    };
     ws2.onclose = () => {
       $2("#shell-status").textContent = "Sessão encerrada.";
     };

@@ -21,6 +21,7 @@ export type Container = {
   delay?: Partial<Record<Action, number>>;
   after?: Partial<Record<Action, { State: string; Status: string }>>;
   stats?: { CPUPerc: string; MemUsage: string; MemPerc: string };
+  noscript?: boolean;
 };
 export type DiskUsage = { Type: string; TotalCount: string; Active: string; Size: string; Reclaimable: string };
 export type DockerState = {
@@ -75,11 +76,12 @@ export class Gui {
     return this.read().containers.find(c => c.Names === name);
   }
 
-  async start(state: DockerState) {
+  // env: variáveis extras para o docker_gui.py (ex.: DOCKER_GUI_TERMINAL=pipe, o terminal do Windows)
+  async start(state: DockerState, env: Record<string, string> = {}) {
     this.write(state);
     const proc = spawn('python3', ['-u', 'docker_gui.py', '--port', '0'], {
       cwd: ROOT,
-      env: { ...process.env, PATH: FAKE_BIN + path.delimiter + process.env.PATH, FAKE_DOCKER_STATE: this.file, BROWSER: 'true' },
+      env: { ...process.env, PATH: FAKE_BIN + path.delimiter + process.env.PATH, FAKE_DOCKER_STATE: this.file, BROWSER: 'true', ...env },
     });
     this.proc = proc;
     this.url = await new Promise<string>((resolve, reject) => {
@@ -97,8 +99,8 @@ export class Gui {
   }
 
   // sobe o servidor e abre a página; sem token = link sem o #t=..., como uma aba aberta à mão
-  async open(state: DockerState, { token = true } = {}) {
-    await this.start(state);
+  async open(state: DockerState, { token = true, env = {} as Record<string, string> } = {}) {
+    await this.start(state, env);
     await this.page.goto(token ? this.url : this.url.split('#')[0]);
     // a primeira consulta ao docker é assíncrona: sem esperar, um teste que lê o DOM direto (evaluateAll)
     // pode pegar a tabela ainda vazia. "Carregando…" só aparece antes da primeira resposta.
