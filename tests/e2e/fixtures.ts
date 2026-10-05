@@ -33,6 +33,7 @@ export type NetworkRow = { ID: string; Name: string; Driver: string; Scope: stri
 export type DockerState = {
   containers: Container[]; ps_error?: string; df?: DiskUsage[]; pruned?: string[];
   compose_fail?: string; compose_calls?: string[][];
+  run_calls?: string[][]; run_fail?: string; run_delay?: number; run_after?: { State: string; Status: string };
   images?: ImageRow[]; volumes?: VolumeRow[]; networks?: NetworkRow[]; removed?: string[];
 };
 

@@ -212,3 +212,75 @@ export function rmHint(msg: string): string {
   if (/in use|being used|active endpoints|associated containers/i.test(msg)) return 'Em uso: remova o container que usa (ou tire ele da rede) antes.';
   return '';
 }
+
+// criar container: as mesmas regras do run_argv do servidor, para apontar o erro no campo antes de enviar.
+// Quem decide é o servidor, que confere tudo de novo
+export const RESTART = ['no', 'on-failure', 'unless-stopped', 'always'] as const;
+export type Restart = typeof RESTART[number];
+// corpo do POST /api/run
+export interface RunSpec {
+  image: string; name: string; ports: string[]; all_interfaces: boolean; env: string[]; restart: Restart; volume: string;
+}
+// o que o usuário digitou: portas separadas por espaço ou vírgula, env uma por linha
+export interface RunForm {
+  image: string; name: string; ports: string; all_interfaces: boolean; env: string; restart: string; volume: string;
+}
+export type RunField = 'image' | 'name' | 'ports' | 'env' | 'restart' | 'volume';
+export type RunErrors = Partial<Record<RunField, string>>;
+
+const HOST = '[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?', PATH = '[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*';
+const IMAGE_RE = new RegExp(`^(?:${HOST}(?:\\.${HOST})*(?::[0-9]+)?/)?${PATH}(?:/${PATH})*` +
+                            '(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[0-9a-f]{64})?$');
+const NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{1,127}$/;
+const PORT_RE = /^([0-9]{1,5}):([0-9]{1,5})(?:\/(tcp|udp))?$/;
+const ENV_RE = /^[A-Za-z_][A-Za-z0-9_]{0,255}$/;
+const VOLUME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{1,127}:((?:\/[A-Za-z0-9._@+-]+)+)$/;
+export const MAX_ENV_VALUE = 4096, MAX_ITEMS = 64;
+
+// "8080:80, 5353:53/udp" -> ["8080:80", "5353:53/udp"]
+export const splitPorts = (s: string): string[] => s.split(/[\s,]+/).filter(Boolean);
+// uma variável por linha; linha em branco e comentário (#) ficam de fora, como num .env
+export const splitEnv = (s: string): string[] => s.split(/\r?\n/).filter(l => l.trim() && !l.trimStart().startsWith('#'));
+
+// formulário -> corpo do POST /api/run e o erro de cada campo (vazio = pode enviar)
+export function runSpec(f: RunForm): {spec: RunSpec; errors: RunErrors} {
+  const errors: RunErrors = {}, image = f.image.trim(), name = f.name.trim(), volume = f.volume.trim();
+  const ports = splitPorts(f.ports), env = splitEnv(f.env);
+  if (!image) errors.image = 'Informe a imagem, ex.: nginx:1.27 ou ghcr.io/acme/api:1.4.';
+  else if (image.length > 512 || !IMAGE_RE.test(image)) errors.image = 'Imagem inválida: use repo[:tag] ou repo@sha256:…, com o caminho em minúsculas.';
+  if (name && !NAME_RE.test(name)) errors.name = 'Nome inválido: 2 a 128 caracteres entre letras, números, _ . e -, começando por letra ou número.';
+
+  const seen = new Set<string>();
+  for (const p of ports) {
+    const m = p.match(PORT_RE);
+    if (!m || [m[1], m[2]].some(n => +n < 1 || +n > 65535)) {
+      errors.ports = `“${p.slice(0, 40)}” não é uma porta válida: use portaDoHost:portaDoContainer, ex.: 8080:80 ou 5353:53/udp.`;
+      break;
+    }
+    const key = `${+m[1]}/${m[3] || 'tcp'}`;
+    if (seen.has(key)) { errors.ports = `A porta ${key} do host aparece duas vezes.`; break; }
+    seen.add(key);
+  }
+  if (!errors.ports && ports.length > MAX_ITEMS) errors.ports = `No máximo ${MAX_ITEMS} portas.`;
+
+  const keys = new Set<string>();
+  for (const e of env) {
+    // sem "=", o docker copiaria a variável do ambiente do servidor: o servidor também recusa
+    const i = e.indexOf('='), k = e.slice(0, i), v = e.slice(i + 1);
+    if (i < 0 || !ENV_RE.test(k)) {
+      errors.env = `“${e.slice(0, 40)}” não é CHAVE=valor: a chave tem letras, números e _, e não começa com número.`;
+      break;
+    }
+    if (v.includes('\0') || v.length > MAX_ENV_VALUE) { errors.env = `O valor de ${k} tem o caractere NUL ou passa de ${MAX_ENV_VALUE} caracteres.`; break; }
+    if (keys.has(k)) { errors.env = `${k} aparece duas vezes.`; break; }
+    keys.add(k);
+  }
+  if (!errors.env && env.length > MAX_ITEMS) errors.env = `No máximo ${MAX_ITEMS} variáveis.`;
+
+  const restart = RESTART.find(r => r === f.restart);
+  if (!restart) errors.restart = 'Escolha uma das opções da lista.';
+  const path = volume.length <= 1024 ? volume.match(VOLUME_RE)?.[1] : undefined;
+  if (volume && (!path || path.split('/').some(s => s === '.' || s === '..')))
+    errors.volume = 'Use nome:/caminho/no/container, ex.: dados:/var/lib/postgresql/data. Pasta do host (bind mount) não é aceita.';
+  return {spec: {image, name, ports, all_interfaces: f.all_interfaces, env, restart: restart || 'no', volume}, errors};
+}
