@@ -42,10 +42,24 @@
     </table>
   </div>
 
-  <!-- o docker system df é caro (soma os volumes): só roda ao abrir, nunca no poll -->
+  <!-- o docker system df é caro (soma os volumes): só roda ao abrir, nunca no poll; cada lista, só ao abrir a lista -->
   <details id="disk" ontoggle="this.open && loadDisk()" class="mt-4 rounded-xl ring-1 ring-line bg-raised/40">
-    <summary class="cursor-pointer px-4 py-3 max-lg:py-4 rounded-xl text-sm font-medium text-fg-strong focus-visible:outline-2 focus-visible:outline-accent">Uso de disco</summary>
+    <summary class="cursor-pointer px-4 py-3 max-lg:py-4 rounded-xl text-sm font-medium text-fg-strong focus-visible:outline-2 focus-visible:outline-accent">Uso de disco, imagens, volumes e redes</summary>
     <div id="df" class="px-4 pb-1 text-sm"></div>
+    <div class="px-4 pb-4 space-y-2 text-sm">
+      <details id="obj-images" ontoggle="this.open && loadObjects('images')" class="rounded-lg ring-1 ring-line">
+        <summary class="cursor-pointer px-3 py-2 max-lg:py-3.5 rounded-lg font-medium text-fg-strong focus-visible:outline-2 focus-visible:outline-accent">Imagens, uma a uma<span id="obj-images-n" class="font-normal text-muted"></span></summary>
+        <div id="obj-images-list" class="px-3"></div>
+      </details>
+      <details id="obj-volumes" ontoggle="this.open && loadObjects('volumes')" class="rounded-lg ring-1 ring-line">
+        <summary class="cursor-pointer px-3 py-2 max-lg:py-3.5 rounded-lg font-medium text-fg-strong focus-visible:outline-2 focus-visible:outline-accent">Volumes, um a um<span id="obj-volumes-n" class="font-normal text-muted"></span></summary>
+        <div id="obj-volumes-list" class="px-3"></div>
+      </details>
+      <details id="obj-networks" ontoggle="this.open && loadObjects('networks')" class="rounded-lg ring-1 ring-line">
+        <summary class="cursor-pointer px-3 py-2 max-lg:py-3.5 rounded-lg font-medium text-fg-strong focus-visible:outline-2 focus-visible:outline-accent">Redes<span id="obj-networks-n" class="font-normal text-muted"></span></summary>
+        <div id="obj-networks-list" class="px-3"></div>
+      </details>
+    </div>
   </details>
 </main>
 

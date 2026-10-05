@@ -175,6 +175,35 @@ test('usage mostra CPU e a memória usada; o limite fica no title', () => {
                    ['CPU 0.52% · RAM 10.5MiB', 'Memória: 10.5MiB / 1.944GiB (0.53%)']);
 });
 
+test('age escreve a idade a partir do epoch', () => {
+  const now = 1_800_000_000, ago = s => now - s;
+  assert.equal(f.age(ago(10), now), '<1 min');
+  assert.equal(f.age(ago(5 * 60), now), '5 min');
+  assert.equal(f.age(ago(3 * 3600), now), '3 h');
+  assert.equal(f.age(ago(47 * 3600), now), '47 h');
+  assert.equal(f.age(ago(3 * 86400), now), '3 d');
+  assert.equal(f.age(ago(20 * 86400), now), '2 sem');
+  assert.equal(f.age(ago(100 * 86400), now), '3 meses');
+  assert.equal(f.age(ago(800 * 86400), now), '2 anos');
+});
+
+// mensagens reais do docker 29 e do podman
+test('rmHint explica por que a remoção falhou', () => {
+  const inUse = 'Em uso: remova o container que usa (ou tire ele da rede) antes.';
+  for (const msg of [
+    'Error response from daemon: conflict: unable to delete fd7dc98638c8 (cannot be forced) - image is being used by running container e0a85417a665',
+    'Error response from daemon: conflict: unable to delete fd7dc98638c8 (must be forced) - image is being used by stopped container e0a85417a665',
+    'Error response from daemon: remove pgdata: volume is in use - [8341cdc825766a6d]',
+    'Error response from daemon: error while removing network: network loja_default has active endpoints (name:"web" id:"55e1ed46acab")',
+    'Error: image used by 3f1c2b9a8e7d: image is in use by a container: consider listing external containers and force-removing image',
+    'Error: volume pgdata is being used by the following container(s): 3f1c2b9a8e7d: volume is being used',
+    'Error: "loja_default" has associated containers with it. Use -f to forcibly delete containers and pods: network is being used',
+  ]) assert.equal(f.rmHint(msg), inUse, msg);
+  assert.match(f.rmHint('Error response from daemon: conflict: unable to delete 3e58ae0f7a49 (must be forced) - image is referenced in multiple repositories'), /mais de uma tag/);
+  assert.match(f.rmHint('Error response from daemon: conflict: unable to delete 3e58ae0f7a49 (cannot be forced) - image has dependent child images'), /construídas sobre esta/);
+  assert.equal(f.rmHint('Error response from daemon: get pgdata: no such volume'), '');
+});
+
 test('logFilter busca o texto literal, sem diferenciar maiúsculas', () => {
   assert.equal(f.logFilter(''), null);
   const re = f.logFilter('erro');
