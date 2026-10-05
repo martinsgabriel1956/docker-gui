@@ -126,7 +126,7 @@ test('faixa curta de portas vira um chip por porta; faixa longa vira um chip só
 
 test('lista vazia explica como começar', async ({ page, gui }) => {
   await gui.open({ containers: [] });
-  await expect(page.locator('#rows')).toHaveText('Nenhum container ainda. Crie um com docker run.');
+  await expect(page.locator('#rows')).toHaveText('Nenhum container ainda. Crie um em “Novo container” ou com docker run.');
   await expect(page.locator('#count')).toHaveText('0 containers');
 });
 

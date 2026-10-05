@@ -49,6 +49,23 @@ COMPOSE_FORMAT = ('[{{json (.Label "com.docker.compose.project")}},{{json (.Labe
 MAX_BODY = 64 * 1024
 # comandos que imprimem um JSON por linha; o stats só lista os rodando e leva ~2 s para medir a CPU
 LISTS = {"/api/containers": ["ps", "-a"], "/api/stats": ["stats", "--no-stream"]}
+# criar container (docker run -d): só imagem, nome, portas, env, restart e um volume nomeado. Fica de fora tudo que
+# amplia o acesso ao host (bind mount, --privileged, --cap-add, rede/PID do host, devices) e o comando livre
+RUN_FIELDS = {"image", "name", "ports", "all_interfaces", "env", "restart", "volume"}
+RUN_TIMEOUT = 600  # o run baixa a imagem se ela faltar
+RESTART = ("no", "on-failure", "unless-stopped", "always")
+# referência de imagem do docker: [registry[:porta]/]caminho/em/minúsculas[:tag][@sha256:...]. Tudo começa com
+# letra ou número, então a imagem nunca vira flag. Classes explícitas: \w e \d do Python aceitam Unicode
+_HOST = r"[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?"
+_PATH = r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*"
+IMAGE_RE = re.compile(rf"(?:{_HOST}(?:\.{_HOST})*(?::[0-9]+)?/)?{_PATH}(?:/{_PATH})*"
+                      r"(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[0-9a-f]{64})?")
+NAME_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{1,127}")  # regra do docker para nome de container e de volume
+PORT_RE = re.compile(r"([0-9]{1,5}):([0-9]{1,5})(?:/(tcp|udp))?")
+ENV_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,255}")
+# nome:/caminho. O nome não tem barra nem começa com ponto: não há como virar caminho do host (bind mount)
+VOLUME_RE = re.compile(r"([a-zA-Z0-9][a-zA-Z0-9_.-]{1,127}):((?:/[A-Za-z0-9._@+-]+)+)")
+MAX_IMAGE, MAX_ENV_VALUE, MAX_ITEMS = 512, 4096, 64
 
 
 def docker(*args, timeout=READ_TIMEOUT):
@@ -96,6 +113,68 @@ def summary(info, reveal=False):
         "Mounts": [{k: m.get(k, "") for k in ("Type", "Name", "Source", "Destination", "RW")} for m in info.get("Mounts") or []],
         "Env": [[k, v if reveal else None] for k, _, v in env],
     }
+
+
+def run_argv(body):
+    """Corpo do POST /api/run -> argv do `docker run -d`; ValueError ou TypeError, com a mensagem para a página, se
+    algo não bater. Cada valor é conferido por regex ou lista fixa e vai num item só do argv: nada passa por shell,
+    e nenhum começa com "-", então não vira flag. O "--" antes da imagem fecha as opções de vez."""
+    if not isinstance(body, dict):
+        raise TypeError("corpo inválido: esperado um objeto JSON")
+    extra = sorted(set(body) - RUN_FIELDS)
+    if extra:  # --privileged, command... não são ignorados em silêncio: o pedido inteiro é recusado
+        raise ValueError(f"campo não suportado: {', '.join(extra)}")
+
+    def field(key, kind, default):
+        v = body.get(key, default)
+        if not isinstance(v, kind) or (kind is list and not all(isinstance(x, str) for x in v)):
+            raise TypeError(f"{key}: tipo inválido")
+        if kind is list and len(v) > MAX_ITEMS:
+            raise ValueError(f"{key}: no máximo {MAX_ITEMS} itens")
+        return v
+
+    image, name, volume = field("image", str, ""), field("name", str, ""), field("volume", str, "")
+    restart, public = field("restart", str, "no"), field("all_interfaces", bool, False)
+    if len(image) > MAX_IMAGE or not IMAGE_RE.fullmatch(image):
+        raise ValueError("imagem inválida: use repo[:tag] ou repo@sha256:…")
+    if name and not NAME_RE.fullmatch(name):
+        raise ValueError("nome inválido: 2 a 128 caracteres entre letras, números, _ . e -, começando por letra ou número")
+    if restart not in RESTART:
+        raise ValueError(f"restart inválido: use {', '.join(RESTART)}")
+    args = ["run", "-d", f"--restart={restart}", *([f"--name={name}"] if name else [])]
+
+    # sem o IP na frente, o docker publica em 0.0.0.0 (a rede toda, passando por cima do ufw/firewalld)
+    ip, seen = "0.0.0.0" if public else "127.0.0.1", set()
+    for p in field("ports", list, []):
+        m = PORT_RE.fullmatch(p)
+        if not m or not all(1 <= int(n) <= 65535 for n in m.groups()[:2]):
+            raise ValueError(f"porta inválida: {p[:40]!r} (use portaDoHost:portaDoContainer[/tcp|udp], de 1 a 65535)")
+        host, ctr, proto = int(m[1]), int(m[2]), m[3] or "tcp"
+        if (host, proto) in seen:
+            raise ValueError(f"porta do host repetida: {host}/{proto}")
+        seen.add((host, proto))
+        args += ["-p", f"{ip}:{host}:{ctr}/{proto}"]
+
+    keys = set()
+    for e in field("env", list, []):
+        k, eq, v = e.partition("=")
+        # sem "=", o docker copiaria a variável do ambiente do próprio docker_gui.py para o container
+        if not eq or not ENV_RE.fullmatch(k):
+            raise ValueError(f"variável inválida: {e[:60]!r} (use CHAVE=valor; a chave com letras, números e _)")
+        if "\0" in v or len(v) > MAX_ENV_VALUE:
+            raise ValueError(f"{k}: valor com NUL ou maior que {MAX_ENV_VALUE} caracteres")
+        if k in keys:
+            raise ValueError(f"variável repetida: {k}")
+        keys.add(k)
+        args += ["-e", f"{k}={v}"]
+
+    if volume:
+        m = len(volume) <= 1024 and VOLUME_RE.fullmatch(volume)
+        if not m or any(s in (".", "..") for s in m[2].split("/")):
+            raise ValueError("volume inválido: use nome:/caminho/no/container (só volume nomeado, nunca pasta do host)")
+        # --mount com type=volume em vez de -v: o tipo fica explícito e nunca é interpretado como bind mount
+        args.append(f"--mount=type=volume,source={m[1]},target={m[2]}")
+    return [*args, "--", image]
 
 
 # WebSocket mínimo (RFC 6455), só o que o terminal usa: mensagens sem fragmentar, ping/pong e close
@@ -231,6 +310,8 @@ class Handler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/compose/(\w+)", self.path)
         if m and m[1] in COMPOSE:
             return self.compose(m[1])
+        if self.path == "/api/run":
+            return self.run()
         m = re.fullmatch(r"/api/prune/(\w+)", self.path)
         if m and m[1] in PRUNE:  # devolve o stdout: a última linha diz quanto espaço foi liberado
             r = docker(*PRUNE[m[1]], timeout=ACTION_TIMEOUT)
@@ -332,14 +413,34 @@ class Handler(BaseHTTPRequestHandler):
             out.join()  # sem nenhum lado escravo aberto, o read do pump dá EIO e ele termina
             os.close(master)
 
+    def json_body(self):
+        """Corpo JSON da requisição, com teto de MAX_BODY bytes. ValueError se faltar, passar do teto ou não for JSON."""
+        n = int(self.headers.get("Content-Length") or 0)
+        if not 0 < n <= MAX_BODY:
+            raise ValueError("corpo vazio ou grande demais")
+        return json.loads(self.rfile.read(n))
+
+    def run(self):
+        """docker run -d com o argv montado por run_argv. Devolve o ID do container novo; no erro, o stderr do docker."""
+        try:
+            body = self.json_body()
+        except ValueError:  # UnicodeDecodeError e JSONDecodeError também são ValueError
+            return self.send(400, json.dumps(f"corpo inválido: esperado JSON de até {MAX_BODY // 1024} KiB"))
+        try:
+            args = run_argv(body)
+        except (ValueError, TypeError) as e:
+            return self.send(400, json.dumps(str(e)))
+        r = docker(*args, timeout=RUN_TIMEOUT)
+        if r.returncode:  # o container pode ter sido criado e não ter subido (porta ocupada): ele aparece na lista
+            return self.send(500, json.dumps(r.stderr.strip()))
+        # o progresso do pull vai para o stderr; a última linha do stdout é o ID
+        self.send(200, json.dumps((r.stdout.split() or [""])[-1]))
+
     def compose(self, action):
         """Corpo {project, dir}. O par só vale se existir nos labels de algum container: o diretório e os
         arquivos do compose vêm sempre do docker, nunca do cliente."""
         try:
-            n = int(self.headers.get("Content-Length") or 0)
-            if not 0 < n <= MAX_BODY:
-                raise ValueError
-            body = json.loads(self.rfile.read(n))
+            body = self.json_body()
             key = [body["project"], body["dir"]]
             if not all(isinstance(v, str) and v for v in key):
                 raise ValueError
@@ -397,7 +498,7 @@ def main():
 # A fonte fica em src/; para mudar o visual ou o comportamento da página, veja o README.
 # >>> gerado por build.py a partir de src/: não edite à mão, mude src/ e rode python3 build.py
 CSS = r"""/*! tailwindcss v4.3.3 | MIT License | https://tailwindcss.com */
-@layer properties{@supports (((-webkit-hyphens:none)) and (not (margin-trim:inline))) or ((-moz-orient:inline) and (not (color:rgb(from red r g b)))){*,:before,:after,::backdrop{--tw-space-y-reverse:0;--tw-border-style:solid;--tw-leading:initial;--tw-font-weight:initial;--tw-tracking:initial;--tw-shadow:0 0 #0000;--tw-shadow-color:initial;--tw-shadow-alpha:100%;--tw-inset-shadow:0 0 #0000;--tw-inset-shadow-color:initial;--tw-inset-shadow-alpha:100%;--tw-ring-color:initial;--tw-ring-shadow:0 0 #0000;--tw-inset-ring-color:initial;--tw-inset-ring-shadow:0 0 #0000;--tw-ring-inset:initial;--tw-ring-offset-width:0px;--tw-ring-offset-color:#fff;--tw-ring-offset-shadow:0 0 #0000;--tw-blur:initial;--tw-brightness:initial;--tw-contrast:initial;--tw-grayscale:initial;--tw-hue-rotate:initial;--tw-invert:initial;--tw-opacity:initial;--tw-saturate:initial;--tw-sepia:initial;--tw-drop-shadow:initial;--tw-drop-shadow-color:initial;--tw-drop-shadow-alpha:100%;--tw-drop-shadow-size:initial;--tw-outline-style:solid}}}@layer theme{:root,:host{--font-sans:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";--font-mono:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;--color-black:#000;--color-white:#fff;--spacing:.25rem;--container-md:28rem;--container-7xl:80rem;--text-xs:.75rem;--text-xs--line-height:calc(1 / .75);--text-sm:.875rem;--text-sm--line-height:calc(1.25 / .875);--text-lg:1.125rem;--text-lg--line-height:calc(1.75 / 1.125);--text-2xl:1.5rem;--text-2xl--line-height:calc(2 / 1.5);--font-weight-normal:400;--font-weight-medium:500;--font-weight-semibold:600;--tracking-tight:-.025em;--tracking-normal:0em;--tracking-wider:.05em;--leading-relaxed:1.625;--radius-md:.375rem;--radius-lg:.5rem;--radius-xl:.75rem;--animate-pulse:pulse 2s cubic-bezier(.4, 0, .6, 1) infinite;--default-transition-duration:.15s;--default-transition-timing-function:cubic-bezier(.4, 0, .2, 1);--default-font-family:var(--font-sans);--default-mono-font-family:var(--font-mono);--color-canvas:oklch(14.1% .005 285.823);--color-raised:oklch(21% .006 285.885);--color-hover:oklch(27.4% .006 286.033);--color-line:oklch(27.4% .006 286.033);--color-line-strong:oklch(37% .013 285.805);--color-dim:oklch(55.2% .016 285.938);--color-muted:oklch(70.5% .015 286.067);--color-fg-soft:oklch(87.1% .006 286.286);--color-fg:oklch(92% .004 286.32);--color-fg-strong:oklch(96.7% .001 286.375);--color-ok:oklch(76.5% .177 163.223);--color-ok-fg:oklch(84.5% .143 164.978);--color-ok-soft:oklch(90.5% .093 164.15);--color-warn:oklch(82.8% .189 84.429);--color-warn-fg:oklch(87.9% .169 91.605);--color-warn-soft:oklch(92.4% .12 95.746);--color-warn-strong:oklch(96.2% .059 95.617);--color-bad:oklch(70.4% .191 22.216);--color-bad-fg:oklch(80.8% .114 19.571);--color-bad-soft:oklch(88.5% .062 18.334);--color-danger:oklch(50.5% .213 27.518);--color-danger-hover:oklch(44.4% .177 26.899);--color-pause:oklch(70.2% .183 293.541);--color-pause-fg:oklch(81.1% .111 293.571);--color-accent:oklch(74.6% .16 232.661);--color-accent-fg:oklch(82.8% .111 230.318);--color-accent-soft:oklch(90.1% .058 230.902)}}@layer base{*,:after,:before,::backdrop{box-sizing:border-box;border:0 solid;margin:0;padding:0}::file-selector-button{box-sizing:border-box;border:0 solid;margin:0;padding:0}html,:host{-webkit-text-size-adjust:100%;tab-size:4;line-height:1.5;font-family:var(--default-font-family,-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji");font-feature-settings:var(--default-font-feature-settings,normal);font-variation-settings:var(--default-font-variation-settings,normal);-webkit-tap-highlight-color:transparent}hr{height:0;color:inherit;border-top-width:1px}abbr:where([title]){-webkit-text-decoration:underline dotted;text-decoration:underline dotted}h1,h2,h3,h4,h5,h6{font-size:inherit;font-weight:inherit}a{color:inherit;-webkit-text-decoration:inherit;-webkit-text-decoration:inherit;-webkit-text-decoration:inherit;text-decoration:inherit}b,strong{font-weight:bolder}code,kbd,samp,pre{font-family:var(--default-mono-font-family,ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);font-feature-settings:var(--default-mono-font-feature-settings,normal);font-variation-settings:var(--default-mono-font-variation-settings,normal);font-size:1em}small{font-size:80%}sub,sup{vertical-align:baseline;font-size:75%;line-height:0;position:relative}sub{bottom:-.25em}sup{top:-.5em}table{text-indent:0;border-color:inherit;border-collapse:collapse}:-moz-focusring:where(:not(iframe)){outline:auto}progress{vertical-align:baseline}summary{display:list-item}ol,ul,menu{list-style:none}img,svg,video,canvas,audio,iframe,embed,object{vertical-align:middle;display:block}img,video{max-width:100%;height:auto}button,input,select,optgroup,textarea{font:inherit;font-feature-settings:inherit;font-variation-settings:inherit;letter-spacing:inherit;color:inherit;opacity:1;background-color:#0000;border-radius:0}::file-selector-button{font:inherit;font-feature-settings:inherit;font-variation-settings:inherit;letter-spacing:inherit;color:inherit;opacity:1;background-color:#0000;border-radius:0}:where(select:is([multiple],[size])) optgroup{font-weight:bolder}:where(select:is([multiple],[size])) optgroup option{padding-inline-start:20px}::file-selector-button{margin-inline-end:4px}::placeholder{opacity:1}@supports (not ((-webkit-appearance:-apple-pay-button))) or (contain-intrinsic-size:1px){::placeholder{color:currentColor}@supports (color:color-mix(in lab, red, red)){::placeholder{color:color-mix(in oklab, currentcolor 50%, transparent)}}}textarea{resize:vertical}::-webkit-search-decoration{-webkit-appearance:none}::-webkit-date-and-time-value{min-height:1lh;text-align:inherit}::-webkit-datetime-edit{display:inline-flex}::-webkit-datetime-edit-fields-wrapper{padding:0}::-webkit-datetime-edit{padding-block:0}::-webkit-datetime-edit-year-field{padding-block:0}::-webkit-datetime-edit-month-field{padding-block:0}::-webkit-datetime-edit-day-field{padding-block:0}::-webkit-datetime-edit-hour-field{padding-block:0}::-webkit-datetime-edit-minute-field{padding-block:0}::-webkit-datetime-edit-second-field{padding-block:0}::-webkit-datetime-edit-millisecond-field{padding-block:0}::-webkit-datetime-edit-meridiem-field{padding-block:0}::-webkit-calendar-picker-indicator{line-height:1}:-moz-ui-invalid{box-shadow:none}button,input:where([type=button],[type=reset],[type=submit]){appearance:button}::file-selector-button{appearance:button}::-webkit-inner-spin-button{height:auto}::-webkit-outer-spin-button{height:auto}[hidden]:where(:not([hidden=until-found])){display:none!important}}@layer components;@layer utilities{.sr-only{clip-path:inset(50%);white-space:nowrap;border-width:0;width:1px;height:1px;margin:-1px;padding:0;position:absolute;overflow:hidden}.fixed{position:fixed}.right-4{right:calc(var(--spacing) * 4)}.bottom-4{bottom:calc(var(--spacing) * 4)}.z-30{z-index:30}.container{width:100%}@media (min-width:40rem){.container{max-width:40rem}}@media (min-width:48rem){.container{max-width:48rem}}@media (min-width:64rem){.container{max-width:64rem}}@media (min-width:80rem){.container{max-width:80rem}}@media (min-width:96rem){.container{max-width:96rem}}.m-auto{margin:auto}.mx-1{margin-inline:var(--spacing)}.mx-auto{margin-inline:auto}.-mt-0\.5{margin-top:calc(var(--spacing) * -.5)}.mt-0\.5{margin-top:calc(var(--spacing) * .5)}.mt-1{margin-top:var(--spacing)}.mt-1\.5{margin-top:calc(var(--spacing) * 1.5)}.mt-2{margin-top:calc(var(--spacing) * 2)}.mt-4{margin-top:calc(var(--spacing) * 4)}.mr-1\.5{margin-right:calc(var(--spacing) * 1.5)}.mr-auto{margin-right:auto}.mb-4{margin-bottom:calc(var(--spacing) * 4)}.mb-6{margin-bottom:calc(var(--spacing) * 6)}.ml-1{margin-left:var(--spacing)}.ml-auto{margin-left:auto}.block{display:block}.contents{display:contents}.flex{display:flex}.grid{display:grid}.hidden{display:none}.inline{display:inline}.table{display:table}.size-1\.5{width:calc(var(--spacing) * 1.5);height:calc(var(--spacing) * 1.5)}.size-2{width:calc(var(--spacing) * 2);height:calc(var(--spacing) * 2)}.size-3{width:calc(var(--spacing) * 3);height:calc(var(--spacing) * 3)}.size-4{width:calc(var(--spacing) * 4);height:calc(var(--spacing) * 4)}.size-6{width:calc(var(--spacing) * 6);height:calc(var(--spacing) * 6)}.size-8{width:calc(var(--spacing) * 8);height:calc(var(--spacing) * 8)}.h-5{height:calc(var(--spacing) * 5)}.h-\[65vh\]{height:65vh}.max-h-\[30vh\]{max-height:30vh}.min-h-screen{min-height:100vh}.w-\[min\(1100px\,95vw\)\]{width:min(1100px,95vw)}.w-fit{width:fit-content}.w-full{width:100%}.w-px{width:1px}.max-w-7xl{max-width:var(--container-7xl)}.max-w-md{max-width:var(--container-md)}.min-w-0{min-width:0}.min-w-48{min-width:calc(var(--spacing) * 48)}.shrink-0{flex-shrink:0}.animate-pulse{animation:var(--animate-pulse)}.cursor-pointer{cursor:pointer}.resize{resize:both}.list-none{list-style-type:none}.grid-cols-\[auto_1fr\]{grid-template-columns:auto 1fr}.flex-wrap{flex-wrap:wrap}.place-items-center{place-items:center}.items-center{align-items:center}.items-start{align-items:flex-start}.justify-between{justify-content:space-between}.justify-end{justify-content:flex-end}.gap-1{gap:var(--spacing)}.gap-1\.5{gap:calc(var(--spacing) * 1.5)}.gap-2{gap:calc(var(--spacing) * 2)}.gap-2\.5{gap:calc(var(--spacing) * 2.5)}.gap-3{gap:calc(var(--spacing) * 3)}.gap-4{gap:calc(var(--spacing) * 4)}:where(.space-y-3>:not(:last-child)){--tw-space-y-reverse:0;margin-block-start:calc(calc(var(--spacing) * 3) * var(--tw-space-y-reverse));margin-block-end:calc(calc(var(--spacing) * 3) * calc(1 - var(--tw-space-y-reverse)))}.gap-x-3{column-gap:calc(var(--spacing) * 3)}.gap-x-4{column-gap:calc(var(--spacing) * 4)}.gap-y-1\.5{row-gap:calc(var(--spacing) * 1.5)}.gap-y-2{row-gap:calc(var(--spacing) * 2)}.truncate{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.overflow-auto{overflow:auto}.overflow-x-auto{overflow-x:auto}.rounded{border-radius:.25rem}.rounded-full{border-radius:3.40282e38px}.rounded-lg{border-radius:var(--radius-lg)}.rounded-md{border-radius:var(--radius-md)}.rounded-xl{border-radius:var(--radius-xl)}.border-t{border-top-style:var(--tw-border-style);border-top-width:1px}.border-b{border-bottom-style:var(--tw-border-style);border-bottom-width:1px}.border-line{border-color:var(--color-line)}.border-line\/70{border-color:#27272ab3}@supports (color:color-mix(in lab, red, red)){.border-line\/70{border-color:color-mix(in oklab, var(--color-line) 70%, transparent)}}.bg-accent{background-color:var(--color-accent)}.bg-accent\/10{background-color:#00bcfe1a}@supports (color:color-mix(in lab, red, red)){.bg-accent\/10{background-color:color-mix(in oklab, var(--color-accent) 10%, transparent)}}.bg-bad{background-color:var(--color-bad)}.bg-bad\/5{background-color:#ff65680d}@supports (color:color-mix(in lab, red, red)){.bg-bad\/5{background-color:color-mix(in oklab, var(--color-bad) 5%, transparent)}}.bg-bad\/10{background-color:#ff65681a}@supports (color:color-mix(in lab, red, red)){.bg-bad\/10{background-color:color-mix(in oklab, var(--color-bad) 10%, transparent)}}.bg-black{background-color:var(--color-black)}.bg-canvas{background-color:var(--color-canvas)}.bg-danger{background-color:var(--color-danger)}.bg-dim{background-color:var(--color-dim)}.bg-fg{background-color:var(--color-fg)}.bg-hover{background-color:var(--color-hover)}.bg-hover\/60{background-color:#27272a99}@supports (color:color-mix(in lab, red, red)){.bg-hover\/60{background-color:color-mix(in oklab, var(--color-hover) 60%, transparent)}}.bg-ok{background-color:var(--color-ok)}.bg-ok\/10{background-color:#00d2941a}@supports (color:color-mix(in lab, red, red)){.bg-ok\/10{background-color:color-mix(in oklab, var(--color-ok) 10%, transparent)}}.bg-ok\/40{background-color:#00d29466}@supports (color:color-mix(in lab, red, red)){.bg-ok\/40{background-color:color-mix(in oklab, var(--color-ok) 40%, transparent)}}.bg-pause{background-color:var(--color-pause)}.bg-raised{background-color:var(--color-raised)}.bg-raised\/40{background-color:#18181b66}@supports (color:color-mix(in lab, red, red)){.bg-raised\/40{background-color:color-mix(in oklab, var(--color-raised) 40%, transparent)}}.bg-warn{background-color:var(--color-warn)}.bg-warn\/10{background-color:#fcbb001a}@supports (color:color-mix(in lab, red, red)){.bg-warn\/10{background-color:color-mix(in oklab, var(--color-warn) 10%, transparent)}}.p-0{padding:0}.p-1{padding:var(--spacing)}.p-2{padding:calc(var(--spacing) * 2)}.p-4{padding:calc(var(--spacing) * 4)}.px-1{padding-inline:var(--spacing)}.px-1\.5{padding-inline:calc(var(--spacing) * 1.5)}.px-2{padding-inline:calc(var(--spacing) * 2)}.px-2\.5{padding-inline:calc(var(--spacing) * 2.5)}.px-3{padding-inline:calc(var(--spacing) * 3)}.px-4{padding-inline:calc(var(--spacing) * 4)}.py-0\.5{padding-block:calc(var(--spacing) * .5)}.py-1{padding-block:var(--spacing)}.py-2{padding-block:calc(var(--spacing) * 2)}.py-3{padding-block:calc(var(--spacing) * 3)}.py-8{padding-block:calc(var(--spacing) * 8)}.py-16{padding-block:calc(var(--spacing) * 16)}.pt-4{padding-top:calc(var(--spacing) * 4)}.pt-5{padding-top:calc(var(--spacing) * 5)}.pr-4{padding-right:calc(var(--spacing) * 4)}.pr-6{padding-right:calc(var(--spacing) * 6)}.pb-1{padding-bottom:var(--spacing)}.pb-2{padding-bottom:calc(var(--spacing) * 2)}.pl-4{padding-left:calc(var(--spacing) * 4)}.text-center{text-align:center}.text-left{text-align:left}.align-middle{vertical-align:middle}.font-mono{font-family:var(--font-mono)}.font-sans{font-family:var(--font-sans)}.text-2xl{font-size:var(--text-2xl);line-height:var(--tw-leading,var(--text-2xl--line-height))}.text-lg{font-size:var(--text-lg);line-height:var(--tw-leading,var(--text-lg--line-height))}.text-sm{font-size:var(--text-sm);line-height:var(--tw-leading,var(--text-sm--line-height))}.text-xs{font-size:var(--text-xs);line-height:var(--tw-leading,var(--text-xs--line-height))}.leading-relaxed{--tw-leading:var(--leading-relaxed);line-height:var(--leading-relaxed)}.font-medium{--tw-font-weight:var(--font-weight-medium);font-weight:var(--font-weight-medium)}.font-normal{--tw-font-weight:var(--font-weight-normal);font-weight:var(--font-weight-normal)}.font-semibold{--tw-font-weight:var(--font-weight-semibold);font-weight:var(--font-weight-semibold)}.tracking-normal{--tw-tracking:var(--tracking-normal);letter-spacing:var(--tracking-normal)}.tracking-tight{--tw-tracking:var(--tracking-tight);letter-spacing:var(--tracking-tight)}.tracking-wider{--tw-tracking:var(--tracking-wider);letter-spacing:var(--tracking-wider)}.\[overflow-wrap\:anywhere\]{overflow-wrap:anywhere}.whitespace-nowrap{white-space:nowrap}.whitespace-pre-wrap{white-space:pre-wrap}.text-accent{color:var(--color-accent)}.text-accent-fg{color:var(--color-accent-fg)}.text-bad-fg{color:var(--color-bad-fg)}.text-bad-soft{color:var(--color-bad-soft)}.text-fg{color:var(--color-fg)}.text-fg-soft{color:var(--color-fg-soft)}.text-fg-strong{color:var(--color-fg-strong)}.text-muted{color:var(--color-muted)}.text-ok-fg{color:var(--color-ok-fg)}.text-ok-soft{color:var(--color-ok-soft)}.text-pause-fg{color:var(--color-pause-fg)}.text-warn-fg{color:var(--color-warn-fg)}.text-warn-soft{color:var(--color-warn-soft)}.text-warn-strong{color:var(--color-warn-strong)}.text-white{color:var(--color-white)}.normal-case{text-transform:none}.uppercase{text-transform:uppercase}.underline{text-decoration-line:underline}.underline-offset-4{text-underline-offset:4px}.antialiased{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}.opacity-40{opacity:.4}.opacity-70{opacity:.7}.shadow-lg{--tw-shadow:0 10px 15px -3px var(--tw-shadow-color,#0000001a), 0 4px 6px -4px var(--tw-shadow-color,#0000001a);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}.ring-1{--tw-ring-shadow:var(--tw-ring-inset,) 0 0 0 calc(1px + var(--tw-ring-offset-width)) var(--tw-ring-color,currentcolor);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}.shadow-black\/40{--tw-shadow-color:#0006}@supports (color:color-mix(in lab, red, red)){.shadow-black\/40{--tw-shadow-color:color-mix(in oklab, color-mix(in oklab, var(--color-black) 40%, transparent) var(--tw-shadow-alpha), transparent)}}.ring-accent\/20{--tw-ring-color:#00bcfe33}@supports (color:color-mix(in lab, red, red)){.ring-accent\/20{--tw-ring-color:color-mix(in oklab, var(--color-accent) 20%, transparent)}}.ring-bad\/40{--tw-ring-color:#ff656866}@supports (color:color-mix(in lab, red, red)){.ring-bad\/40{--tw-ring-color:color-mix(in oklab, var(--color-bad) 40%, transparent)}}.ring-current{--tw-ring-color:currentcolor}.ring-danger{--tw-ring-color:var(--color-danger)}.ring-line{--tw-ring-color:var(--color-line)}.ring-line-strong{--tw-ring-color:var(--color-line-strong)}.ring-line-strong\/80{--tw-ring-color:#3f3f46cc}@supports (color:color-mix(in lab, red, red)){.ring-line-strong\/80{--tw-ring-color:color-mix(in oklab, var(--color-line-strong) 80%, transparent)}}.ring-ok\/40{--tw-ring-color:#00d29466}@supports (color:color-mix(in lab, red, red)){.ring-ok\/40{--tw-ring-color:color-mix(in oklab, var(--color-ok) 40%, transparent)}}.ring-warn\/30{--tw-ring-color:#fcbb004d}@supports (color:color-mix(in lab, red, red)){.ring-warn\/30{--tw-ring-color:color-mix(in oklab, var(--color-warn) 30%, transparent)}}.filter{filter:var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,)}.transition{transition-property:color,background-color,border-color,outline-color,text-decoration-color,fill,stroke,--tw-gradient-from,--tw-gradient-via,--tw-gradient-to,opacity,box-shadow,transform,translate,scale,rotate,filter,-webkit-backdrop-filter,backdrop-filter,display,content-visibility,overlay,pointer-events;transition-timing-function:var(--tw-ease,var(--default-transition-timing-function));transition-duration:var(--tw-duration,var(--default-transition-duration))}.transition-opacity{transition-property:opacity;transition-timing-function:var(--tw-ease,var(--default-transition-timing-function));transition-duration:var(--tw-duration,var(--default-transition-duration))}.group-aria-pressed\:inline-block:is(:where(.group)[aria-pressed=true] *){display:inline-block}.selection\:bg-accent\/30 ::selection{background-color:#00bcfe4d}@supports (color:color-mix(in lab, red, red)){.selection\:bg-accent\/30 ::selection{background-color:color-mix(in oklab, var(--color-accent) 30%, transparent)}}.selection\:bg-accent\/30::selection{background-color:#00bcfe4d}@supports (color:color-mix(in lab, red, red)){.selection\:bg-accent\/30::selection{background-color:color-mix(in oklab, var(--color-accent) 30%, transparent)}}.placeholder\:text-muted::placeholder{color:var(--color-muted)}.backdrop\:bg-black\/70::backdrop{background-color:#000000b3}@supports (color:color-mix(in lab, red, red)){.backdrop\:bg-black\/70::backdrop{background-color:color-mix(in oklab, var(--color-black) 70%, transparent)}}.empty\:hidden:empty{display:none}@media (hover:hover){.hover\:bg-accent\/20:hover{background-color:#00bcfe33}@supports (color:color-mix(in lab, red, red)){.hover\:bg-accent\/20:hover{background-color:color-mix(in oklab, var(--color-accent) 20%, transparent)}}.hover\:bg-danger-hover:hover{background-color:var(--color-danger-hover)}.hover\:bg-hover:hover{background-color:var(--color-hover)}.hover\:bg-ok\/10:hover{background-color:#00d2941a}@supports (color:color-mix(in lab, red, red)){.hover\:bg-ok\/10:hover{background-color:color-mix(in oklab, var(--color-ok) 10%, transparent)}}.hover\:bg-raised\/70:hover{background-color:#18181bb3}@supports (color:color-mix(in lab, red, red)){.hover\:bg-raised\/70:hover{background-color:color-mix(in oklab, var(--color-raised) 70%, transparent)}}.hover\:text-accent-soft:hover{color:var(--color-accent-soft)}.hover\:text-fg:hover{color:var(--color-fg)}.hover\:text-fg-strong:hover{color:var(--color-fg-strong)}}.focus\:not-sr-only:focus{clip-path:none;white-space:normal;width:auto;height:auto;margin:0;padding:0;position:static;overflow:visible}.focus\:fixed:focus{position:fixed}.focus\:top-3:focus{top:calc(var(--spacing) * 3)}.focus\:left-3:focus{left:calc(var(--spacing) * 3)}.focus\:z-50:focus{z-index:50}.focus\:rounded-md:focus{border-radius:var(--radius-md)}.focus\:bg-fg-strong:focus{background-color:var(--color-fg-strong)}.focus\:px-3:focus{padding-inline:calc(var(--spacing) * 3)}.focus\:py-2:focus{padding-block:calc(var(--spacing) * 2)}.focus\:text-sm:focus{font-size:var(--text-sm);line-height:var(--tw-leading,var(--text-sm--line-height))}.focus\:text-canvas:focus{color:var(--color-canvas)}.focus\:ring-accent:focus{--tw-ring-color:var(--color-accent)}.focus\:outline-none:focus{--tw-outline-style:none;outline-style:none}.focus-visible\:outline-2:focus-visible{outline-style:var(--tw-outline-style);outline-width:2px}.focus-visible\:-outline-offset-2:focus-visible{outline-offset:calc(2px * -1)}.focus-visible\:outline-offset-2:focus-visible{outline-offset:2px}.focus-visible\:outline-accent:focus-visible{outline-color:var(--color-accent)}.aria-disabled\:cursor-wait[aria-disabled=true]{cursor:wait}.aria-disabled\:opacity-40[aria-disabled=true]{opacity:.4}.aria-pressed\:bg-accent\/15[aria-pressed=true]{background-color:#00bcfe26}@supports (color:color-mix(in lab, red, red)){.aria-pressed\:bg-accent\/15[aria-pressed=true]{background-color:color-mix(in oklab, var(--color-accent) 15%, transparent)}}.aria-pressed\:bg-fg-strong[aria-pressed=true]{background-color:var(--color-fg-strong)}.aria-pressed\:text-accent-soft[aria-pressed=true]{color:var(--color-accent-soft)}.aria-pressed\:text-canvas[aria-pressed=true]{color:var(--color-canvas)}.aria-pressed\:ring-accent\/40[aria-pressed=true]{--tw-ring-color:#00bcfe66}@supports (color:color-mix(in lab, red, red)){.aria-pressed\:ring-accent\/40[aria-pressed=true]{--tw-ring-color:color-mix(in oklab, var(--color-accent) 40%, transparent)}}.aria-pressed\:ring-fg-strong[aria-pressed=true]{--tw-ring-color:var(--color-fg-strong)}@media (prefers-reduced-motion:reduce){.motion-reduce\:animate-none{animation:none}.motion-reduce\:transition-none{transition-property:none}}@media not all and (min-width:64rem){.max-lg\:block{display:block}.max-lg\:hidden{display:none}.max-lg\:size-11{width:calc(var(--spacing) * 11);height:calc(var(--spacing) * 11)}.max-lg\:min-h-11{min-height:calc(var(--spacing) * 11)}.max-lg\:w-11{width:calc(var(--spacing) * 11)}.max-lg\:justify-start{justify-content:flex-start}.max-lg\:gap-2{gap:calc(var(--spacing) * 2)}:where(.max-lg\:space-y-1\.5>:not(:last-child)){--tw-space-y-reverse:0;margin-block-start:calc(calc(var(--spacing) * 1.5) * var(--tw-space-y-reverse));margin-block-end:calc(calc(var(--spacing) * 1.5) * calc(1 - var(--tw-space-y-reverse)))}.max-lg\:p-0{padding:0}.max-lg\:px-3{padding-inline:calc(var(--spacing) * 3)}.max-lg\:px-4{padding-inline:calc(var(--spacing) * 4)}.max-lg\:py-3{padding-block:calc(var(--spacing) * 3)}.max-lg\:py-3\.5{padding-block:calc(var(--spacing) * 3.5)}.max-lg\:py-4{padding-block:calc(var(--spacing) * 4)}.max-lg\:pt-1{padding-top:var(--spacing)}.max-lg\:pt-2{padding-top:calc(var(--spacing) * 2)}.max-lg\:pl-5{padding-left:calc(var(--spacing) * 5)}.max-lg\:text-sm{font-size:var(--text-sm);line-height:var(--tw-leading,var(--text-sm--line-height))}.max-lg\:text-xs{font-size:var(--text-xs);line-height:var(--tw-leading,var(--text-xs--line-height))}.max-lg\:has-\[div\]\:block:has(:is(div)){display:block}}@media (min-width:40rem){.sm\:w-72{width:calc(var(--spacing) * 72)}}@media (min-width:64rem){.lg\:hidden{display:none}.lg\:w-9{width:calc(var(--spacing) * 9)}.lg\:w-20{width:calc(var(--spacing) * 20)}.lg\:max-w-\[24ch\]{max-width:24ch}.lg\:min-w-\[24ch\]{min-width:24ch}.lg\:truncate{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.lg\:text-left{text-align:left}.lg\:text-right{text-align:right}.lg\:\[direction\:rtl\]{direction:rtl}}.\[\&\:\:-webkit-details-marker\]\:hidden::-webkit-details-marker{display:none}}@media (prefers-color-scheme:light){:root{--color-canvas:oklch(98.5% 0 none);--color-raised:#fff;--color-hover:oklch(96.7% .001 286.375);--color-line:oklch(92% .004 286.32);--color-line-strong:oklch(87.1% .006 286.286);--color-dim:oklch(70.5% .015 286.067);--color-muted:oklch(44.2% .017 285.786);--color-fg-soft:oklch(37% .013 285.805);--color-fg:oklch(27.4% .006 286.033);--color-fg-strong:oklch(14.1% .005 285.823);--color-ok:oklch(69.6% .17 162.48);--color-ok-fg:oklch(50.8% .118 165.612);--color-ok-soft:oklch(43.2% .095 166.913);--color-warn:oklch(76.9% .188 70.08);--color-warn-fg:oklch(55.5% .163 48.998);--color-warn-soft:oklch(47.3% .137 46.201);--color-warn-strong:oklch(41.4% .112 45.904);--color-bad:oklch(63.7% .237 25.331);--color-bad-fg:oklch(50.5% .213 27.518);--color-bad-soft:oklch(44.4% .177 26.899);--color-danger:oklch(50.5% .213 27.518);--color-danger-hover:oklch(44.4% .177 26.899);--color-pause:oklch(60.6% .25 292.717);--color-pause-fg:oklch(49.1% .27 292.581);--color-accent:oklch(58.8% .158 241.966);--color-accent-fg:oklch(50% .134 242.749);--color-accent-soft:oklch(44.3% .11 240.79)}}@property --tw-space-y-reverse{syntax:"*";inherits:false;initial-value:0}@property --tw-border-style{syntax:"*";inherits:false;initial-value:solid}@property --tw-leading{syntax:"*";inherits:false}@property --tw-font-weight{syntax:"*";inherits:false}@property --tw-tracking{syntax:"*";inherits:false}@property --tw-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-shadow-color{syntax:"*";inherits:false}@property --tw-shadow-alpha{syntax:"<percentage>";inherits:false;initial-value:100%}@property --tw-inset-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-inset-shadow-color{syntax:"*";inherits:false}@property --tw-inset-shadow-alpha{syntax:"<percentage>";inherits:false;initial-value:100%}@property --tw-ring-color{syntax:"*";inherits:false}@property --tw-ring-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-inset-ring-color{syntax:"*";inherits:false}@property --tw-inset-ring-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-ring-inset{syntax:"*";inherits:false}@property --tw-ring-offset-width{syntax:"<length>";inherits:false;initial-value:0}@property --tw-ring-offset-color{syntax:"*";inherits:false;initial-value:#fff}@property --tw-ring-offset-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-blur{syntax:"*";inherits:false}@property --tw-brightness{syntax:"*";inherits:false}@property --tw-contrast{syntax:"*";inherits:false}@property --tw-grayscale{syntax:"*";inherits:false}@property --tw-hue-rotate{syntax:"*";inherits:false}@property --tw-invert{syntax:"*";inherits:false}@property --tw-opacity{syntax:"*";inherits:false}@property --tw-saturate{syntax:"*";inherits:false}@property --tw-sepia{syntax:"*";inherits:false}@property --tw-drop-shadow{syntax:"*";inherits:false}@property --tw-drop-shadow-color{syntax:"*";inherits:false}@property --tw-drop-shadow-alpha{syntax:"<percentage>";inherits:false;initial-value:100%}@property --tw-drop-shadow-size{syntax:"*";inherits:false}@property --tw-outline-style{syntax:"*";inherits:false;initial-value:solid}@keyframes pulse{50%{opacity:.5}}"""
+@layer properties{@supports (((-webkit-hyphens:none)) and (not (margin-trim:inline))) or ((-moz-orient:inline) and (not (color:rgb(from red r g b)))){*,:before,:after,::backdrop{--tw-space-y-reverse:0;--tw-border-style:solid;--tw-leading:initial;--tw-font-weight:initial;--tw-tracking:initial;--tw-shadow:0 0 #0000;--tw-shadow-color:initial;--tw-shadow-alpha:100%;--tw-inset-shadow:0 0 #0000;--tw-inset-shadow-color:initial;--tw-inset-shadow-alpha:100%;--tw-ring-color:initial;--tw-ring-shadow:0 0 #0000;--tw-inset-ring-color:initial;--tw-inset-ring-shadow:0 0 #0000;--tw-ring-inset:initial;--tw-ring-offset-width:0px;--tw-ring-offset-color:#fff;--tw-ring-offset-shadow:0 0 #0000;--tw-blur:initial;--tw-brightness:initial;--tw-contrast:initial;--tw-grayscale:initial;--tw-hue-rotate:initial;--tw-invert:initial;--tw-opacity:initial;--tw-saturate:initial;--tw-sepia:initial;--tw-drop-shadow:initial;--tw-drop-shadow-color:initial;--tw-drop-shadow-alpha:100%;--tw-drop-shadow-size:initial;--tw-outline-style:solid}}}@layer theme{:root,:host{--font-sans:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";--font-mono:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;--color-black:#000;--color-white:#fff;--spacing:.25rem;--container-md:28rem;--container-7xl:80rem;--text-xs:.75rem;--text-xs--line-height:calc(1 / .75);--text-sm:.875rem;--text-sm--line-height:calc(1.25 / .875);--text-lg:1.125rem;--text-lg--line-height:calc(1.75 / 1.125);--text-2xl:1.5rem;--text-2xl--line-height:calc(2 / 1.5);--font-weight-normal:400;--font-weight-medium:500;--font-weight-semibold:600;--tracking-tight:-.025em;--tracking-normal:0em;--tracking-wider:.05em;--leading-relaxed:1.625;--radius-md:.375rem;--radius-lg:.5rem;--radius-xl:.75rem;--animate-pulse:pulse 2s cubic-bezier(.4, 0, .6, 1) infinite;--default-transition-duration:.15s;--default-transition-timing-function:cubic-bezier(.4, 0, .2, 1);--default-font-family:var(--font-sans);--default-mono-font-family:var(--font-mono);--color-canvas:oklch(14.1% .005 285.823);--color-raised:oklch(21% .006 285.885);--color-hover:oklch(27.4% .006 286.033);--color-line:oklch(27.4% .006 286.033);--color-line-strong:oklch(37% .013 285.805);--color-dim:oklch(55.2% .016 285.938);--color-muted:oklch(70.5% .015 286.067);--color-fg-soft:oklch(87.1% .006 286.286);--color-fg:oklch(92% .004 286.32);--color-fg-strong:oklch(96.7% .001 286.375);--color-ok:oklch(76.5% .177 163.223);--color-ok-fg:oklch(84.5% .143 164.978);--color-ok-soft:oklch(90.5% .093 164.15);--color-warn:oklch(82.8% .189 84.429);--color-warn-fg:oklch(87.9% .169 91.605);--color-warn-soft:oklch(92.4% .12 95.746);--color-warn-strong:oklch(96.2% .059 95.617);--color-bad:oklch(70.4% .191 22.216);--color-bad-fg:oklch(80.8% .114 19.571);--color-bad-soft:oklch(88.5% .062 18.334);--color-danger:oklch(50.5% .213 27.518);--color-danger-hover:oklch(44.4% .177 26.899);--color-pause:oklch(70.2% .183 293.541);--color-pause-fg:oklch(81.1% .111 293.571);--color-accent:oklch(74.6% .16 232.661);--color-accent-fg:oklch(82.8% .111 230.318);--color-accent-soft:oklch(90.1% .058 230.902)}}@layer base{*,:after,:before,::backdrop{box-sizing:border-box;border:0 solid;margin:0;padding:0}::file-selector-button{box-sizing:border-box;border:0 solid;margin:0;padding:0}html,:host{-webkit-text-size-adjust:100%;tab-size:4;line-height:1.5;font-family:var(--default-font-family,-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji");font-feature-settings:var(--default-font-feature-settings,normal);font-variation-settings:var(--default-font-variation-settings,normal);-webkit-tap-highlight-color:transparent}hr{height:0;color:inherit;border-top-width:1px}abbr:where([title]){-webkit-text-decoration:underline dotted;text-decoration:underline dotted}h1,h2,h3,h4,h5,h6{font-size:inherit;font-weight:inherit}a{color:inherit;-webkit-text-decoration:inherit;-webkit-text-decoration:inherit;-webkit-text-decoration:inherit;text-decoration:inherit}b,strong{font-weight:bolder}code,kbd,samp,pre{font-family:var(--default-mono-font-family,ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);font-feature-settings:var(--default-mono-font-feature-settings,normal);font-variation-settings:var(--default-mono-font-variation-settings,normal);font-size:1em}small{font-size:80%}sub,sup{vertical-align:baseline;font-size:75%;line-height:0;position:relative}sub{bottom:-.25em}sup{top:-.5em}table{text-indent:0;border-color:inherit;border-collapse:collapse}:-moz-focusring:where(:not(iframe)){outline:auto}progress{vertical-align:baseline}summary{display:list-item}ol,ul,menu{list-style:none}img,svg,video,canvas,audio,iframe,embed,object{vertical-align:middle;display:block}img,video{max-width:100%;height:auto}button,input,select,optgroup,textarea{font:inherit;font-feature-settings:inherit;font-variation-settings:inherit;letter-spacing:inherit;color:inherit;opacity:1;background-color:#0000;border-radius:0}::file-selector-button{font:inherit;font-feature-settings:inherit;font-variation-settings:inherit;letter-spacing:inherit;color:inherit;opacity:1;background-color:#0000;border-radius:0}:where(select:is([multiple],[size])) optgroup{font-weight:bolder}:where(select:is([multiple],[size])) optgroup option{padding-inline-start:20px}::file-selector-button{margin-inline-end:4px}::placeholder{opacity:1}@supports (not ((-webkit-appearance:-apple-pay-button))) or (contain-intrinsic-size:1px){::placeholder{color:currentColor}@supports (color:color-mix(in lab, red, red)){::placeholder{color:color-mix(in oklab, currentcolor 50%, transparent)}}}textarea{resize:vertical}::-webkit-search-decoration{-webkit-appearance:none}::-webkit-date-and-time-value{min-height:1lh;text-align:inherit}::-webkit-datetime-edit{display:inline-flex}::-webkit-datetime-edit-fields-wrapper{padding:0}::-webkit-datetime-edit{padding-block:0}::-webkit-datetime-edit-year-field{padding-block:0}::-webkit-datetime-edit-month-field{padding-block:0}::-webkit-datetime-edit-day-field{padding-block:0}::-webkit-datetime-edit-hour-field{padding-block:0}::-webkit-datetime-edit-minute-field{padding-block:0}::-webkit-datetime-edit-second-field{padding-block:0}::-webkit-datetime-edit-millisecond-field{padding-block:0}::-webkit-datetime-edit-meridiem-field{padding-block:0}::-webkit-calendar-picker-indicator{line-height:1}:-moz-ui-invalid{box-shadow:none}button,input:where([type=button],[type=reset],[type=submit]){appearance:button}::file-selector-button{appearance:button}::-webkit-inner-spin-button{height:auto}::-webkit-outer-spin-button{height:auto}[hidden]:where(:not([hidden=until-found])){display:none!important}}@layer components;@layer utilities{.sr-only{clip-path:inset(50%);white-space:nowrap;border-width:0;width:1px;height:1px;margin:-1px;padding:0;position:absolute;overflow:hidden}.fixed{position:fixed}.right-4{right:calc(var(--spacing) * 4)}.bottom-4{bottom:calc(var(--spacing) * 4)}.z-30{z-index:30}.container{width:100%}@media (min-width:40rem){.container{max-width:40rem}}@media (min-width:48rem){.container{max-width:48rem}}@media (min-width:64rem){.container{max-width:64rem}}@media (min-width:80rem){.container{max-width:80rem}}@media (min-width:96rem){.container{max-width:96rem}}.m-auto{margin:auto}.mx-1{margin-inline:var(--spacing)}.mx-4{margin-inline:calc(var(--spacing) * 4)}.mx-auto{margin-inline:auto}.-mt-0\.5{margin-top:calc(var(--spacing) * -.5)}.mt-0\.5{margin-top:calc(var(--spacing) * .5)}.mt-1{margin-top:var(--spacing)}.mt-1\.5{margin-top:calc(var(--spacing) * 1.5)}.mt-2{margin-top:calc(var(--spacing) * 2)}.mt-4{margin-top:calc(var(--spacing) * 4)}.mr-1\.5{margin-right:calc(var(--spacing) * 1.5)}.mr-auto{margin-right:auto}.mb-3{margin-bottom:calc(var(--spacing) * 3)}.mb-4{margin-bottom:calc(var(--spacing) * 4)}.mb-6{margin-bottom:calc(var(--spacing) * 6)}.ml-1{margin-left:var(--spacing)}.ml-auto{margin-left:auto}.block{display:block}.contents{display:contents}.flex{display:flex}.grid{display:grid}.hidden{display:none}.inline{display:inline}.table{display:table}.size-1\.5{width:calc(var(--spacing) * 1.5);height:calc(var(--spacing) * 1.5)}.size-2{width:calc(var(--spacing) * 2);height:calc(var(--spacing) * 2)}.size-3{width:calc(var(--spacing) * 3);height:calc(var(--spacing) * 3)}.size-4{width:calc(var(--spacing) * 4);height:calc(var(--spacing) * 4)}.size-6{width:calc(var(--spacing) * 6);height:calc(var(--spacing) * 6)}.size-8{width:calc(var(--spacing) * 8);height:calc(var(--spacing) * 8)}.h-5{height:calc(var(--spacing) * 5)}.h-\[65vh\]{height:65vh}.max-h-40{max-height:calc(var(--spacing) * 40)}.max-h-\[30vh\]{max-height:30vh}.max-h-\[65vh\]{max-height:65vh}.min-h-screen{min-height:100vh}.w-\[min\(640px\,95vw\)\]{width:min(640px,95vw)}.w-\[min\(1100px\,95vw\)\]{width:min(1100px,95vw)}.w-fit{width:fit-content}.w-full{width:100%}.w-px{width:1px}.max-w-7xl{max-width:var(--container-7xl)}.max-w-md{max-width:var(--container-md)}.min-w-0{min-width:0}.min-w-48{min-width:calc(var(--spacing) * 48)}.shrink-0{flex-shrink:0}.animate-pulse{animation:var(--animate-pulse)}.cursor-pointer{cursor:pointer}.resize{resize:both}.list-none{list-style-type:none}.grid-cols-\[auto_1fr\]{grid-template-columns:auto 1fr}.flex-wrap{flex-wrap:wrap}.place-items-center{place-items:center}.items-center{align-items:center}.items-start{align-items:flex-start}.justify-between{justify-content:space-between}.justify-end{justify-content:flex-end}.gap-1{gap:var(--spacing)}.gap-1\.5{gap:calc(var(--spacing) * 1.5)}.gap-2{gap:calc(var(--spacing) * 2)}.gap-2\.5{gap:calc(var(--spacing) * 2.5)}.gap-3{gap:calc(var(--spacing) * 3)}.gap-4{gap:calc(var(--spacing) * 4)}:where(.space-y-3>:not(:last-child)){--tw-space-y-reverse:0;margin-block-start:calc(calc(var(--spacing) * 3) * var(--tw-space-y-reverse));margin-block-end:calc(calc(var(--spacing) * 3) * calc(1 - var(--tw-space-y-reverse)))}:where(.space-y-4>:not(:last-child)){--tw-space-y-reverse:0;margin-block-start:calc(calc(var(--spacing) * 4) * var(--tw-space-y-reverse));margin-block-end:calc(calc(var(--spacing) * 4) * calc(1 - var(--tw-space-y-reverse)))}.gap-x-3{column-gap:calc(var(--spacing) * 3)}.gap-x-4{column-gap:calc(var(--spacing) * 4)}.gap-y-1\.5{row-gap:calc(var(--spacing) * 1.5)}.gap-y-2{row-gap:calc(var(--spacing) * 2)}.truncate{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.overflow-auto{overflow:auto}.overflow-x-auto{overflow-x:auto}.rounded{border-radius:.25rem}.rounded-full{border-radius:3.40282e38px}.rounded-lg{border-radius:var(--radius-lg)}.rounded-md{border-radius:var(--radius-md)}.rounded-xl{border-radius:var(--radius-xl)}.border-t{border-top-style:var(--tw-border-style);border-top-width:1px}.border-b{border-bottom-style:var(--tw-border-style);border-bottom-width:1px}.border-line{border-color:var(--color-line)}.border-line\/70{border-color:#27272ab3}@supports (color:color-mix(in lab, red, red)){.border-line\/70{border-color:color-mix(in oklab, var(--color-line) 70%, transparent)}}.bg-accent{background-color:var(--color-accent)}.bg-accent\/10{background-color:#00bcfe1a}@supports (color:color-mix(in lab, red, red)){.bg-accent\/10{background-color:color-mix(in oklab, var(--color-accent) 10%, transparent)}}.bg-accent\/15{background-color:#00bcfe26}@supports (color:color-mix(in lab, red, red)){.bg-accent\/15{background-color:color-mix(in oklab, var(--color-accent) 15%, transparent)}}.bg-bad{background-color:var(--color-bad)}.bg-bad\/5{background-color:#ff65680d}@supports (color:color-mix(in lab, red, red)){.bg-bad\/5{background-color:color-mix(in oklab, var(--color-bad) 5%, transparent)}}.bg-bad\/10{background-color:#ff65681a}@supports (color:color-mix(in lab, red, red)){.bg-bad\/10{background-color:color-mix(in oklab, var(--color-bad) 10%, transparent)}}.bg-black{background-color:var(--color-black)}.bg-canvas{background-color:var(--color-canvas)}.bg-danger{background-color:var(--color-danger)}.bg-dim{background-color:var(--color-dim)}.bg-fg{background-color:var(--color-fg)}.bg-hover{background-color:var(--color-hover)}.bg-hover\/60{background-color:#27272a99}@supports (color:color-mix(in lab, red, red)){.bg-hover\/60{background-color:color-mix(in oklab, var(--color-hover) 60%, transparent)}}.bg-ok{background-color:var(--color-ok)}.bg-ok\/10{background-color:#00d2941a}@supports (color:color-mix(in lab, red, red)){.bg-ok\/10{background-color:color-mix(in oklab, var(--color-ok) 10%, transparent)}}.bg-ok\/40{background-color:#00d29466}@supports (color:color-mix(in lab, red, red)){.bg-ok\/40{background-color:color-mix(in oklab, var(--color-ok) 40%, transparent)}}.bg-pause{background-color:var(--color-pause)}.bg-raised{background-color:var(--color-raised)}.bg-raised\/40{background-color:#18181b66}@supports (color:color-mix(in lab, red, red)){.bg-raised\/40{background-color:color-mix(in oklab, var(--color-raised) 40%, transparent)}}.bg-warn{background-color:var(--color-warn)}.bg-warn\/10{background-color:#fcbb001a}@supports (color:color-mix(in lab, red, red)){.bg-warn\/10{background-color:color-mix(in oklab, var(--color-warn) 10%, transparent)}}.p-0{padding:0}.p-1{padding:var(--spacing)}.p-2{padding:calc(var(--spacing) * 2)}.p-4{padding:calc(var(--spacing) * 4)}.px-1{padding-inline:var(--spacing)}.px-1\.5{padding-inline:calc(var(--spacing) * 1.5)}.px-2{padding-inline:calc(var(--spacing) * 2)}.px-2\.5{padding-inline:calc(var(--spacing) * 2.5)}.px-3{padding-inline:calc(var(--spacing) * 3)}.px-4{padding-inline:calc(var(--spacing) * 4)}.py-0\.5{padding-block:calc(var(--spacing) * .5)}.py-1{padding-block:var(--spacing)}.py-1\.5{padding-block:calc(var(--spacing) * 1.5)}.py-2{padding-block:calc(var(--spacing) * 2)}.py-3{padding-block:calc(var(--spacing) * 3)}.py-4{padding-block:calc(var(--spacing) * 4)}.py-8{padding-block:calc(var(--spacing) * 8)}.py-16{padding-block:calc(var(--spacing) * 16)}.pt-4{padding-top:calc(var(--spacing) * 4)}.pt-5{padding-top:calc(var(--spacing) * 5)}.pr-4{padding-right:calc(var(--spacing) * 4)}.pr-6{padding-right:calc(var(--spacing) * 6)}.pb-1{padding-bottom:var(--spacing)}.pb-2{padding-bottom:calc(var(--spacing) * 2)}.pl-4{padding-left:calc(var(--spacing) * 4)}.text-center{text-align:center}.text-left{text-align:left}.align-middle{vertical-align:middle}.font-mono{font-family:var(--font-mono)}.font-sans{font-family:var(--font-sans)}.text-2xl{font-size:var(--text-2xl);line-height:var(--tw-leading,var(--text-2xl--line-height))}.text-lg{font-size:var(--text-lg);line-height:var(--tw-leading,var(--text-lg--line-height))}.text-sm{font-size:var(--text-sm);line-height:var(--tw-leading,var(--text-sm--line-height))}.text-xs{font-size:var(--text-xs);line-height:var(--tw-leading,var(--text-xs--line-height))}.leading-relaxed{--tw-leading:var(--leading-relaxed);line-height:var(--leading-relaxed)}.font-medium{--tw-font-weight:var(--font-weight-medium);font-weight:var(--font-weight-medium)}.font-normal{--tw-font-weight:var(--font-weight-normal);font-weight:var(--font-weight-normal)}.font-semibold{--tw-font-weight:var(--font-weight-semibold);font-weight:var(--font-weight-semibold)}.tracking-normal{--tw-tracking:var(--tracking-normal);letter-spacing:var(--tracking-normal)}.tracking-tight{--tw-tracking:var(--tracking-tight);letter-spacing:var(--tracking-tight)}.tracking-wider{--tw-tracking:var(--tracking-wider);letter-spacing:var(--tracking-wider)}.\[overflow-wrap\:anywhere\]{overflow-wrap:anywhere}.whitespace-nowrap{white-space:nowrap}.whitespace-pre-wrap{white-space:pre-wrap}.text-accent{color:var(--color-accent)}.text-accent-fg{color:var(--color-accent-fg)}.text-bad-fg{color:var(--color-bad-fg)}.text-bad-soft{color:var(--color-bad-soft)}.text-fg{color:var(--color-fg)}.text-fg-soft{color:var(--color-fg-soft)}.text-fg-strong{color:var(--color-fg-strong)}.text-muted{color:var(--color-muted)}.text-ok-fg{color:var(--color-ok-fg)}.text-ok-soft{color:var(--color-ok-soft)}.text-pause-fg{color:var(--color-pause-fg)}.text-warn-fg{color:var(--color-warn-fg)}.text-warn-soft{color:var(--color-warn-soft)}.text-warn-strong{color:var(--color-warn-strong)}.text-white{color:var(--color-white)}.normal-case{text-transform:none}.uppercase{text-transform:uppercase}.underline{text-decoration-line:underline}.underline-offset-4{text-underline-offset:4px}.antialiased{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}.accent-danger{accent-color:var(--color-danger)}.opacity-40{opacity:.4}.opacity-70{opacity:.7}.shadow-lg{--tw-shadow:0 10px 15px -3px var(--tw-shadow-color,#0000001a), 0 4px 6px -4px var(--tw-shadow-color,#0000001a);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}.ring-1{--tw-ring-shadow:var(--tw-ring-inset,) 0 0 0 calc(1px + var(--tw-ring-offset-width)) var(--tw-ring-color,currentcolor);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}.shadow-black\/40{--tw-shadow-color:#0006}@supports (color:color-mix(in lab, red, red)){.shadow-black\/40{--tw-shadow-color:color-mix(in oklab, color-mix(in oklab, var(--color-black) 40%, transparent) var(--tw-shadow-alpha), transparent)}}.ring-accent\/20{--tw-ring-color:#00bcfe33}@supports (color:color-mix(in lab, red, red)){.ring-accent\/20{--tw-ring-color:color-mix(in oklab, var(--color-accent) 20%, transparent)}}.ring-accent\/40{--tw-ring-color:#00bcfe66}@supports (color:color-mix(in lab, red, red)){.ring-accent\/40{--tw-ring-color:color-mix(in oklab, var(--color-accent) 40%, transparent)}}.ring-bad\/40{--tw-ring-color:#ff656866}@supports (color:color-mix(in lab, red, red)){.ring-bad\/40{--tw-ring-color:color-mix(in oklab, var(--color-bad) 40%, transparent)}}.ring-current{--tw-ring-color:currentcolor}.ring-danger{--tw-ring-color:var(--color-danger)}.ring-line{--tw-ring-color:var(--color-line)}.ring-line-strong{--tw-ring-color:var(--color-line-strong)}.ring-line-strong\/80{--tw-ring-color:#3f3f46cc}@supports (color:color-mix(in lab, red, red)){.ring-line-strong\/80{--tw-ring-color:color-mix(in oklab, var(--color-line-strong) 80%, transparent)}}.ring-ok\/40{--tw-ring-color:#00d29466}@supports (color:color-mix(in lab, red, red)){.ring-ok\/40{--tw-ring-color:color-mix(in oklab, var(--color-ok) 40%, transparent)}}.ring-warn\/30{--tw-ring-color:#fcbb004d}@supports (color:color-mix(in lab, red, red)){.ring-warn\/30{--tw-ring-color:color-mix(in oklab, var(--color-warn) 30%, transparent)}}.filter{filter:var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,)}.transition{transition-property:color,background-color,border-color,outline-color,text-decoration-color,fill,stroke,--tw-gradient-from,--tw-gradient-via,--tw-gradient-to,opacity,box-shadow,transform,translate,scale,rotate,filter,-webkit-backdrop-filter,backdrop-filter,display,content-visibility,overlay,pointer-events;transition-timing-function:var(--tw-ease,var(--default-transition-timing-function));transition-duration:var(--tw-duration,var(--default-transition-duration))}.transition-opacity{transition-property:opacity;transition-timing-function:var(--tw-ease,var(--default-transition-timing-function));transition-duration:var(--tw-duration,var(--default-transition-duration))}.group-has-checked\:block:is(:where(.group):has(:checked) *){display:block}.group-aria-pressed\:inline-block:is(:where(.group)[aria-pressed=true] *){display:inline-block}.selection\:bg-accent\/30 ::selection{background-color:#00bcfe4d}@supports (color:color-mix(in lab, red, red)){.selection\:bg-accent\/30 ::selection{background-color:color-mix(in oklab, var(--color-accent) 30%, transparent)}}.selection\:bg-accent\/30::selection{background-color:#00bcfe4d}@supports (color:color-mix(in lab, red, red)){.selection\:bg-accent\/30::selection{background-color:color-mix(in oklab, var(--color-accent) 30%, transparent)}}.placeholder\:text-dim::placeholder{color:var(--color-dim)}.placeholder\:text-muted::placeholder{color:var(--color-muted)}.backdrop\:bg-black\/70::backdrop{background-color:#000000b3}@supports (color:color-mix(in lab, red, red)){.backdrop\:bg-black\/70::backdrop{background-color:color-mix(in oklab, var(--color-black) 70%, transparent)}}.empty\:hidden:empty{display:none}@media (hover:hover){.hover\:bg-accent\/20:hover{background-color:#00bcfe33}@supports (color:color-mix(in lab, red, red)){.hover\:bg-accent\/20:hover{background-color:color-mix(in oklab, var(--color-accent) 20%, transparent)}}.hover\:bg-accent\/25:hover{background-color:#00bcfe40}@supports (color:color-mix(in lab, red, red)){.hover\:bg-accent\/25:hover{background-color:color-mix(in oklab, var(--color-accent) 25%, transparent)}}.hover\:bg-danger-hover:hover{background-color:var(--color-danger-hover)}.hover\:bg-hover:hover{background-color:var(--color-hover)}.hover\:bg-ok\/10:hover{background-color:#00d2941a}@supports (color:color-mix(in lab, red, red)){.hover\:bg-ok\/10:hover{background-color:color-mix(in oklab, var(--color-ok) 10%, transparent)}}.hover\:bg-raised\/70:hover{background-color:#18181bb3}@supports (color:color-mix(in lab, red, red)){.hover\:bg-raised\/70:hover{background-color:color-mix(in oklab, var(--color-raised) 70%, transparent)}}.hover\:text-accent-soft:hover{color:var(--color-accent-soft)}.hover\:text-fg:hover{color:var(--color-fg)}.hover\:text-fg-strong:hover{color:var(--color-fg-strong)}}.focus\:not-sr-only:focus{clip-path:none;white-space:normal;width:auto;height:auto;margin:0;padding:0;position:static;overflow:visible}.focus\:fixed:focus{position:fixed}.focus\:top-3:focus{top:calc(var(--spacing) * 3)}.focus\:left-3:focus{left:calc(var(--spacing) * 3)}.focus\:z-50:focus{z-index:50}.focus\:rounded-md:focus{border-radius:var(--radius-md)}.focus\:bg-fg-strong:focus{background-color:var(--color-fg-strong)}.focus\:px-3:focus{padding-inline:calc(var(--spacing) * 3)}.focus\:py-2:focus{padding-block:calc(var(--spacing) * 2)}.focus\:text-sm:focus{font-size:var(--text-sm);line-height:var(--tw-leading,var(--text-sm--line-height))}.focus\:text-canvas:focus{color:var(--color-canvas)}.focus\:ring-accent:focus{--tw-ring-color:var(--color-accent)}.focus\:outline-none:focus{--tw-outline-style:none;outline-style:none}.focus-visible\:outline-2:focus-visible{outline-style:var(--tw-outline-style);outline-width:2px}.focus-visible\:-outline-offset-2:focus-visible{outline-offset:calc(2px * -1)}.focus-visible\:outline-offset-2:focus-visible{outline-offset:2px}.focus-visible\:outline-accent:focus-visible{outline-color:var(--color-accent)}.aria-disabled\:cursor-wait[aria-disabled=true]{cursor:wait}.aria-disabled\:opacity-40[aria-disabled=true]{opacity:.4}.aria-disabled\:opacity-60[aria-disabled=true]{opacity:.6}.aria-invalid\:ring-bad[aria-invalid=true]{--tw-ring-color:var(--color-bad)}.aria-pressed\:bg-accent\/15[aria-pressed=true]{background-color:#00bcfe26}@supports (color:color-mix(in lab, red, red)){.aria-pressed\:bg-accent\/15[aria-pressed=true]{background-color:color-mix(in oklab, var(--color-accent) 15%, transparent)}}.aria-pressed\:bg-fg-strong[aria-pressed=true]{background-color:var(--color-fg-strong)}.aria-pressed\:text-accent-soft[aria-pressed=true]{color:var(--color-accent-soft)}.aria-pressed\:text-canvas[aria-pressed=true]{color:var(--color-canvas)}.aria-pressed\:ring-accent\/40[aria-pressed=true]{--tw-ring-color:#00bcfe66}@supports (color:color-mix(in lab, red, red)){.aria-pressed\:ring-accent\/40[aria-pressed=true]{--tw-ring-color:color-mix(in oklab, var(--color-accent) 40%, transparent)}}.aria-pressed\:ring-fg-strong[aria-pressed=true]{--tw-ring-color:var(--color-fg-strong)}@media (prefers-reduced-motion:reduce){.motion-reduce\:animate-none{animation:none}.motion-reduce\:transition-none{transition-property:none}}@media not all and (min-width:64rem){.max-lg\:block{display:block}.max-lg\:hidden{display:none}.max-lg\:size-11{width:calc(var(--spacing) * 11);height:calc(var(--spacing) * 11)}.max-lg\:min-h-11{min-height:calc(var(--spacing) * 11)}.max-lg\:w-11{width:calc(var(--spacing) * 11)}.max-lg\:justify-start{justify-content:flex-start}.max-lg\:gap-2{gap:calc(var(--spacing) * 2)}:where(.max-lg\:space-y-1\.5>:not(:last-child)){--tw-space-y-reverse:0;margin-block-start:calc(calc(var(--spacing) * 1.5) * var(--tw-space-y-reverse));margin-block-end:calc(calc(var(--spacing) * 1.5) * calc(1 - var(--tw-space-y-reverse)))}.max-lg\:p-0{padding:0}.max-lg\:px-3{padding-inline:calc(var(--spacing) * 3)}.max-lg\:px-4{padding-inline:calc(var(--spacing) * 4)}.max-lg\:py-2{padding-block:calc(var(--spacing) * 2)}.max-lg\:py-3{padding-block:calc(var(--spacing) * 3)}.max-lg\:py-3\.5{padding-block:calc(var(--spacing) * 3.5)}.max-lg\:py-4{padding-block:calc(var(--spacing) * 4)}.max-lg\:pt-1{padding-top:var(--spacing)}.max-lg\:pt-2{padding-top:calc(var(--spacing) * 2)}.max-lg\:pl-5{padding-left:calc(var(--spacing) * 5)}.max-lg\:text-sm{font-size:var(--text-sm);line-height:var(--tw-leading,var(--text-sm--line-height))}.max-lg\:text-xs{font-size:var(--text-xs);line-height:var(--tw-leading,var(--text-xs--line-height))}.max-lg\:has-\[div\]\:block:has(:is(div)){display:block}}@media (min-width:40rem){.sm\:w-72{width:calc(var(--spacing) * 72)}.sm\:grid-cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}}@media (min-width:64rem){.lg\:hidden{display:none}.lg\:w-9{width:calc(var(--spacing) * 9)}.lg\:w-20{width:calc(var(--spacing) * 20)}.lg\:max-w-\[24ch\]{max-width:24ch}.lg\:min-w-\[24ch\]{min-width:24ch}.lg\:truncate{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.lg\:text-left{text-align:left}.lg\:text-right{text-align:right}.lg\:\[direction\:rtl\]{direction:rtl}}.\[\&\:\:-webkit-details-marker\]\:hidden::-webkit-details-marker{display:none}}@media (prefers-color-scheme:light){:root{--color-canvas:oklch(98.5% 0 none);--color-raised:#fff;--color-hover:oklch(96.7% .001 286.375);--color-line:oklch(92% .004 286.32);--color-line-strong:oklch(87.1% .006 286.286);--color-dim:oklch(70.5% .015 286.067);--color-muted:oklch(44.2% .017 285.786);--color-fg-soft:oklch(37% .013 285.805);--color-fg:oklch(27.4% .006 286.033);--color-fg-strong:oklch(14.1% .005 285.823);--color-ok:oklch(69.6% .17 162.48);--color-ok-fg:oklch(50.8% .118 165.612);--color-ok-soft:oklch(43.2% .095 166.913);--color-warn:oklch(76.9% .188 70.08);--color-warn-fg:oklch(55.5% .163 48.998);--color-warn-soft:oklch(47.3% .137 46.201);--color-warn-strong:oklch(41.4% .112 45.904);--color-bad:oklch(63.7% .237 25.331);--color-bad-fg:oklch(50.5% .213 27.518);--color-bad-soft:oklch(44.4% .177 26.899);--color-danger:oklch(50.5% .213 27.518);--color-danger-hover:oklch(44.4% .177 26.899);--color-pause:oklch(60.6% .25 292.717);--color-pause-fg:oklch(49.1% .27 292.581);--color-accent:oklch(58.8% .158 241.966);--color-accent-fg:oklch(50% .134 242.749);--color-accent-soft:oklch(44.3% .11 240.79)}}@property --tw-space-y-reverse{syntax:"*";inherits:false;initial-value:0}@property --tw-border-style{syntax:"*";inherits:false;initial-value:solid}@property --tw-leading{syntax:"*";inherits:false}@property --tw-font-weight{syntax:"*";inherits:false}@property --tw-tracking{syntax:"*";inherits:false}@property --tw-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-shadow-color{syntax:"*";inherits:false}@property --tw-shadow-alpha{syntax:"<percentage>";inherits:false;initial-value:100%}@property --tw-inset-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-inset-shadow-color{syntax:"*";inherits:false}@property --tw-inset-shadow-alpha{syntax:"<percentage>";inherits:false;initial-value:100%}@property --tw-ring-color{syntax:"*";inherits:false}@property --tw-ring-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-inset-ring-color{syntax:"*";inherits:false}@property --tw-inset-ring-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-ring-inset{syntax:"*";inherits:false}@property --tw-ring-offset-width{syntax:"<length>";inherits:false;initial-value:0}@property --tw-ring-offset-color{syntax:"*";inherits:false;initial-value:#fff}@property --tw-ring-offset-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-blur{syntax:"*";inherits:false}@property --tw-brightness{syntax:"*";inherits:false}@property --tw-contrast{syntax:"*";inherits:false}@property --tw-grayscale{syntax:"*";inherits:false}@property --tw-hue-rotate{syntax:"*";inherits:false}@property --tw-invert{syntax:"*";inherits:false}@property --tw-opacity{syntax:"*";inherits:false}@property --tw-saturate{syntax:"*";inherits:false}@property --tw-sepia{syntax:"*";inherits:false}@property --tw-drop-shadow{syntax:"*";inherits:false}@property --tw-drop-shadow-color{syntax:"*";inherits:false}@property --tw-drop-shadow-alpha{syntax:"<percentage>";inherits:false;initial-value:100%}@property --tw-drop-shadow-size{syntax:"*";inherits:false}@property --tw-outline-style{syntax:"*";inherits:false;initial-value:solid}@keyframes pulse{50%{opacity:.5}}"""
 PAGE = r"""<!doctype html>
 <html lang="pt-BR" class="bg-canvas" data-cli="docker">
 <head>
@@ -410,10 +511,13 @@ PAGE = r"""<!doctype html>
 <main class="max-w-7xl mx-auto px-4 py-8">
   <header class="flex flex-wrap items-start justify-between gap-4 mb-6">
     <div>
-      <h1 class="text-2xl font-semibold text-fg-strong tracking-tight flex items-center gap-2.5">
-        <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" class="size-6 text-accent"><path d="M12 2.5 3.5 7v10l8.5 4.5 8.5-4.5V7z"/><path d="M3.5 7 12 11.5 20.5 7M12 11.5v10"/></svg>
-        Containers
-      </h1>
+      <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <h1 class="text-2xl font-semibold text-fg-strong tracking-tight flex items-center gap-2.5">
+          <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" class="size-6 text-accent"><path d="M12 2.5 3.5 7v10l8.5 4.5 8.5-4.5V7z"/><path d="M3.5 7 12 11.5 20.5 7M12 11.5v10"/></svg>
+          Containers
+        </h1>
+        <button id="new" onclick="openCreate()" class="px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 rounded-md text-sm font-medium ring-1 ring-accent/40 bg-accent/10 text-accent-fg hover:bg-accent/20 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">+ Novo container</button>
+      </div>
       <div id="count" role="group" aria-label="Filtrar por estado" class="flex flex-wrap gap-1 mt-2 text-sm text-muted">Carregando…</div>
     </div>
     <div class="w-full sm:w-72">
@@ -490,6 +594,83 @@ PAGE = r"""<!doctype html>
   <div id="shell-box" class="h-[65vh] p-2 bg-black"></div>
 </dialog>
 
+<!-- docker run -d com poucas opções, nenhuma que amplie o acesso ao host (bind mount, --privileged, --cap-add, rede/PID
+     do host, devices, comando livre). O app.ts aponta o erro no campo; o servidor confere tudo de novo (run_argv) -->
+<dialog id="create" aria-labelledby="create-title" aria-describedby="create-desc" class="m-auto w-[min(640px,95vw)] rounded-xl bg-raised text-fg-soft ring-1 ring-line-strong backdrop:bg-black/70 p-0">
+  <form id="create-form" novalidate>
+    <div class="px-4 py-3 border-b border-line flex items-start gap-3">
+      <div class="mr-auto min-w-0">
+        <h2 id="create-title" class="text-lg font-semibold text-fg-strong">Novo container</h2>
+        <p id="create-desc" class="text-sm mt-0.5 text-muted">Cria e inicia com <code class="font-mono">docker run -d</code>. Se a imagem faltar, ela é baixada antes.</p>
+      </div>
+      <button type="button" onclick="create.close()" aria-label="Fechar" class="shrink-0 grid place-items-center size-8 max-lg:size-11 rounded-md text-muted hover:text-fg-strong hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent">
+        <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="size-4"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
+    </div>
+    <fieldset id="create-fields" class="px-4 py-4 space-y-4 max-h-[65vh] overflow-auto text-sm">
+      <div>
+        <label for="run-image" class="block font-medium text-fg-strong">Imagem</label>
+        <input id="run-image" required autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="nginx:1.27" aria-describedby="run-image-err"
+          class="mt-1 w-full rounded-lg bg-canvas ring-1 ring-line px-3 py-2 max-lg:py-3 font-mono text-fg-strong placeholder:text-dim focus:ring-accent aria-invalid:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+        <p id="run-image-err" class="empty:hidden mt-1 text-xs text-bad-fg"></p>
+      </div>
+      <div>
+        <label for="run-name" class="block font-medium text-fg-strong">Nome <span class="font-normal text-muted">(opcional; sem ele, o docker sorteia um)</span></label>
+        <input id="run-name" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="web" aria-describedby="run-name-err"
+          class="mt-1 w-full rounded-lg bg-canvas ring-1 ring-line px-3 py-2 max-lg:py-3 font-mono text-fg-strong placeholder:text-dim focus:ring-accent aria-invalid:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+        <p id="run-name-err" class="empty:hidden mt-1 text-xs text-bad-fg"></p>
+      </div>
+      <div class="group">
+        <label for="run-ports" class="block font-medium text-fg-strong">Portas</label>
+        <input id="run-ports" autocomplete="off" spellcheck="false" placeholder="8080:80, 5353:53/udp" aria-describedby="run-ports-hint run-ports-err"
+          class="mt-1 w-full rounded-lg bg-canvas ring-1 ring-line px-3 py-2 max-lg:py-3 font-mono text-fg-strong placeholder:text-dim focus:ring-accent aria-invalid:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+        <p id="run-ports-hint" class="mt-1 text-xs text-muted">portaDoHost:portaDoContainer, separadas por vírgula ou espaço. Ficam só em <code class="font-mono">127.0.0.1</code>: só esta máquina acessa.</p>
+        <p id="run-ports-err" class="empty:hidden mt-1 text-xs text-bad-fg"></p>
+        <label class="mt-2 flex items-start gap-2 w-fit max-lg:py-2 cursor-pointer">
+          <input id="run-public" type="checkbox" aria-describedby="run-public-warn" class="mt-0.5 size-4 accent-danger focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+          <span>Publicar em todas as interfaces (<code class="font-mono">0.0.0.0</code>)</span>
+        </label>
+        <p id="run-public-warn" class="hidden group-has-checked:block mt-1.5 rounded-lg ring-1 ring-bad/40 bg-bad/10 px-3 py-2 text-xs text-bad-soft">
+          Atenção: qualquer máquina que alcance a sua (Wi-Fi, VPN, rede do escritório) passa a acessar essas portas,
+          e o Docker abre as portas por cima do firewall do sistema (ufw, firewalld). Só marque se precisar mesmo.</p>
+      </div>
+      <div>
+        <label for="run-env" class="block font-medium text-fg-strong">Variáveis de ambiente</label>
+        <textarea id="run-env" rows="3" spellcheck="false" autocapitalize="off" placeholder="CHAVE=valor (uma por linha)" aria-describedby="run-env-hint run-env-err"
+          class="mt-1 w-full rounded-lg bg-canvas ring-1 ring-line px-3 py-2 font-mono text-fg-strong placeholder:text-dim focus:ring-accent aria-invalid:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"></textarea>
+        <p id="run-env-hint" class="mt-1 text-xs text-muted">Linhas em branco e com <code class="font-mono">#</code> são ignoradas. Os valores ficam visíveis no <code class="font-mono">docker inspect</code>.</p>
+        <p id="run-env-err" class="empty:hidden mt-1 text-xs text-bad-fg"></p>
+      </div>
+      <div class="grid sm:grid-cols-2 gap-4">
+        <div>
+          <label for="run-restart" class="block font-medium text-fg-strong">Restart</label>
+          <select id="run-restart" aria-describedby="run-restart-err"
+            class="mt-1 w-full rounded-lg bg-canvas ring-1 ring-line px-3 py-2 max-lg:py-3 text-fg-strong focus:ring-accent aria-invalid:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+            <option value="no">no · não reinicia</option>
+            <option value="on-failure">on-failure · se sair com erro</option>
+            <option value="unless-stopped">unless-stopped · sempre, menos se você parar</option>
+            <option value="always">always · sempre</option>
+          </select>
+          <p id="run-restart-err" class="empty:hidden mt-1 text-xs text-bad-fg"></p>
+        </div>
+        <div>
+          <label for="run-volume" class="block font-medium text-fg-strong">Volume <span class="font-normal text-muted">(opcional)</span></label>
+          <input id="run-volume" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="dados:/var/lib/data" aria-describedby="run-volume-hint run-volume-err"
+            class="mt-1 w-full rounded-lg bg-canvas ring-1 ring-line px-3 py-2 max-lg:py-3 font-mono text-fg-strong placeholder:text-dim focus:ring-accent aria-invalid:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+          <p id="run-volume-hint" class="mt-1 text-xs text-muted">Volume nomeado (criado se não existir): nome:/caminho/no/container.</p>
+          <p id="run-volume-err" class="empty:hidden mt-1 text-xs text-bad-fg"></p>
+        </div>
+      </div>
+      <p class="text-xs text-muted">Ficam de fora, para a GUI não ampliar o acesso ao host: pasta do host (bind mount), <code class="font-mono">--privileged</code>,
+        <code class="font-mono">--cap-add</code>, rede e PID do host, devices e comando ou entrypoint próprio. Para isso, use o terminal.</p>
+    </fieldset>
+    <div id="create-msg" role="alert" class="empty:hidden mx-4 mb-3 max-h-40 overflow-auto rounded-lg ring-1 ring-bad/40 bg-bad/10 px-3 py-2 text-sm text-bad-soft"></div>
+    <div class="px-4 py-3 border-t border-line flex justify-end gap-2">
+      <button type="button" onclick="create.close()" class="px-3 py-1.5 max-lg:min-h-11 max-lg:px-4 rounded-md text-sm font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Cancelar</button>
+      <button id="create-go" type="submit" class="px-3 py-1.5 max-lg:min-h-11 max-lg:px-4 rounded-md text-sm font-medium ring-1 ring-accent/40 bg-accent/15 text-accent-fg hover:bg-accent/25 aria-disabled:opacity-60 aria-disabled:cursor-wait focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Criar e iniciar</button>
+    </div>
+  </form>
+</dialog>
+
 <div id="toast" role="status" aria-live="polite" class="fixed bottom-4 right-4 max-w-md"></div>
 
 <script>
@@ -552,6 +733,64 @@ PAGE = r"""<!doctype html>
   var shortImage = (img) => img.replace(/^[^/]+[.:][^/]*\//, "");
   var hasHealth = (c) => /\((un)?healthy\)|health: starting/.test(c.Status);
   var usage = (s15) => [`CPU ${s15.CPUPerc} · RAM ${s15.MemUsage.split(" / ")[0]}`, `Memória: ${s15.MemUsage} (${s15.MemPerc})`];
+  var RESTART = ["no", "on-failure", "unless-stopped", "always"];
+  var HOST = "[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?";
+  var PATH = "[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*";
+  var IMAGE_RE = new RegExp(`^(?:${HOST}(?:\\.${HOST})*(?::[0-9]+)?/)?${PATH}(?:/${PATH})*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[0-9a-f]{64})?$`);
+  var NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{1,127}$/;
+  var PORT_RE = /^([0-9]{1,5}):([0-9]{1,5})(?:\/(tcp|udp))?$/;
+  var ENV_RE = /^[A-Za-z_][A-Za-z0-9_]{0,255}$/;
+  var VOLUME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{1,127}:((?:\/[A-Za-z0-9._@+-]+)+)$/;
+  var MAX_ENV_VALUE = 4096;
+  var MAX_ITEMS = 64;
+  var splitPorts = (s15) => s15.split(/[\s,]+/).filter(Boolean);
+  var splitEnv = (s15) => s15.split(/\r?\n/).filter((l) => l.trim() && !l.trimStart().startsWith("#"));
+  function runSpec(f) {
+    const errors2 = {}, image = f.image.trim(), name = f.name.trim(), volume = f.volume.trim();
+    const ports2 = splitPorts(f.ports), env = splitEnv(f.env);
+    if (!image) errors2.image = "Informe a imagem, ex.: nginx:1.27 ou ghcr.io/acme/api:1.4.";
+    else if (image.length > 512 || !IMAGE_RE.test(image)) errors2.image = "Imagem inválida: use repo[:tag] ou repo@sha256:…, com o caminho em minúsculas.";
+    if (name && !NAME_RE.test(name)) errors2.name = "Nome inválido: 2 a 128 caracteres entre letras, números, _ . e -, começando por letra ou número.";
+    const seen2 = /* @__PURE__ */ new Set();
+    for (const p of ports2) {
+      const m = p.match(PORT_RE);
+      if (!m || [m[1], m[2]].some((n) => +n < 1 || +n > 65535)) {
+        errors2.ports = `“${p.slice(0, 40)}” não é uma porta válida: use portaDoHost:portaDoContainer, ex.: 8080:80 ou 5353:53/udp.`;
+        break;
+      }
+      const key = `${+m[1]}/${m[3] || "tcp"}`;
+      if (seen2.has(key)) {
+        errors2.ports = `A porta ${key} do host aparece duas vezes.`;
+        break;
+      }
+      seen2.add(key);
+    }
+    if (!errors2.ports && ports2.length > MAX_ITEMS) errors2.ports = `No máximo ${MAX_ITEMS} portas.`;
+    const keys = /* @__PURE__ */ new Set();
+    for (const e of env) {
+      const i = e.indexOf("="), k = e.slice(0, i), v2 = e.slice(i + 1);
+      if (i < 0 || !ENV_RE.test(k)) {
+        errors2.env = `“${e.slice(0, 40)}” não é CHAVE=valor: a chave tem letras, números e _, e não começa com número.`;
+        break;
+      }
+      if (v2.includes("\0") || v2.length > MAX_ENV_VALUE) {
+        errors2.env = `O valor de ${k} tem o caractere NUL ou passa de ${MAX_ENV_VALUE} caracteres.`;
+        break;
+      }
+      if (keys.has(k)) {
+        errors2.env = `${k} aparece duas vezes.`;
+        break;
+      }
+      keys.add(k);
+    }
+    if (!errors2.env && env.length > MAX_ITEMS) errors2.env = `No máximo ${MAX_ITEMS} variáveis.`;
+    const restart = RESTART.find((r) => r === f.restart);
+    if (!restart) errors2.restart = "Escolha uma das opções da lista.";
+    const path = volume.length <= 1024 ? volume.match(VOLUME_RE)?.[1] : void 0;
+    if (volume && (!path || path.split("/").some((s15) => s15 === "." || s15 === "..")))
+      errors2.volume = "Use nome:/caminho/no/container, ex.: dados:/var/lib/postgresql/data. Pasta do host (bind mount) não é aceita.";
+    return { spec: { image, name, ports: ports2, all_interfaces: f.all_interfaces, env, restart: restart || "no", volume }, errors: errors2 };
+  }
 
   // node_modules/@xterm/xterm/lib/xterm.mjs
   var zs = Object.defineProperty;
@@ -10340,7 +10579,7 @@ ${h2.join(`
         ...heads ? [groupHead(k, k ? esc(k) : keys.length > 1 ? "Sem projeto compose" : "Demais containers")] : [],
         ...groups.get(k).map((c) => row(c))
       ])
-    ] : [`<tr data-key="empty" role="row" class="max-lg:block"><td role="cell" colspan="5" class="max-lg:block py-16 px-4 text-center text-muted">${!lastOk ? problem ? "Sem dados ainda." : "Carregando…" : !data.length ? 'Nenhum container ainda. Crie um com <code class="font-mono">docker run</code>.' : `Nenhum container ${label}${q2 ? `corresponde a “${esc(q2)}”` : "agora"}.`}</td></tr>`]);
+    ] : [`<tr data-key="empty" role="row" class="max-lg:block"><td role="cell" colspan="5" class="max-lg:block py-16 px-4 text-center text-muted">${!lastOk ? problem ? "Sem dados ainda." : "Carregando…" : !data.length ? 'Nenhum container ainda. Crie um em “Novo container” ou com <code class="font-mono">docker run</code>.' : `Nenhum container ${label}${q2 ? `corresponde a “${esc(q2)}”` : "agora"}.`}</td></tr>`]);
     dirty = false;
     renderCount();
     renderDlg();
@@ -10508,7 +10747,7 @@ ${h2.join(`
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") closeMenus();
     if (e.key === "Escape" && arming) return disarm();
-    if ($2("#dlg").open || $2("#shell").open || e.ctrlKey || e.metaKey || e.altKey) return;
+    if ([...document.querySelectorAll("dialog")].some((d) => d.open) || e.ctrlKey || e.metaKey || e.altKey) return;
     const el2 = document.activeElement, typing = /^(INPUT|TEXTAREA|SELECT)$/.test(el2.tagName);
     if (e.key === "/" && !typing) {
       e.preventDefault();
@@ -10683,6 +10922,79 @@ ${h2.join(`
     term.dispose();
     document.querySelector(`[data-id="${id}"][data-a="menu"]`)?.focus();
   }
+  var RUN_FIELDS = ["image", "name", "ports", "env", "restart", "volume"];
+  var runField = (k) => $2(`#run-${k}`);
+  var creating = false;
+  function openCreate() {
+    $2("#create-msg").innerHTML = "";
+    $2("#create").showModal();
+    runField("image").focus();
+  }
+  function markRunErrors(errors2) {
+    for (const k of RUN_FIELDS) {
+      if (errors2[k]) runField(k).setAttribute("aria-invalid", "true");
+      else runField(k).removeAttribute("aria-invalid");
+      $2(`#run-${k}-err`).textContent = errors2[k] || "";
+    }
+    const first = RUN_FIELDS.find((k) => errors2[k]);
+    if (first) runField(first).focus();
+    return !first;
+  }
+  function createLabel() {
+    if (!creating) $2("#create-go").textContent = runField("public").checked ? "Criar e expor na rede" : "Criar e iniciar";
+  }
+  async function createContainer(e) {
+    e.preventDefault();
+    if (creating) return;
+    const v2 = (k) => runField(k).value;
+    const { spec, errors: errors2 } = runSpec({
+      image: v2("image"),
+      name: v2("name"),
+      ports: v2("ports"),
+      all_interfaces: runField("public").checked,
+      env: v2("env"),
+      restart: v2("restart"),
+      volume: v2("volume")
+    });
+    $2("#create-msg").innerHTML = "";
+    if (!markRunErrors(errors2)) return;
+    const go2 = $2("#create-go"), label = spec.name || spec.image;
+    creating = true;
+    go2.setAttribute("aria-disabled", "true");
+    go2.textContent = "Criando… (baixa a imagem se faltar)";
+    $2("#create-fields").disabled = true;
+    $2("#shown").textContent = `Criando ${label}…`;
+    let ok = false, msg;
+    try {
+      const r = await api("/api/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(spec) });
+      msg = await r.json();
+      ok = r.ok;
+    } catch {
+      msg = "Sem resposta do servidor do Docker GUI.";
+    }
+    creating = false;
+    go2.removeAttribute("aria-disabled");
+    $2("#create-fields").disabled = false;
+    createLabel();
+    const shown = $2("#create").open;
+    if (!ok) {
+      if (shown) {
+        $2("#create-msg").innerHTML = `<p class="font-medium">Não deu para criar ${esc(label)}.</p>
+        <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-xs">${esc(msg || "Erro sem mensagem.")}</pre>`;
+        go2.focus();
+      } else toast(`Não deu para criar ${label}. ${msg.trim().split("\n").at(-1) || "Erro sem mensagem."}`);
+      return load();
+    }
+    $2("#create-form").reset();
+    markRunErrors({});
+    createLabel();
+    if (shown) $2("#create").close();
+    toast(`${label} criado, conferindo se ficou de pé…`, true);
+    await load();
+    const c = data.find((c2) => msg.startsWith(c2.ID));
+    if (c) confirmUp([c.ID]);
+    else toast(`${label} criado.`, true);
+  }
   var DISK = [
     ["Images", "images", "Imagens", "as imagens que nenhum container usa", "Dá para baixar de novo."],
     ["Local Volumes", "volumes", "Volumes", "os volumes que nenhum container usa", "Os dados deles se perdem."],
@@ -10747,6 +11059,7 @@ ${h2.join(`
     loadHealth,
     loadInspect,
     menuPick,
+    openCreate,
     openShell,
     placeMenu,
     prune,
@@ -10758,6 +11071,9 @@ ${h2.join(`
   $2("#dlg").addEventListener("close", afterClose);
   $2("#shell").addEventListener("close", closeShell);
   $2("#shell").addEventListener("cancel", (e) => e.preventDefault());
+  $2("#create-form").addEventListener("submit", createContainer);
+  $2("#run-public").addEventListener("change", createLabel);
+  $2("#create").addEventListener("close", () => $2("#new").focus());
   $2("#q").oninput = render;
   document.addEventListener("visibilitychange", () => document.hidden || load());
   $2("#notify").hidden = !canAsk();

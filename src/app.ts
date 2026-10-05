@@ -1,6 +1,6 @@
 import {
-  type Bucket, type Container, type ContainerState, type DiskUsage, type Port, type Stats, type Tone,
-  bucket, esc, hasHealth, isProblem, newProblems, ports, project, shortImage, status, tone, usage, workingDir,
+  type Bucket, type Container, type ContainerState, type DiskUsage, type Port, type RunErrors, type RunField, type Stats, type Tone,
+  bucket, esc, hasHealth, isProblem, newProblems, ports, project, runSpec, shortImage, status, tone, usage, workingDir,
 } from './format';
 import {Terminal} from '@xterm/xterm';
 import {FitAddon} from '@xterm/addon-fit';
@@ -367,7 +367,7 @@ function render() {
                              ...groups.get(k)!.map(c => row(c))])]
     : [`<tr data-key="empty" role="row" class="max-lg:block"><td role="cell" colspan="5" class="max-lg:block py-16 px-4 text-center text-muted">${
       !lastOk ? (problem ? 'Sem dados ainda.' : 'Carregando…')  // nunca recebeu dados: não afirma que a lista está vazia
-      : !data.length ? 'Nenhum container ainda. Crie um com <code class="font-mono">docker run</code>.'
+      : !data.length ? 'Nenhum container ainda. Crie um em “Novo container” ou com <code class="font-mono">docker run</code>.'
       : `Nenhum container ${label}${q ? `corresponde a “${esc(q)}”` : 'agora'}.`}</td></tr>`]);
   dirty = false;
   renderCount();
@@ -549,7 +549,7 @@ function disarm(redraw = true) {
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') closeMenus();
   if (e.key === 'Escape' && arming) return disarm();
-  if ($<HTMLDialogElement>('#dlg').open || $<HTMLDialogElement>('#shell').open || e.ctrlKey || e.metaKey || e.altKey) return;
+  if ([...document.querySelectorAll('dialog')].some(d => d.open) || e.ctrlKey || e.metaKey || e.altKey) return;
   const el = document.activeElement as HTMLElement, typing = /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName);
   if (e.key === '/' && !typing) { e.preventDefault(); return $('#q').focus(); }
   if ((e.key === 'z' || e.key === 'Z') && !typing && toastFn) return runToastAction();
@@ -727,6 +727,77 @@ function closeShell() {
   document.querySelector<HTMLElement>(`[data-id="${id}"][data-a="menu"]`)?.focus();
 }
 
+// criar container (docker run -d). O runSpec aponta o erro no campo; o servidor confere tudo de novo e monta o argv
+const RUN_FIELDS: RunField[] = ['image', 'name', 'ports', 'env', 'restart', 'volume'];
+const runField = (k: string) => $<HTMLInputElement>(`#run-${k}`);
+let creating = false;
+
+function openCreate() {
+  $('#create-msg').innerHTML = '';
+  $<HTMLDialogElement>('#create').showModal();
+  runField('image').focus();
+}
+
+// marca os campos com erro e foca o primeiro; devolve true se está tudo certo
+function markRunErrors(errors: RunErrors) {
+  for (const k of RUN_FIELDS) {
+    // aria-invalid="" vale false para o leitor de tela (e para o aria-invalid: do Tailwind): tem que ser "true"
+    if (errors[k]) runField(k).setAttribute('aria-invalid', 'true'); else runField(k).removeAttribute('aria-invalid');
+    $(`#run-${k}-err`).textContent = errors[k] || '';
+  }
+  const first = RUN_FIELDS.find(k => errors[k]);
+  if (first) runField(first).focus();
+  return !first;
+}
+
+// o botão lembra o que vai acontecer: com 0.0.0.0, a porta fica aberta para a rede
+function createLabel() {
+  if (!creating) $('#create-go').textContent = runField('public').checked ? 'Criar e expor na rede' : 'Criar e iniciar';
+}
+
+async function createContainer(e: SubmitEvent) {
+  e.preventDefault();
+  if (creating) return;
+  const v = (k: string) => runField(k).value;
+  const {spec, errors} = runSpec({image: v('image'), name: v('name'), ports: v('ports'), all_interfaces: runField('public').checked,
+                                  env: v('env'), restart: v('restart'), volume: v('volume')});
+  $('#create-msg').innerHTML = '';
+  if (!markRunErrors(errors)) return;
+  const go = $('#create-go'), label = spec.name || spec.image;
+  creating = true;
+  go.setAttribute('aria-disabled', 'true');
+  go.textContent = 'Criando… (baixa a imagem se faltar)';
+  $<HTMLFieldSetElement>('#create-fields').disabled = true;
+  $('#shown').textContent = `Criando ${label}…`;
+  let ok = false, msg: string;
+  try {
+    const r = await api('/api/run', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(spec)});
+    msg = await r.json(); ok = r.ok;
+  } catch { msg = 'Sem resposta do servidor do Docker GUI.'; }
+  creating = false;
+  go.removeAttribute('aria-disabled');
+  $<HTMLFieldSetElement>('#create-fields').disabled = false;
+  createLabel();
+  const shown = $<HTMLDialogElement>('#create').open;  // pode ter sido fechado durante o pull
+  if (!ok) {
+    // o formulário fica como estava, para corrigir e tentar de novo. O docker escreve o progresso do pull no
+    // stderr: no aviso fora do modal vai só a última linha, que é a que explica
+    if (shown) {
+      $('#create-msg').innerHTML = `<p class="font-medium">Não deu para criar ${esc(label)}.</p>
+        <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-xs">${esc(msg || 'Erro sem mensagem.')}</pre>`;
+      go.focus();  // o Enter num campo desabilitado durante o envio deixaria o foco no <body>
+    } else toast(`Não deu para criar ${label}. ${msg.trim().split('\n').at(-1) || 'Erro sem mensagem.'}`);
+    return load();  // run que falha no start (porta ocupada) deixa o container criado e parado
+  }
+  $<HTMLFormElement>('#create-form').reset(); markRunErrors({}); createLabel();
+  if (shown) $<HTMLDialogElement>('#create').close();
+  toast(`${label} criado, conferindo se ficou de pé…`, true);
+  await load();
+  // o ps do docker traz o ID curto e o do podman, o inteiro; o run devolve o inteiro
+  const c = data.find(c => msg.startsWith(c.ID));
+  if (c) confirmUp([c.ID]); else toast(`${label} criado.`, true);
+}
+
 type DiskKind = 'images' | 'volumes' | 'buildcache';
 // [Type do docker system df, categoria da API de prune, rótulo, o que o prune apaga, aviso]; Containers fica de fora:
 // parado se remove na lista. Volumes sem -a no servidor: no Docker 23+ só os anônimos saem
@@ -783,12 +854,15 @@ async function prune(k: DiskKind) {
 // esta lista é a interface completa entre o HTML e o código
 Object.assign(window, {
   act, afterClose, askNotify, clearFilters, composeAct, copyAddr, copyExec, copyLogs, downloadLogs, filterBy, loadDisk,
-  loadHealth, loadInspect, menuPick, openShell, placeMenu, prune, refreshLogs, runToastAction, stackAct, toggleFollow,
+  loadHealth, loadInspect, menuPick, openCreate, openShell, placeMenu, prune, refreshLogs, runToastAction, stackAct, toggleFollow,
 });
 
 $('#dlg').addEventListener('close', afterClose);
 $('#shell').addEventListener('close', closeShell);
 $('#shell').addEventListener('cancel', e => e.preventDefault());  // Esc é do vim/less, não do modal
+$('#create-form').addEventListener('submit', createContainer);
+$('#run-public').addEventListener('change', createLabel);
+$('#create').addEventListener('close', () => $('#new').focus());
 $<HTMLInputElement>('#q').oninput = render;
 // aba escondida não consulta o docker (a não ser com as notificações ligadas: é para elas que serve); ao voltar, atualiza na hora
 document.addEventListener('visibilitychange', () => document.hidden || load());

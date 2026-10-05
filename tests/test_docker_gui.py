@@ -103,7 +103,7 @@ class TokenTest(ServerTest):
             for method, path in (("GET", "/api/containers"), ("GET", "/api/stats"), ("GET", f"/api/logs/{HEX_ID}"),
                                  ("GET", f"/api/health/{HEX_ID}"), ("GET", f"/api/inspect/{HEX_ID}"),
                                  ("GET", f"/api/inspect/{HEX_ID}/env"), ("POST", f"/api/stop/{HEX_ID}"),
-                                 ("GET", "/api/df"), ("POST", "/api/prune/images")):
+                                 ("GET", "/api/df"), ("POST", "/api/prune/images"), ("POST", "/api/run")):
                 status, _ = self.request(method, path, token=token)
                 self.assertEqual(status, 401, (token, method, path))
         self.docker.assert_not_called()
@@ -409,6 +409,148 @@ class ComposeTest(ServerTest):
     def test_requires_token(self):
         status, _ = self.request("POST", "/api/compose/up", token=None, body=self.SHOP)
         self.assertEqual(status, 401)
+        self.docker.assert_not_called()
+
+
+class RunArgvTest(unittest.TestCase):
+    """Corpo do POST /api/run -> argv: cada campo por regex ou lista fixa, e nenhum valor vira flag."""
+
+    def argv(self, **body):
+        return docker_gui.run_argv({"image": "nginx", **body})
+
+    def assertRejected(self, **body):
+        with self.assertRaises((ValueError, TypeError), msg=repr(body)[:80]):
+            self.argv(**body)
+
+    def test_minimal(self):
+        self.assertEqual(self.argv(), ["run", "-d", "--restart=no", "--", "nginx"])
+
+    def test_full(self):
+        argv = self.argv(image="ghcr.io/acme/api:1.4", name="api", ports=["8080:80", "5353:53/udp", "9000:9000/tcp"],
+                         env=["DATABASE_URL=postgres://u:p@db/x?a=1&b=2", "_X=", "MSG=olá; rm -rf / $(id)", "OPT=--privileged"],
+                         restart="unless-stopped", volume="api-data:/var/lib/api")
+        self.assertEqual(argv, [
+            "run", "-d", "--restart=unless-stopped", "--name=api",
+            "-p", "127.0.0.1:8080:80/tcp", "-p", "127.0.0.1:5353:53/udp", "-p", "127.0.0.1:9000:9000/tcp",
+            "-e", "DATABASE_URL=postgres://u:p@db/x?a=1&b=2", "-e", "_X=", "-e", "MSG=olá; rm -rf / $(id)", "-e", "OPT=--privileged",
+            "--mount=type=volume,source=api-data,target=/var/lib/api", "--", "ghcr.io/acme/api:1.4"])
+
+    def test_values_never_look_like_flags(self):
+        # o que vem depois de -p/-e e o que não é flag fixa nunca começa com "-"
+        argv = self.argv(name="a1", ports=["1:1"], env=["A=-x"], volume="v1:/v")
+        for flag, value in zip(argv, argv[1:]):
+            if flag in ("-p", "-e"):
+                self.assertFalse(value.startswith("-"), value)
+        self.assertEqual(argv[-2:], ["--", "nginx"])
+
+    def test_ports_bind_loopback_unless_asked(self):
+        self.assertIn("127.0.0.1:8080:80/tcp", self.argv(ports=["8080:80"]))
+        self.assertIn("127.0.0.1:8080:80/tcp", self.argv(ports=["8080:80"], all_interfaces=False))
+        self.assertIn("0.0.0.0:8080:80/tcp", self.argv(ports=["8080:80"], all_interfaces=True))
+        for v in ("true", 1, None, "0.0.0.0"):
+            self.assertRejected(ports=["8080:80"], all_interfaces=v)
+
+    def test_restart_allowlist(self):
+        self.assertEqual(docker_gui.RESTART, ("no", "on-failure", "unless-stopped", "always"))
+        for r in docker_gui.RESTART:
+            self.assertIn(f"--restart={r}", self.argv(restart=r))
+        for r in ("", "ALWAYS", "on-failure:3", "always --privileged", "-d", "sempre", None, 1):
+            self.assertRejected(restart=r)
+
+    def test_valid_images(self):
+        for image in ("nginx", "nginx:1.25-alpine", "library/nginx:latest", "docker.io/library/redis:7",
+                      "ghcr.io/acme/api:1.4", "localhost:5000/minha_app:v1.0", "registry-1.example.com:443/a/b/c",
+                      "my.app__x-y", f"redis@sha256:{'a' * 64}", f"redis:7@sha256:{'0' * 64}"):
+            self.assertEqual(self.argv(image=image)[-2:], ["--", image], image)
+
+    def test_flag_injection_in_image(self):
+        for image in ("", "-it", "--privileged", "--network=host", "-v/:/host", "--rm", "-", " nginx", "nginx ",
+                      "nginx --privileged", "nginx;id", "nginx\nid", "nginx\n", "Nginx", "nginx:", ":latest", "nginx:-x",
+                      "nginx@sha256:abc", "nginx@md5:" + "a" * 32, "../nginx", "/nginx", "a//b", "nginx$(id)", "ngínx",
+                      "a" * 600, None, 1, ["nginx"]):
+            self.assertRejected(image=image)
+        with self.assertRaises(ValueError):
+            docker_gui.run_argv({})  # imagem é obrigatória
+
+    def test_bad_names(self):
+        for name in ("a", "-x", "--privileged", "--name=x", ".web", "_web", "web app", "web;id", "../x", "web/x",
+                     "wéb", "x" * 129, "web\n", 1):
+            self.assertRejected(name=name)
+        self.assertIn("--name=a1", self.argv(name="a1"))
+        self.assertFalse(any(a.startswith("--name") for a in self.argv(name="")))  # vazio: o docker escolhe
+
+    def test_bad_ports(self):
+        for port in ("8080", "0:80", "80:0", "65536:80", "80:65536", "99999:80", "8080:80/sctp", "8080:80/TCP",
+                     "127.0.0.1:8080:80", "0.0.0.0:8080:80", "8080-8090:80", "-p", "--privileged", " 8080:80",
+                     "8080:80 ", "8080:80/tcp/x", "8080:80\n", "8080:٨٠", ":80", "8080:", 8080):
+            self.assertRejected(ports=[port])
+        self.assertRejected(ports="8080:80")  # lista, não string
+        self.assertRejected(ports=["8080:80", "8080:81"])  # mesma porta do host
+        self.assertRejected(ports=[f"{p}:80" for p in range(1, docker_gui.MAX_ITEMS + 2)])
+        self.assertIn("127.0.0.1:53:53/udp", self.argv(ports=["53:53/tcp", "53:53/udp"]))  # tcp e udp não colidem
+
+    def test_bad_env(self):
+        for env in ("A", "=x", "1A=x", "A-B=x", "A B=x", "-e=x", "--privileged=1", "A.B=x", "Á=x", " A=x",
+                    "A=x\0y", "A=" + "x" * (docker_gui.MAX_ENV_VALUE + 1), "K" * 300 + "=x", 1):
+            self.assertRejected(env=[env])
+        self.assertRejected(env="A=1")
+        self.assertRejected(env=["A=1", "A=2"])
+        big = "A=" + "x" * docker_gui.MAX_ENV_VALUE
+        self.assertIn(big, self.argv(env=[big]))
+        self.assertIn("MULTI=a\nb = c", self.argv(env=["MULTI=a\nb = c"]))  # o valor é livre, fora o NUL
+
+    def test_bad_volumes(self):
+        for volume in ("/etc:/x", "/:/host", "./data:/data", "../data:/data", "~/data:/data", "data", "data:",
+                       "data:relative", "data:/", "data:/x:ro", "data:/x,type=bind", "data:/a/../b", "data:/a/./b",
+                       "data:/..", "data:/a//b", "d:/data", "C:/data", "-v:/x", "--privileged:/x", "data :/x",
+                       "data:/a b", "data:/x\n", "data/x:/y", "x" * 129 + ":/data", "data:" + "/a" * 600, 1):
+            self.assertRejected(volume=volume)
+        self.assertIn("--mount=type=volume,source=pg.data_1,target=/var/lib/postgresql/data",
+                      self.argv(volume="pg.data_1:/var/lib/postgresql/data"))
+
+    def test_unsupported_fields_are_rejected(self):
+        # nada é ignorado em silêncio: pedir --privileged recusa o pedido inteiro
+        for key in ("privileged", "cap_add", "network", "pid", "devices", "command", "entrypoint", "volumes", "user"):
+            with self.assertRaises(ValueError) as cm:
+                docker_gui.run_argv({"image": "nginx", key: True})
+            self.assertIn(key, str(cm.exception))
+        for body in (None, [], "nginx", ["image", "nginx"]):
+            self.assertRaises(TypeError, docker_gui.run_argv, body)
+
+
+class RunTest(ServerTest):
+
+    def test_runs_argv_and_returns_id(self):
+        cid = "f" * 64
+        self.docker.return_value = ok(cid + "\n", "Unable to find image 'nginx:latest' locally\nlatest: Pulling from library/nginx\n")
+        body = {"image": "nginx", "name": "web", "ports": ["8080:80"], "env": ["A=1"], "restart": "always"}
+        self.assertEqual(self.request("POST", "/api/run", body=body), (200, cid))
+        self.docker.assert_called_once_with(*docker_gui.run_argv(body), timeout=docker_gui.RUN_TIMEOUT)
+        self.assertGreaterEqual(docker_gui.RUN_TIMEOUT, 300)  # pode baixar a imagem
+
+    def test_docker_error_is_500_with_stderr(self):
+        self.docker.return_value = subprocess.CompletedProcess([], 125, "", "docker: Error response from daemon: port is already allocated.\n")
+        self.assertEqual(self.request("POST", "/api/run", body={"image": "nginx"}),
+                         (500, "docker: Error response from daemon: port is already allocated."))
+
+    def test_invalid_body_is_400_without_docker(self):
+        for body in (None, "", "não é json", "[]", '"nginx"', "{}", b"\xff\xfe",
+                     {"image": "--privileged"}, {"image": "nginx", "privileged": True},
+                     {"image": "nginx", "ports": ["0.0.0.0:80:80"]}, {"image": "nginx", "env": ["-e"]},
+                     {"image": "nginx", "restart": "on-failure:5"}, {"image": "nginx", "volume": "/:/host"},
+                     {"image": "nginx", "env": ["A=" + "x" * docker_gui.MAX_BODY]}):
+            status, msg = self.request("POST", "/api/run", body=body)
+            self.assertEqual(status, 400, repr(body)[:60])
+            self.assertIsInstance(msg, str)
+        self.docker.assert_not_called()
+
+    def test_validation_message_names_the_field(self):
+        self.assertEqual(self.request("POST", "/api/run", body={"image": "nginx", "restart": "x"}),
+                         (400, "restart inválido: use no, on-failure, unless-stopped, always"))
+
+    def test_get_does_not_run(self):
+        status, _ = self.request("GET", "/api/run")
+        self.assertEqual(status, 404)
         self.docker.assert_not_called()
 
 
@@ -852,6 +994,26 @@ class RealDockerTest(ServerTest):
         self.assertTrue({"Images", "Local Volumes", "Build Cache"} <= {r["Type"] for r in rows})
         for field in ("TotalCount", "Active", "Size", "Reclaimable"):
             self.assertIn(field, rows[0])  # campos que a página lê
+
+    def test_run(self):
+        # o docker de verdade aceita o argv do run_argv: porta só no loopback, env num item só, volume nomeado
+        name = f"docker-gui-test-run-{os.getpid()}"
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        self.addCleanup(subprocess.run, ["docker", "volume", "rm", "-f", name], capture_output=True, check=False)
+        self.addCleanup(subprocess.run, ["docker", "rm", "-f", name], capture_output=True, check=False)
+        status, cid = self.request("POST", "/api/run", body={
+            "image": self.IMAGE, "name": name, "ports": [f"{port}:80"], "env": ["MSG=a b; $(id)"],
+            "restart": "on-failure", "volume": f"{name}:/data"})
+        self.assertEqual(status, 200, cid)
+        r = subprocess.run(["docker", "inspect", "--format", "{{json .}}", cid], capture_output=True, text=True, check=True)
+        info = json.loads(r.stdout)
+        self.assertEqual(info["Name"], "/" + name)
+        self.assertEqual(info["HostConfig"]["RestartPolicy"]["Name"], "on-failure")
+        self.assertEqual(info["HostConfig"]["PortBindings"], {"80/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(port)}]})
+        self.assertIn("MSG=a b; $(id)", info["Config"]["Env"])
+        self.assertEqual([(m["Type"], m["Name"], m["Destination"]) for m in info["Mounts"]], [("volume", name, "/data")])
 
     def test_action_on_missing_container(self):
         status, err = self.request("POST", f"/api/stop/{'0' * 64}")

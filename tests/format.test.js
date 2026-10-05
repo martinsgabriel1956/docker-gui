@@ -164,3 +164,47 @@ test('usage mostra CPU e a memória usada; o limite fica no title', () => {
   assert.deepEqual(f.usage({ID: 'a', CPUPerc: '0.52%', MemUsage: '10.5MiB / 1.944GiB', MemPerc: '0.53%'}),
                    ['CPU 0.52% · RAM 10.5MiB', 'Memória: 10.5MiB / 1.944GiB (0.53%)']);
 });
+
+// criar container: as mesmas regras do run_argv do servidor (RunArgvTest em tests/test_docker_gui.py)
+const form = (o = {}) => ({image: 'nginx', name: '', ports: '', all_interfaces: false, env: '', restart: 'no', volume: '', ...o});
+const errs = o => f.runSpec(form(o)).errors;
+
+test('runSpec monta o corpo do POST /api/run', () => {
+  assert.deepEqual(f.runSpec(form({
+    image: ' ghcr.io/acme/api:1.4 ', name: 'api', ports: '8080:80, 5353:53/udp\n9000:9000/tcp', all_interfaces: true,
+    env: 'A=1\n\n# comentário\nB=x=y\r\nMSG=olá; $(id)\nVAZIA=', restart: 'unless-stopped', volume: 'dados:/var/lib/x',
+  })), {
+    spec: {image: 'ghcr.io/acme/api:1.4', name: 'api', ports: ['8080:80', '5353:53/udp', '9000:9000/tcp'], all_interfaces: true,
+           env: ['A=1', 'B=x=y', 'MSG=olá; $(id)', 'VAZIA='], restart: 'unless-stopped', volume: 'dados:/var/lib/x'},
+    errors: {},
+  });
+  assert.deepEqual(f.runSpec(form()).spec, {image: 'nginx', name: '', ports: [], all_interfaces: false, env: [], restart: 'no', volume: ''});
+});
+
+test('runSpec aceita as imagens que o docker aceita', () => {
+  for (const image of ['nginx', 'nginx:1.25-alpine', 'library/nginx:latest', 'localhost:5000/minha_app:v1.0',
+                       'registry-1.example.com:443/a/b/c', 'my.app__x-y', `redis@sha256:${'a'.repeat(64)}`, `redis:7@sha256:${'0'.repeat(64)}`])
+    assert.deepEqual(errs({image}), {}, image);
+});
+
+test('runSpec recusa imagem que vira flag ou foge do formato', () => {
+  for (const image of ['', '-it', '--privileged', '--network=host', 'nginx --privileged', 'nginx;id', 'Nginx', 'nginx:',
+                       ':latest', 'nginx:-x', 'nginx@sha256:abc', '../nginx', '/nginx', 'a//b', 'nginx$(id)', 'a'.repeat(600)])
+    assert.ok(errs({image}).image, image);
+});
+
+test('runSpec confere nome, portas, env, restart e volume', () => {
+  for (const name of ['a', '-x', '--privileged', '.web', 'web app', 'web;id', 'web/x', 'wéb', 'x'.repeat(129)])
+    assert.ok(errs({name}).name, name);
+  for (const ports of ['8080', '0:80', '65536:80', '8080:80/sctp', '127.0.0.1:8080:80', '8080-8090:80', '-p', '8080:80 8080:81'])
+    assert.ok(errs({ports}).ports, ports);
+  assert.deepEqual(errs({ports: '53:53/tcp 53:53/udp'}), {});  // tcp e udp não colidem
+  for (const env of ['A', '=x', '1A=x', 'A-B=x', '-e=x', 'A.B=x', ' A=x', 'A=1\nA=2', `A=${'x'.repeat(f.MAX_ENV_VALUE + 1)}`])
+    assert.ok(errs({env}).env, env);
+  for (const restart of ['', 'ALWAYS', 'on-failure:3', 'sempre']) assert.ok(errs({restart}).restart, restart);
+  for (const r of f.RESTART) assert.deepEqual(errs({restart: r}), {}, r);
+  for (const volume of ['/etc:/x', './data:/data', '~/d:/d', 'data', 'data:rel', 'data:/', 'data:/x:ro', 'data:/x,type=bind',
+                        'data:/a/../b', 'C:/data', '-v:/x', 'data:/a b'])
+    assert.ok(errs({volume}).volume, volume);
+  assert.deepEqual(errs({volume: 'pg.data_1:/var/lib/postgresql/data'}), {});
+});

@@ -29,6 +29,8 @@ A saída do `podman ps` tem outro formato (`Names` em lista, portas como objetos
 - **Faixa "Precisa de atenção"** com o que está quebrado: healthcheck falhando, loop de reinício e saída com código diferente de zero. O status vem traduzido, por exemplo "Saiu com código 137 · morto à força ou sem memória (OOM)".
 - **Agrupamento por projeto do compose** (`com.docker.compose.project`), com **Iniciar / Reiniciar / Parar tudo** e "Iniciar de novo" para desfazer.
 - **`compose up` / `pull` / `down` por projeto**, com a pasta e os arquivos do compose lidos dos labels dos containers (o servidor nunca confia num caminho vindo da página). O `down` pede confirmação em 2 passos: os volumes ficam, mas o projeto some da lista e só volta com `up` pelo terminal.
+- **Criar container** ("+ Novo container"): um `docker run -d` com poucas opções: imagem (`repo[:tag]` ou `repo@sha256:…`), nome, portas (`hostPort:containerPort[/tcp|udp]`), variáveis de ambiente (`CHAVE=valor`, uma por linha), restart policy (`no`, `on-failure`, `unless-stopped` ou `always`) e um volume nomeado (`nome:/caminho/no/container`). As portas ficam em `127.0.0.1` (só a sua máquina acessa); publicar em `0.0.0.0` é uma caixa à parte, com aviso. Se a imagem faltar, o `run` a baixa antes (até 10 min). Depois, como no Iniciar, a ferramenta confere se o container ficou de pé. O Podman aceita as mesmas flags.
+  De propósito, fica de fora tudo que dá ao container acesso ao host e o comando livre: pasta do host (bind mount), `--privileged`, `--cap-add`, `--network host`, `--pid host`, devices e comando ou entrypoint próprio. Para isso, use o terminal.
 - **Ações por container:** iniciar, parar, reiniciar, pausar, retomar e remover (com confirmação em 2 passos). Depois de iniciar, a ferramenta confere se o container ficou de pé. Depois de pausar, o aviso oferece "Retomar" (atalho `Z`).
 - **Logs** com timestamps, acompanhamento ao vivo, botões de copiar e de baixar (.log) e ações no próprio modal. Mostra também a saída do último healthcheck.
 - **Configuração** no modal de logs: restart policy, redes, mounts e env, do `docker inspect`. Os valores do env chegam mascarados e só saem do servidor quando você clica em Revelar.
@@ -57,8 +59,12 @@ O servidor só escuta em `127.0.0.1` e foi pensado para uso local em máquina de
 | Cabeçalho próprio, sem CORS | Sites maliciosos chamando a API pelo seu navegador (CSRF) |
 | Validação do cabeçalho `Host` | DNS rebinding |
 | IDs só em hex, lista fixa de ações e nenhum shell no host | Injeção de comando |
+| Criar container: corpo JSON de até 64 KiB, cada campo conferido por regex ou lista fixa, campo desconhecido recusa o pedido, argv montado item a item, nenhum valor começa com `-` e `--` antes da imagem | Injeção de flags (`--privileged`, `-v /:/host`…) e de comando |
+| Criar container: só volume nomeado (via `--mount type=volume`), sem bind mount, `--privileged`, `--cap-add`, rede/PID do host, devices nem comando livre | Container criado pela página com acesso ao host (`/` montado, `--privileged`): a GUI não amplia o que o `docker` já permite |
+| Criar container: portas publicadas em `127.0.0.1`; `0.0.0.0` só marcando a caixa, com aviso | Serviço de desenvolvimento exposto para a rede (o Docker passa por cima do ufw/firewalld) |
+| Criar container: o env sempre vai como `-e CHAVE=valor` (com `=`) | `-e CHAVE` sozinho, que copiaria a variável do ambiente do próprio `docker_gui.py` para o container |
 | Terminal: `Origin` conferido (só a própria página) e token na query do WebSocket | Sites maliciosos abrindo um shell no container pelo seu navegador (cross-site WebSocket hijacking) |
-| Timeout em toda chamada ao `docker` (15 s para leitura, 120 s para ações) | Daemon travado acumulando threads presas |
+| Timeout em toda chamada ao `docker` (15 s para leitura, 120 s para ações, 10 min para `run` e `compose`, que podem baixar imagens) | Daemon travado acumulando threads presas |
 
 O token chega à página pelo `#fragmento` do link: o fragmento não é enviado ao servidor e sai da URL assim que a página carrega. Ele fica no `localStorage`, que é isolado por porta, e não em cookie, que vazaria para outros servidores em `localhost`. Cada execução gera um token novo. Se a página mostrar "sem token", abra o link impresso no terminal.
 
@@ -109,7 +115,7 @@ As funções de `src/format.ts` têm testes próprios. O Node (22.18+) importa o
 node --test tests/format.test.js
 ```
 
-Os testes de UI usam o [Playwright](https://playwright.dev) e cobrem o que a página faz na tela: agrupamento e faixa de atenção, filtros e atalhos, ações (incluindo a remoção em 2 passos e o "conferindo se ficou de pé"), modal de logs, terminal, healthcheck, estados de erro e o que o redesenho a cada 2 s preserva (foco, seleção de texto, menus abertos). Cada teste sobe o próprio `docker_gui.py` contra um `docker` falso (`tests/e2e/fake-docker/docker`), que lê os containers de um JSON. Assim dá para montar cenários exatos (healthcheck falhando, loop de reinício, ação que falha ou demora) sem precisar de daemon:
+Os testes de UI usam o [Playwright](https://playwright.dev) e cobrem o que a página faz na tela: agrupamento e faixa de atenção, filtros e atalhos, ações (incluindo a remoção em 2 passos e o "conferindo se ficou de pé"), criação de container, modal de logs, terminal, healthcheck, estados de erro e o que o redesenho a cada 2 s preserva (foco, seleção de texto, menus abertos). Cada teste sobe o próprio `docker_gui.py` contra um `docker` falso (`tests/e2e/fake-docker/docker`), que lê os containers de um JSON. Assim dá para montar cenários exatos (healthcheck falhando, loop de reinício, ação que falha ou demora) sem precisar de daemon:
 
 ```bash
 npx playwright install chromium   # uma vez

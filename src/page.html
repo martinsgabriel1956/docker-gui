@@ -10,10 +10,13 @@
 <main class="max-w-7xl mx-auto px-4 py-8">
   <header class="flex flex-wrap items-start justify-between gap-4 mb-6">
     <div>
-      <h1 class="text-2xl font-semibold text-fg-strong tracking-tight flex items-center gap-2.5">
-        <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" class="size-6 text-accent"><path d="M12 2.5 3.5 7v10l8.5 4.5 8.5-4.5V7z"/><path d="M3.5 7 12 11.5 20.5 7M12 11.5v10"/></svg>
-        Containers
-      </h1>
+      <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <h1 class="text-2xl font-semibold text-fg-strong tracking-tight flex items-center gap-2.5">
+          <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" class="size-6 text-accent"><path d="M12 2.5 3.5 7v10l8.5 4.5 8.5-4.5V7z"/><path d="M3.5 7 12 11.5 20.5 7M12 11.5v10"/></svg>
+          Containers
+        </h1>
+        <button id="new" onclick="openCreate()" class="px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 rounded-md text-sm font-medium ring-1 ring-accent/40 bg-accent/10 text-accent-fg hover:bg-accent/20 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">+ Novo container</button>
+      </div>
       <div id="count" role="group" aria-label="Filtrar por estado" class="flex flex-wrap gap-1 mt-2 text-sm text-muted">Carregando…</div>
     </div>
     <div class="w-full sm:w-72">
@@ -88,6 +91,83 @@
       <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="size-4"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
   </div>
   <div id="shell-box" class="h-[65vh] p-2 bg-black"></div>
+</dialog>
+
+<!-- docker run -d com poucas opções, nenhuma que amplie o acesso ao host (bind mount, --privileged, --cap-add, rede/PID
+     do host, devices, comando livre). O app.ts aponta o erro no campo; o servidor confere tudo de novo (run_argv) -->
+<dialog id="create" aria-labelledby="create-title" aria-describedby="create-desc" class="m-auto w-[min(640px,95vw)] rounded-xl bg-raised text-fg-soft ring-1 ring-line-strong backdrop:bg-black/70 p-0">
+  <form id="create-form" novalidate>
+    <div class="px-4 py-3 border-b border-line flex items-start gap-3">
+      <div class="mr-auto min-w-0">
+        <h2 id="create-title" class="text-lg font-semibold text-fg-strong">Novo container</h2>
+        <p id="create-desc" class="text-sm mt-0.5 text-muted">Cria e inicia com <code class="font-mono">docker run -d</code>. Se a imagem faltar, ela é baixada antes.</p>
+      </div>
+      <button type="button" onclick="create.close()" aria-label="Fechar" class="shrink-0 grid place-items-center size-8 max-lg:size-11 rounded-md text-muted hover:text-fg-strong hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent">
+        <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="size-4"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
+    </div>
+    <fieldset id="create-fields" class="px-4 py-4 space-y-4 max-h-[65vh] overflow-auto text-sm">
+      <div>
+        <label for="run-image" class="block font-medium text-fg-strong">Imagem</label>
+        <input id="run-image" required autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="nginx:1.27" aria-describedby="run-image-err"
+          class="mt-1 w-full rounded-lg bg-canvas ring-1 ring-line px-3 py-2 max-lg:py-3 font-mono text-fg-strong placeholder:text-dim focus:ring-accent aria-invalid:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+        <p id="run-image-err" class="empty:hidden mt-1 text-xs text-bad-fg"></p>
+      </div>
+      <div>
+        <label for="run-name" class="block font-medium text-fg-strong">Nome <span class="font-normal text-muted">(opcional; sem ele, o docker sorteia um)</span></label>
+        <input id="run-name" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="web" aria-describedby="run-name-err"
+          class="mt-1 w-full rounded-lg bg-canvas ring-1 ring-line px-3 py-2 max-lg:py-3 font-mono text-fg-strong placeholder:text-dim focus:ring-accent aria-invalid:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+        <p id="run-name-err" class="empty:hidden mt-1 text-xs text-bad-fg"></p>
+      </div>
+      <div class="group">
+        <label for="run-ports" class="block font-medium text-fg-strong">Portas</label>
+        <input id="run-ports" autocomplete="off" spellcheck="false" placeholder="8080:80, 5353:53/udp" aria-describedby="run-ports-hint run-ports-err"
+          class="mt-1 w-full rounded-lg bg-canvas ring-1 ring-line px-3 py-2 max-lg:py-3 font-mono text-fg-strong placeholder:text-dim focus:ring-accent aria-invalid:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+        <p id="run-ports-hint" class="mt-1 text-xs text-muted">portaDoHost:portaDoContainer, separadas por vírgula ou espaço. Ficam só em <code class="font-mono">127.0.0.1</code>: só esta máquina acessa.</p>
+        <p id="run-ports-err" class="empty:hidden mt-1 text-xs text-bad-fg"></p>
+        <label class="mt-2 flex items-start gap-2 w-fit max-lg:py-2 cursor-pointer">
+          <input id="run-public" type="checkbox" aria-describedby="run-public-warn" class="mt-0.5 size-4 accent-danger focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+          <span>Publicar em todas as interfaces (<code class="font-mono">0.0.0.0</code>)</span>
+        </label>
+        <p id="run-public-warn" class="hidden group-has-checked:block mt-1.5 rounded-lg ring-1 ring-bad/40 bg-bad/10 px-3 py-2 text-xs text-bad-soft">
+          Atenção: qualquer máquina que alcance a sua (Wi-Fi, VPN, rede do escritório) passa a acessar essas portas,
+          e o Docker abre as portas por cima do firewall do sistema (ufw, firewalld). Só marque se precisar mesmo.</p>
+      </div>
+      <div>
+        <label for="run-env" class="block font-medium text-fg-strong">Variáveis de ambiente</label>
+        <textarea id="run-env" rows="3" spellcheck="false" autocapitalize="off" placeholder="CHAVE=valor (uma por linha)" aria-describedby="run-env-hint run-env-err"
+          class="mt-1 w-full rounded-lg bg-canvas ring-1 ring-line px-3 py-2 font-mono text-fg-strong placeholder:text-dim focus:ring-accent aria-invalid:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"></textarea>
+        <p id="run-env-hint" class="mt-1 text-xs text-muted">Linhas em branco e com <code class="font-mono">#</code> são ignoradas. Os valores ficam visíveis no <code class="font-mono">docker inspect</code>.</p>
+        <p id="run-env-err" class="empty:hidden mt-1 text-xs text-bad-fg"></p>
+      </div>
+      <div class="grid sm:grid-cols-2 gap-4">
+        <div>
+          <label for="run-restart" class="block font-medium text-fg-strong">Restart</label>
+          <select id="run-restart" aria-describedby="run-restart-err"
+            class="mt-1 w-full rounded-lg bg-canvas ring-1 ring-line px-3 py-2 max-lg:py-3 text-fg-strong focus:ring-accent aria-invalid:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+            <option value="no">no · não reinicia</option>
+            <option value="on-failure">on-failure · se sair com erro</option>
+            <option value="unless-stopped">unless-stopped · sempre, menos se você parar</option>
+            <option value="always">always · sempre</option>
+          </select>
+          <p id="run-restart-err" class="empty:hidden mt-1 text-xs text-bad-fg"></p>
+        </div>
+        <div>
+          <label for="run-volume" class="block font-medium text-fg-strong">Volume <span class="font-normal text-muted">(opcional)</span></label>
+          <input id="run-volume" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="dados:/var/lib/data" aria-describedby="run-volume-hint run-volume-err"
+            class="mt-1 w-full rounded-lg bg-canvas ring-1 ring-line px-3 py-2 max-lg:py-3 font-mono text-fg-strong placeholder:text-dim focus:ring-accent aria-invalid:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+          <p id="run-volume-hint" class="mt-1 text-xs text-muted">Volume nomeado (criado se não existir): nome:/caminho/no/container.</p>
+          <p id="run-volume-err" class="empty:hidden mt-1 text-xs text-bad-fg"></p>
+        </div>
+      </div>
+      <p class="text-xs text-muted">Ficam de fora, para a GUI não ampliar o acesso ao host: pasta do host (bind mount), <code class="font-mono">--privileged</code>,
+        <code class="font-mono">--cap-add</code>, rede e PID do host, devices e comando ou entrypoint próprio. Para isso, use o terminal.</p>
+    </fieldset>
+    <div id="create-msg" role="alert" class="empty:hidden mx-4 mb-3 max-h-40 overflow-auto rounded-lg ring-1 ring-bad/40 bg-bad/10 px-3 py-2 text-sm text-bad-soft"></div>
+    <div class="px-4 py-3 border-t border-line flex justify-end gap-2">
+      <button type="button" onclick="create.close()" class="px-3 py-1.5 max-lg:min-h-11 max-lg:px-4 rounded-md text-sm font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Cancelar</button>
+      <button id="create-go" type="submit" class="px-3 py-1.5 max-lg:min-h-11 max-lg:px-4 rounded-md text-sm font-medium ring-1 ring-accent/40 bg-accent/15 text-accent-fg hover:bg-accent/25 aria-disabled:opacity-60 aria-disabled:cursor-wait focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Criar e iniciar</button>
+    </div>
+  </form>
 </dialog>
 
 <div id="toast" role="status" aria-live="polite" class="fixed bottom-4 right-4 max-w-md"></div>
