@@ -28,7 +28,10 @@ A saída do `podman ps` tem outro formato (`Names` em lista, portas como objetos
 - **CPU e memória** de cada container rodando, do `docker stats`, atualizadas a cada 5s (num poll à parte, porque o stats leva uns 2s para medir).
 - **Faixa "Precisa de atenção"** com o que está quebrado: healthcheck falhando, loop de reinício e saída com código diferente de zero. O status vem traduzido, por exemplo "Saiu com código 137 · morto à força ou sem memória (OOM)".
 - **Agrupamento por projeto do compose** (`com.docker.compose.project`), com **Iniciar / Reiniciar / Parar tudo** e "Iniciar de novo" para desfazer.
-- **`compose up` / `pull` / `down` por projeto**, com a pasta e os arquivos do compose lidos dos labels dos containers (o servidor nunca confia num caminho vindo da página). O `down` pede confirmação em 2 passos: os volumes ficam, mas o projeto some da lista e só volta com `up` pelo terminal.
+- **`compose up` / `up --build` / `pull` / `down` por projeto**, com a pasta e os arquivos do compose lidos dos labels dos containers (o servidor nunca confia num caminho vindo da página). O `down` pede confirmação em 2 passos: os volumes ficam, mas o projeto some da lista e só volta com `up` pelo terminal.
+- **Reiniciar um serviço** pelo menu "⋯" de um container do compose: `docker compose restart <serviço>`, que reinicia todas as réplicas do serviço e depois confere se ficaram de pé. O nome do serviço também sai dos labels: o servidor só aceita um serviço que exista no projeto.
+- **Logs do projeto inteiro** pelo botão Logs do cabeçalho do projeto: `docker compose logs`, no mesmo modal dos logs de um container, com o prefixo do serviço em cada linha (`api-1  | …`) e em ordem cronológica. O ao vivo também funciona e para quando todos os containers do projeto param. São as últimas 500 linhas de cada container.
+- Projetos compose só aparecem enquanto têm algum container (rodando ou parado): a pasta do projeto vem dos labels, então um projeto que nunca subiu ou que levou `down` não tem de onde ser lido.
 - **Ações por container:** iniciar, parar, reiniciar, pausar, retomar e remover (com confirmação em 2 passos). Depois de iniciar, a ferramenta confere se o container ficou de pé. Depois de pausar, o aviso oferece "Retomar" (atalho `Z`).
 - **Logs** com timestamps, acompanhamento ao vivo, botões de copiar e de baixar (.log) e ações no próprio modal. Mostra também a saída do último healthcheck.
 - **Configuração** no modal de logs: restart policy, redes, mounts e env, do `docker inspect`. Os valores do env chegam mascarados e só saem do servidor quando você clica em Revelar.
@@ -57,12 +60,13 @@ O servidor só escuta em `127.0.0.1` e foi pensado para uso local em máquina de
 | Cabeçalho próprio, sem CORS | Sites maliciosos chamando a API pelo seu navegador (CSRF) |
 | Validação do cabeçalho `Host` | DNS rebinding |
 | IDs só em hex, lista fixa de ações e nenhum shell no host | Injeção de comando |
+| Compose: pasta, arquivos e serviços só dos labels dos containers; o nome do serviço vai depois de um `--` | Página (ou script) apontando o `docker compose` para outra pasta, outro arquivo ou uma flag |
 | Terminal: `Origin` conferido (só a própria página) e token na query do WebSocket | Sites maliciosos abrindo um shell no container pelo seu navegador (cross-site WebSocket hijacking) |
 | Timeout em toda chamada ao `docker` (15 s para leitura, 120 s para ações) | Daemon travado acumulando threads presas |
 
 O token chega à página pelo `#fragmento` do link: o fragmento não é enviado ao servidor e sai da URL assim que a página carrega. Ele fica no `localStorage`, que é isolado por porta, e não em cookie, que vazaria para outros servidores em `localhost`. Cada execução gera um token novo. Se a página mostrar "sem token", abra o link impresso no terminal.
 
-O WebSocket do navegador não manda cabeçalho próprio, por isso o terminal leva o token na query (`/api/exec/<id>?t=…`). O servidor não registra URLs. Fechar o terminal mata o `docker exec`, mas o shell dentro do container nem sempre morre junto ([moby#9098](https://github.com/moby/moby/issues/9098)): um processo que você deixou rodando nele pode continuar até o container parar.
+O WebSocket do navegador não manda cabeçalho próprio, por isso o terminal leva o token na query (`/api/exec/<id>?t=…`). Os logs ao vivo (Server-Sent Events) também: só as rotas de stream, que só leem, aceitam o token assim. O servidor não registra URLs. Fechar o terminal mata o `docker exec`, mas o shell dentro do container nem sempre morre junto ([moby#9098](https://github.com/moby/moby/issues/9098)): um processo que você deixou rodando nele pode continuar até o container parar.
 
 > Quem consegue rodar `docker` na sua máquina já tem poder equivalente ao de root. O token impede que a GUI amplie esse acesso, mas não substitui o cuidado com quem está no grupo `docker`.
 

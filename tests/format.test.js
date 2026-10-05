@@ -143,6 +143,16 @@ test('workingDir lê a pasta do projeto compose', () => {
   assert.equal(f.workingDir({}), '');
 });
 
+test('service lê o serviço do compose sem confundir com outros labels', () => {
+  const labels = 'com.docker.compose.depends_on=db:service_started:false,redis:service_started:false,'
+               + 'com.docker.compose.project=shop,com.docker.compose.service=api,com.docker.compose.service.extra=x';
+  assert.equal(f.service({Labels: labels}), 'api');
+  assert.equal(f.service({Labels: 'com.docker.compose.service=db'}), 'db');
+  assert.equal(f.service({Labels: 'xcom.docker.compose.service=falso'}), '');
+  assert.equal(f.service({Labels: 'com.docker.compose.project=shop'}), '');
+  assert.equal(f.service({}), '');
+});
+
 test('shortImage tira o host do registry e mantém a tag', () => {
   assert.equal(f.shortImage('ghcr.io/acme/api:1.4'), 'acme/api:1.4');
   assert.equal(f.shortImage('localhost:5000/app:dev'), 'app:dev');

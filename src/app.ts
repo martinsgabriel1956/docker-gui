@@ -1,6 +1,6 @@
 import {
   type Bucket, type Container, type ContainerState, type DiskUsage, type Port, type Stats, type Tone,
-  bucket, esc, hasHealth, isProblem, newProblems, ports, project, shortImage, status, tone, usage, workingDir,
+  bucket, esc, hasHealth, isProblem, newProblems, ports, project, service, shortImage, status, tone, usage, workingDir,
 } from './format';
 import {Terminal} from '@xterm/xterm';
 import {FitAddon} from '@xterm/addon-fit';
@@ -21,13 +21,14 @@ const api = (path: string, opts: RequestInit = {}) =>
 
 type Action = 'start' | 'stop' | 'restart' | 'pause' | 'unpause' | 'remove';
 type RowAction = Action | 'logs';
-type MenuAction = Action | 'exec' | 'shell';
+type MenuAction = Action | 'exec' | 'shell' | 'srestart';
 type ProblemKind = 'docker' | 'perm' | 'server' | 'auth';
 // [título, dica (HTML confiável), detalhe técnico, tipo]
 type Problem = [title: string, hint: string, detail: unknown, kind: ProblemKind];
 type ToastAction = [label: string, fn: () => unknown];
 type RowError = {msg: string; state: ContainerState; what: string};
-type ComposeAction = 'up' | 'down' | 'pull';
+// rebuild = up --build; restart é por serviço (o resto vale para o projeto inteiro)
+type ComposeAction = 'up' | 'rebuild' | 'down' | 'pull' | 'restart';
 // confirmação em 2 passos pendente: remover um container, derrubar um projeto (id = "stack-<projeto>") ou limpar
 // uma categoria do disco; a é o data-a do botão e note vai para o leitor de tela
 type Arming = {id: string; name: string; a: 'remove' | 'down' | 'prune'; note: string; at: number; timer: number};
@@ -41,7 +42,8 @@ type Row = HTMLElement & {_html?: string};
 const LABEL: Record<RowAction, string> = {start: 'Iniciar', stop: 'Parar', restart: 'Reiniciar', pause: 'Pausar', unpause: 'Retomar', logs: 'Logs', remove: 'Remover'};
 const VERB: Record<Action, string> = {start: 'Iniciando…', stop: 'Parando…', restart: 'Reiniciando…', pause: 'Pausando…', unpause: 'Retomando…', remove: 'Removendo…'};
 const DONE: Record<Action, string> = {start: 'iniciado', stop: 'parado', restart: 'reiniciado', pause: 'pausado', unpause: 'retomado', remove: 'removido'};
-const COMPOSE_VERB: Record<ComposeAction, string> = {up: 'Subindo…', down: 'Derrubando…', pull: 'Baixando…'};
+const COMPOSE_VERB: Record<ComposeAction, string> = {up: 'Subindo…', rebuild: 'Reconstruindo…', down: 'Derrubando…', pull: 'Baixando…', restart: 'Reiniciando…'};
+const COMPOSE_CMD: Record<ComposeAction, string> = {up: 'compose up', rebuild: 'compose up --build', down: 'compose down', pull: 'compose pull', restart: 'compose restart'};
 // cada estado tem posições fixas de botão, assim Logs fica sempre no mesmo lugar (dead não inicia, só remove)
 const PRIMARY: Partial<Record<ContainerState, Action>> = {running: 'stop', restarting: 'stop', paused: 'unpause', exited: 'start', created: 'start'};
 const SECONDARY: Partial<Record<ContainerState, Action>> = {running: 'restart', paused: 'stop'};
@@ -65,7 +67,9 @@ const BTN = 'px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md t
 let data: Container[] = [], busy = new Map<string, Action>(), composing = new Map<string, ComposeAction>(), errors = new Map<string, RowError>(), lastOk: Date | null = null,
     problem = '', problemKind: ProblemKind | '' = '', only: Bucket | '' = '',
     toastTimer: number | undefined, logId: string | null = null, stream: EventSource | null = null, pending: string[] = [],
-    arming: Arming | null = null, lastSay = '', dirty = false, seen: Set<string> | null = null;
+    arming: Arming | null = null, lastSay = '', dirty = false, seen: Set<string> | null = null,
+    // modal de logs com o projeto compose inteiro (logId fica null); a pasta vai junto para o servidor conferir
+    logProject: {project: string; dir: string} | null = null;
 
 let toastFn: (() => unknown) | null = null;
 function toast(msg: string, ok = false, action: ToastAction | null = null) {
@@ -247,7 +251,8 @@ async function loadHealth(id: string) {
 
 const rowCache = new Map<string, {sig: string; html: string}>();
 function row(c: Container, withProject = false) {
-  const sig = JSON.stringify([c, withProject, busy.get(c.ID), arming?.id === c.ID, errors.get(c.ID), health[c.ID + c.Status], stats[c.ID], TOUCH]);
+  const sig = JSON.stringify([c, withProject, busy.get(c.ID), arming?.id === c.ID, errors.get(c.ID), health[c.ID + c.Status], stats[c.ID],
+                             composing.has(project(c)), TOUCH]);
   const hit = rowCache.get(c.ID);
   if (hit?.sig === sig) return hit.html;
   const html = rowHtml(c, withProject);
@@ -264,7 +269,8 @@ function rowHtml(c: Container, withProject: boolean) {
     `<button data-id="${c.ID}" data-a="${a}" ${b && a !== 'logs' ? 'aria-disabled="true"' : ''}
       aria-label="${aria}" aria-describedby="st-${c.ID}" onclick="act('${a}','${c.ID}')" class="lg:w-20 shrink-0 ${BTN} ${cls}">${text}</button>`;
   // ações raras (reiniciar, pausar, remover, exec) ficam no "⋯": a linha mostra só a ação principal e Logs
-  const more = [sec && [sec, LABEL[sec]], c.State === 'running' && ['pause', 'Pausar'],
+  const svc = p && workingDir(c) && service(c);  // compose restart só com a pasta no label, como o compose up
+  const more = [sec && [sec, LABEL[sec]], svc && ['srestart', `Reiniciar serviço ${esc(svc)}`], c.State === 'running' && ['pause', 'Pausar'],
                 c.State === 'running' && ['shell', 'Abrir terminal'], c.State === 'running' && ['exec', 'Copiar docker exec'],
                 removable(c) && ['remove', 'Remover…']].filter((x): x is [MenuAction, string] => !!x);
   const item = 'block w-full text-left px-3 py-2 max-lg:py-3 rounded-md text-sm hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent';
@@ -273,7 +279,8 @@ function rowHtml(c: Container, withProject: boolean) {
         class="list-none [&::-webkit-details-marker]:hidden cursor-pointer grid place-items-center lg:w-9 max-lg:w-11 ${BTN} text-fg hover:bg-hover">
         <svg aria-hidden="true" viewBox="0 0 16 16" fill="currentColor" class="size-4"><circle cx="3.5" cy="8" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="12.5" cy="8" r="1.3"/></svg></summary>
       <div class="fixed z-30 min-w-48 rounded-lg bg-raised ring-1 ring-line-strong p-1 shadow-lg shadow-black/40">
-        ${more.map(([a, text]) => `<button data-id="${c.ID}" data-a="m-${a}" ${b ? 'aria-disabled="true"' : ''} onclick="menuPick(this); ${a === 'exec' ? `copyExec('${c.ID}')` : a === 'shell' ? `openShell('${c.ID}')` : `act('${a}','${c.ID}')`}"
+        ${more.map(([a, text]) => `<button data-id="${c.ID}" data-a="m-${a}" ${b || (a === 'srestart' && composing.has(p)) ? 'aria-disabled="true"' : ''} onclick="menuPick(this); ${a === 'exec' ? `copyExec('${c.ID}')` : a === 'shell' ? `openShell('${c.ID}')`
+          : a === 'srestart' ? `restartService('${c.ID}')` : `act('${a}','${c.ID}')`}"
           class="${item} ${a === 'remove' ? 'text-bad-fg' : 'text-fg'}">${text}</button>`).join('')}
       </div></details>`;
   const healthBox = hasHealth(c) && !b ? `<details data-keep="health" class="mt-1 text-xs" ontoggle="this.open && loadHealth('${c.ID}')">
@@ -330,7 +337,7 @@ function groupHead(k: string, label: string) {
   const inBand = all.filter(isProblem).length;
   const sbtn = (a: Action, n: number, text: string) => k && n ? `<button data-id="stack-${esc(k)}" data-a="${a}" data-p="${esc(k)}" ${anyBusy ? 'aria-disabled="true"' : ''}
       aria-label="${text} do projeto ${esc(k)} (${n})" title="${esc(stackList(a, k).map(c => c.Names).join(', '))}" onclick="stackAct('${a}', this.dataset.p)" class="${BTN} text-fg hover:bg-hover normal-case tracking-normal">${text} (${n})</button>` : '';
-  // compose up/pull/down: só com o working_dir no label (o servidor precisa dele para achar o projeto)
+  // compose up/pull/down e logs do projeto: só com o working_dir no label (o servidor precisa dele para achar o projeto)
   const cbtn = (a: ComposeAction, text: string, cls = 'text-fg hover:bg-hover', aria = `${text.replace('…', '')} do projeto ${esc(k)}`) =>
     `<button data-id="stack-${esc(k)}" data-a="${a}" data-p="${esc(k)}" ${anyBusy ? 'aria-disabled="true"' : ''} aria-label="${aria}"
       onclick="composeAct('${a}', this.dataset.p)" class="${BTN} ${cls} normal-case tracking-normal">${composing.get(k) === a ? COMPOSE_VERB[a] : text}</button>`;
@@ -340,7 +347,9 @@ function groupHead(k: string, label: string) {
       ${k ? `<span class="text-xs text-muted">compose · ${on} de ${all.length} rodando</span>` : ''}
       ${k && inBand ? `<span class="text-xs text-bad-fg">${inBand} na faixa de atenção ↑</span>` : ''}
       <span class="ml-auto flex flex-wrap gap-1.5">${STACK.map(([a, text]) => sbtn(a, stackList(a, k).length, text)).join('')}${dir
-        ? cbtn('up', 'compose up') + cbtn('pull', 'compose pull') + (armed
+        ? `<button data-id="stack-${esc(k)}" data-a="plogs" data-p="${esc(k)}" aria-label="Logs do projeto ${esc(k)}" onclick="projectLogs(this.dataset.p)"
+            class="${BTN} text-fg hover:bg-hover normal-case tracking-normal">Logs</button>`
+          + cbtn('up', 'compose up') + cbtn('rebuild', 'compose up --build') + cbtn('pull', 'compose pull') + (armed
           ? cbtn('down', 'Confirmar down', 'bg-danger text-white ring-danger hover:bg-danger-hover', `Confirmar compose down do projeto ${esc(k)}`)
           : cbtn('down', 'compose down…')) : ''}</span>
       ${armed ? `<p aria-hidden="true" class="w-full text-xs text-bad-soft lg:text-right">Derrubar o projeto? Os volumes ficam; o projeto some da lista e só volta com up. ${TOUCH ? 'Cancela sozinho em 8 s.' : 'Esc cancela.'}</p>` : ''}
@@ -513,23 +522,37 @@ function confirmed(id: string, name: string, a: Arming['a'], note: string): bool
   return true;
 }
 
-// docker compose up/pull/down no projeto inteiro (down pede confirmação: o projeto some da lista)
-async function composeAct(a: ComposeAction, p: string) {
+// docker compose up/up --build/pull/down no projeto inteiro (down pede confirmação: o projeto some da lista),
+// ou restart de um serviço (svc)
+async function composeAct(a: ComposeAction, p: string, svc = '') {
   const c = data.find(c => project(c) === p);
   if (!c || composing.has(p) || data.some(c => project(c) === p && busy.has(c.ID))) return;
   if (a === 'down' && !confirmed(`stack-${p}`, p, 'down', 'Os volumes ficam; o projeto some da lista e só volta com up.')) return;
-  composing.set(p, a); render();
-  $('#shown').textContent = `${COMPOSE_VERB[a]} ${p}`;
+  // no restart, as linhas do serviço (todas as réplicas) ficam "Reiniciando…" e depois passam pelo confirmUp
+  const ids = svc ? data.filter(c => project(c) === p && service(c) === svc).map(c => c.ID) : [];
+  const what = `${COMPOSE_CMD[a]}${svc ? ` ${svc}` : ''}`;
+  let ok = false;
+  composing.set(p, a); ids.forEach(id => busy.set(id, 'restart')); render();
+  $('#shown').textContent = `${COMPOSE_VERB[a]} ${svc || p}`;
   try {
     const r = await api(`/api/compose/${a}`, {method: 'POST', headers: {'Content-Type': 'application/json'},
-                                              body: JSON.stringify({project: p, dir: workingDir(c)})});
+                                              body: JSON.stringify({project: p, dir: workingDir(c), ...(svc ? {service: svc} : {})})});
     const msg: string = await r.json();
+    ok = r.ok;
     // o compose escreve o progresso no stderr: no erro, a última linha é a que explica
-    toast(r.ok ? `${p}: compose ${a} concluído.` : `${p}: compose ${a} falhou. ${msg.trim().split('\n').at(-1) || 'Erro sem mensagem.'}`, r.ok);
+    toast(r.ok ? `${p}: ${what} concluído${ids.length ? ', conferindo se ficou de pé…' : '.'}`
+               : `${p}: ${what} falhou. ${msg.trim().split('\n').at(-1) || 'Erro sem mensagem.'}`, r.ok);
   } catch { toast(`${p}: sem resposta do servidor do Docker GUI.`); }
-  composing.delete(p); render();
+  composing.delete(p); ids.forEach(id => busy.delete(id)); render();
+  if (ok && ids.length) return confirmUp(ids);
   await load();
   if (a === 'down') $('#q').focus();
+}
+
+// "Reiniciar serviço" do menu "⋯": compose restart do serviço do container (o servidor confere o nome nos labels)
+function restartService(id: string) {
+  const c = data.find(c => c.ID === id);
+  if (c) composeAct('restart', project(c), service(c));
 }
 
 // desarma sozinho depois de 8s, mas nunca enquanto o mouse ou o foco estão no botão (WCAG 2.2.1)
@@ -566,6 +589,13 @@ document.addEventListener('keydown', e => {
 // status e ações do container dentro do modal: diagnosticar e agir sem sair dos logs
 function renderDlg() {
   if (!$<HTMLDialogElement>('#dlg').open) return;
+  if (logProject) {  // projeto inteiro: só a contagem; as ações ficam no cabeçalho do projeto
+    const p = logProject.project, all = data.filter(c => project(c) === p), on = all.filter(c => c.State === 'running').length;
+    $('#dlg-status').innerHTML = `<span class="text-muted">${all.length
+      ? `Projeto compose · ${on} de ${all.length} rodando · todos os serviços` : 'Este projeto não tem mais containers.'}</span>`;
+    $('#dlg-acts').innerHTML = '';
+    return;
+  }
   const c = data.find(c => c.ID === logId);
   if (!c) {
     $('#dlg-status').innerHTML = '<span class="text-muted">Este container não existe mais.</span>';
@@ -586,19 +616,35 @@ function renderDlg() {
 async function fetchLogs() {
   const lb = $('#lb'), atEnd = lb.scrollHeight - lb.scrollTop - lb.clientHeight < 40;  // só gruda no fim se já estava lá
   try {
-    const r = await api('/api/logs/' + logId), j: string = await r.json();
+    const r = await api(logProject ? `/api/compose/logs?${new URLSearchParams(logProject)}` : '/api/logs/' + logId), j: string = await r.json();
     if (stream) return;  // o ao vivo ligou enquanto esta resposta vinha: ele é quem preenche a caixa
     lb.textContent = r.ok ? j || '(sem logs)' : `Não consegui ler os logs: ${j}`;
-    $('#lmeta').textContent = `Últimas 500 linhas · atualizado às ${new Date().toLocaleTimeString('pt-BR')}`;
+    $('#lmeta').textContent = `${tail()} · atualizado às ${new Date().toLocaleTimeString('pt-BR')}`;
   } catch { lb.textContent = 'Não consegui carregar os logs. O servidor do Docker GUI está rodando?'; }
   if (atEnd) lb.scrollTop = lb.scrollHeight;
 }
 
-function logs(id: string) {
-  logId = id;
-  $('#lt').textContent = data.find(c => c.ID === id)!.Names;
-  $('#lb').textContent = 'Carregando…'; $('#lmeta').textContent = 'Últimas 500 linhas'; $('#dlg-msg').innerHTML = '';
+// o compose aplica o --tail em cada container do projeto
+const tail = () => logProject ? 'Últimas 500 linhas de cada container' : 'Últimas 500 linhas';
+
+function openLogs(title: string) {
+  $('#lt').textContent = title;
+  $('#lb').textContent = 'Carregando…'; $('#lmeta').textContent = tail(); $('#dlg-msg').innerHTML = '';
+  $('#insp').hidden = !!logProject;  // a configuração (inspect) é de um container só
   $<HTMLDialogElement>('#dlg').showModal(); renderDlg(); fetchLogs();
+}
+
+function logs(id: string) {
+  logId = id; logProject = null;
+  openLogs(data.find(c => c.ID === id)!.Names);
+}
+
+// logs de todos os serviços do projeto no mesmo modal, com o prefixo do compose ("api-1  | ") em cada linha
+function projectLogs(p: string) {
+  const c = data.find(c => project(c) === p);
+  if (!c) return;
+  logId = null; logProject = {project: p, dir: workingDir(c)};
+  openLogs(p);
 }
 
 // ponytail: teto fixo; um container falante por horas não pode crescer o DOM sem limite
@@ -618,12 +664,13 @@ function toggleFollow(on = !stream, why = '') {
   stream?.close(); stream = null;
   if (was) flushLogs();  // o que já chegou entra antes de parar
   if (on) {
-    // EventSource não manda header: o token vai na query, só nesta rota
-    const es = stream = new EventSource(`/api/logs/${logId}/stream?t=${encodeURIComponent(TOKEN)}`);
+    // EventSource não manda header: o token vai na query, só nestas rotas
+    const es = stream = new EventSource(logProject ? `/api/compose/logs/stream?${new URLSearchParams({...logProject, t: TOKEN})}`
+                                                   : `/api/logs/${logId}/stream?t=${encodeURIComponent(TOKEN)}`);
     // cada conexão (inclusive a reconexão automática) recomeça das últimas 500 linhas: limpa para não duplicar
-    es.onopen = () => { pending = []; $('#lb').textContent = ''; $('#lmeta').textContent = 'Ao vivo · últimas 500 linhas e as novas'; };
+    es.onopen = () => { pending = []; $('#lb').textContent = ''; $('#lmeta').textContent = `Ao vivo · ${tail().toLowerCase()} e as novas`; };
     es.onmessage = e => { if (pending.push(JSON.parse(e.data)) === 1) setTimeout(flushLogs, 50); };
-    es.addEventListener('end', () => toggleFollow(false, 'o container parou'));
+    es.addEventListener('end', () => toggleFollow(false, logProject ? 'os containers pararam' : 'o container parou'));
     // queda de rede: o EventSource reconecta sozinho; CLOSED é recusa do servidor (token, erro)
     es.onerror = () => { if (es.readyState === EventSource.CLOSED) toggleFollow(false, 'falhou'); else $('#lmeta').textContent = 'Ao vivo · reconectando…'; };
   } else if (was) $('#lmeta').textContent = `Ao vivo parado às ${new Date().toLocaleTimeString('pt-BR')}${why ? ` · ${why}` : ''}`;
@@ -680,8 +727,9 @@ function afterClose() {
   toggleFollow(false);
   // fecha o "Configuração" e apaga o que estava nele: env revelado não fica na página
   $('#insp').removeAttribute('open'); $('#insp-body').textContent = 'Carregando…';
-  // a linha pode ter sido redesenhada com o modal aberto; foca o botão Logs atual dela
-  document.querySelector<HTMLElement>(`[data-id="${logId}"][data-a="logs"]`)?.focus();
+  // a linha pode ter sido redesenhada com o modal aberto; foca o botão Logs atual dela (ou o do cabeçalho do projeto)
+  document.querySelector<HTMLElement>(logProject ? `[data-id="${CSS.escape(`stack-${logProject.project}`)}"][data-a="plogs"]`
+                                                 : `[data-id="${logId}"][data-a="logs"]`)?.focus();
 }
 
 // terminal no navegador: xterm.js <-> WebSocket <-> `docker exec -it` num PTY do servidor
@@ -783,7 +831,8 @@ async function prune(k: DiskKind) {
 // esta lista é a interface completa entre o HTML e o código
 Object.assign(window, {
   act, afterClose, askNotify, clearFilters, composeAct, copyAddr, copyExec, copyLogs, downloadLogs, filterBy, loadDisk,
-  loadHealth, loadInspect, menuPick, openShell, placeMenu, prune, refreshLogs, runToastAction, stackAct, toggleFollow,
+  loadHealth, loadInspect, menuPick, openShell, placeMenu, projectLogs, prune, refreshLogs, restartService, runToastAction,
+  stackAct, toggleFollow,
 });
 
 $('#dlg').addEventListener('close', afterClose);

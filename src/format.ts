@@ -64,6 +64,9 @@ export const project = (c: Pick<Container, 'Labels'>): string =>
 // pasta do projeto compose (vai para o compose up/down/pull; o servidor confere contra os labels)
 export const workingDir = (c: Pick<Container, 'Labels'>): string =>
   (c.Labels || '').match(/(?:^|,)com\.docker\.compose\.project\.working_dir=([^,]*)/)?.[1] || '';
+// serviço do compose (vai para o compose restart; o servidor confere contra os serviços do projeto)
+export const service = (c: Pick<Container, 'Labels'>): string =>
+  (c.Labels || '').match(/(?:^|,)com\.docker\.compose\.service=([^,]*)/)?.[1] || '';
 
 // "About an hour" -> "~1 h", "23 minutes" -> "23 min", "Less than a second" -> "<1 s"
 export function dur(s: string): string {

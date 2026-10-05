@@ -40,12 +40,18 @@ WS_MAX = 1 << 20  # maior mensagem aceita do navegador (colar um texto grande ca
 CLI = ["docker"]  # binário + flags globais; main() troca por --cli (ex.: podman) e --context
 # estados do podman que o docker não tem -> o equivalente que a página entende
 PODMAN_STATE = {"configured": "created", "initialized": "created", "stopping": "running", "stopped": "exited"}
-# por projeto compose; pull e up baixam imagens, por isso o prazo longo
-COMPOSE = {"up": ["up", "-d"], "down": ["down"], "pull": ["pull"]}
+# por projeto compose; pull e up baixam imagens (e o --build compila), por isso o prazo longo
+COMPOSE = {"up": ["up", "-d"], "rebuild": ["up", "-d", "--build"], "down": ["down"], "pull": ["pull"]}
+# por serviço: o nome vai no fim do argv e só vale se for um serviço do projeto (label com.docker.compose.service)
+COMPOSE_SERVICE = {"restart": ["restart"]}
 COMPOSE_TIMEOUT = 600
+# logs do projeto inteiro: o compose prefixa cada linha com o serviço ("api-1  | ...") e aplica o --tail por container
+COMPOSE_LOGS = ["logs", "--no-color", "--timestamps", "--tail", "500"]
 # .Label (um por vez) e não .Labels: este junta tudo com vírgula, e config_files já tem vírgula
 COMPOSE_FORMAT = ('[{{json (.Label "com.docker.compose.project")}},{{json (.Label "com.docker.compose.project.working_dir")}},'
-                  '{{json (.Label "com.docker.compose.project.config_files")}}]')
+                  '{{json (.Label "com.docker.compose.project.config_files")}},{{json (.Label "com.docker.compose.service")}}]')
+# timestamp do docker logs logo depois do prefixo do compose
+LOG_TIME = re.compile(r"\|\s(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?")
 MAX_BODY = 64 * 1024
 # comandos que imprimem um JSON por linha; o stats só lista os rodando e leva ~2 s para medir a CPU
 LISTS = {"/api/containers": ["ps", "-a"], "/api/stats": ["stats", "--no-stream"]}
@@ -82,6 +88,16 @@ def containers(out):
     rows = json.loads(out) if out.lstrip().startswith("[") else [json.loads(line) for line in out.splitlines()]
     # pela forma da linha, não pelo binário: o podman-docker (docker que chama o podman) também cai aqui
     return [from_podman(c) if "Id" in c else c for c in rows]
+
+
+def by_time(text):
+    """Saída do `compose logs` em ordem cronológica: sem -f, ele despeja um container de cada vez.
+    A fração vem sem os zeros do fim (RFC3339Nano) e é completada antes de comparar; sem timestamp, vai para o topo."""
+    def key(line):
+        m = LOG_TIME.search(line)
+        return (m[1], (m[2] or "").ljust(9, "0")) if m else ("", "")
+    # split e não splitlines: um \r (ou outro separador) no meio do log é parte da linha, não uma linha nova
+    return "".join(f"{line}\n" for line in sorted(filter(None, text.split("\n")), key=key))
 
 
 def summary(info, reveal=False):
@@ -155,13 +171,22 @@ class Handler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/exec/([0-9a-f]{12,64})", path)
         if m:
             return self.terminal(m[1])
-        m = re.fullmatch(r"/api/logs/([0-9a-f]{12,64})/stream", path)
-        if m:  # EventSource não manda header custom: só esta rota (GET, só leitura) aceita o token na query
+        m = re.fullmatch(r"/api/(?:logs/([0-9a-f]{12,64})|compose/logs)/stream", path)
+        if m:  # EventSource não manda header custom: só estas rotas (GET, só leitura) aceitam o token na query
             if not hmac.compare_digest(parse_qs(query).get("t", [""])[0].encode(), TOKEN.encode()):
                 return self.send(401, '"token ausente ou inválido"')
-            return self.stream_logs(m[1])
+            if m[1]:
+                return self.stream_logs(["logs", "-f", "--timestamps", "--tail", "500", m[1]])
+            base = self.compose_query(query)
+            return None if base is None else self.stream_logs([*base, *COMPOSE_LOGS, "--follow"])
         if not self.token_ok():
             return self.send(401, '"token ausente ou inválido"')
+        if path == "/api/compose/logs":  # todos os serviços juntos, em ordem cronológica
+            base = self.compose_query(query)
+            if base is None:
+                return None
+            r = docker(*base, *COMPOSE_LOGS)
+            return self.send(500, json.dumps(r.stderr.strip())) if r.returncode else self.send(200, json.dumps(by_time(r.stdout)))
         if self.path in LISTS or self.path == "/api/df":
             ps = self.path == "/api/containers"
             # o ps do podman só sai completo em "json" (um array); containers() converte para o formato do docker
@@ -190,8 +215,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, json.dumps(summary(json.loads(r.stdout), reveal=bool(m[2]))))
         self.send(404, '"not found"')
 
-    def stream_logs(self, cid):
-        """Server-Sent Events com o `docker logs -f`: uma linha por evento e um "end" quando o docker termina."""
+    def stream_logs(self, args):
+        """Server-Sent Events com o `docker logs -f` (ou o `compose logs -f` do projeto, de argv já validado):
+        uma linha por evento e um "end" quando o docker termina."""
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
@@ -202,7 +228,7 @@ class Handler(BaseHTTPRequestHandler):
 
         # cada conexão tem a própria thread (ThreadingHTTPServer): um stream longo não trava as outras requisições.
         # O with fecha o pipe e espera o processo morto (sem zumbi nem fd vazando)
-        with subprocess.Popen([*CLI, "logs", "-f", "--timestamps", "--tail", "500", cid],
+        with subprocess.Popen([*CLI, *args],
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as p:
             rest = b""
             try:
@@ -229,7 +255,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.token_ok():
             return self.send(401, '"token ausente ou inválido"')
         m = re.fullmatch(r"/api/compose/(\w+)", self.path)
-        if m and m[1] in COMPOSE:
+        if m and (m[1] in COMPOSE or m[1] in COMPOSE_SERVICE):
             return self.compose(m[1])
         m = re.fullmatch(r"/api/prune/(\w+)", self.path)
         if m and m[1] in PRUNE:  # devolve o stdout: a última linha diz quanto espaço foi liberado
@@ -333,27 +359,53 @@ class Handler(BaseHTTPRequestHandler):
             os.close(master)
 
     def compose(self, action):
-        """Corpo {project, dir}. O par só vale se existir nos labels de algum container: o diretório e os
-        arquivos do compose vêm sempre do docker, nunca do cliente."""
+        """Corpo {project, dir}, mais o service nas ações por serviço (COMPOSE_SERVICE)."""
+        service = action in COMPOSE_SERVICE
         try:
             n = int(self.headers.get("Content-Length") or 0)
             if not 0 < n <= MAX_BODY:
                 raise ValueError
             body = json.loads(self.rfile.read(n))
-            key = [body["project"], body["dir"]]
+            key = [body["project"], body["dir"], *([body["service"]] if service else [])]
             if not all(isinstance(v, str) and v for v in key):
                 raise ValueError
         except (ValueError, KeyError, TypeError):
-            return self.send(400, '"corpo inválido: esperado {project, dir}"')
+            return self.send(400, '"corpo inválido: esperado {project, dir, service}"' if service
+                             else '"corpo inválido: esperado {project, dir}"')
+        base = self.compose_base(*key)
+        if base is None:
+            return None
+        # o "--" encerra as flags: mesmo vindo de um label, o nome do serviço nunca vira opção do compose
+        args = [*COMPOSE_SERVICE[action], "--", key[2]] if service else COMPOSE[action]
+        r = docker(*base, *args, timeout=COMPOSE_TIMEOUT)
+        return self.send(500 if r.returncode else 200, json.dumps(r.stderr.strip()))
+
+    def compose_query(self, query):
+        """{project, dir} na query das rotas GET (os logs do projeto) -> compose_base."""
+        q = parse_qs(query)
+        key = [q.get(k, [""])[0] for k in ("project", "dir")]
+        if not all(key):
+            self.send(400, '"query inválida: esperado ?project=...&dir=..."')
+            return None
+        return self.compose_base(*key)
+
+    def compose_base(self, project, wd, service=None):
+        """Começo do argv (compose -p, --project-directory e os -f) montado só com os labels dos containers: o par
+        {project, dir} tem que existir neles e o service, se veio, ser um dos serviços desse projeto. O diretório e os
+        arquivos do compose vêm sempre do docker, nunca do cliente. Se não achar, responde o erro e devolve None."""
         r = docker("ps", "-a", "--filter", "label=com.docker.compose.project", "--format", COMPOSE_FORMAT)
         if r.returncode:
-            return self.send(500, json.dumps(r.stderr.strip()))
-        files = next((f for p, wd, f in map(json.loads, r.stdout.splitlines()) if [p, wd] == key), None)
-        if files is None:
-            return self.send(404, '"projeto compose não encontrado"')
-        r = docker("compose", "-p", key[0], "--project-directory", key[1],
-                   *[a for f in files.split(",") if f for a in ("-f", f)], *COMPOSE[action], timeout=COMPOSE_TIMEOUT)
-        self.send(500 if r.returncode else 200, json.dumps(r.stderr.strip()))
+            self.send(500, json.dumps(r.stderr.strip()))
+            return None
+        rows = [row for row in map(json.loads, r.stdout.splitlines()) if row[:2] == [project, wd]]
+        if not rows:
+            self.send(404, '"projeto compose não encontrado"')
+            return None
+        if service is not None and service not in {row[3] for row in rows}:
+            self.send(404, '"serviço não encontrado no projeto"')
+            return None
+        return ["compose", "-p", project, "--project-directory", wd,
+                *[a for f in rows[0][2].split(",") if f for a in ("-f", f)]]
 
     def log_message(self, *args):
         pass
@@ -521,6 +573,7 @@ PAGE = r"""<!doctype html>
   var newProblems = (before, cs2) => before ? cs2.filter((c) => isProblem(c) && !before.has(c.ID)) : [];
   var project = (c) => (c.Labels || "").match(/(?:^|,)com\.docker\.compose\.project=([^,]*)/)?.[1] || "";
   var workingDir = (c) => (c.Labels || "").match(/(?:^|,)com\.docker\.compose\.project\.working_dir=([^,]*)/)?.[1] || "";
+  var service = (c) => (c.Labels || "").match(/(?:^|,)com\.docker\.compose\.service=([^,]*)/)?.[1] || "";
   function dur(s15) {
     if (/less than a second/i.test(s15)) return "<1 s";
     const m = s15.match(/(about )?(an?|\d+) (second|minute|hour|day|week|month|year)/i);
@@ -9994,7 +10047,8 @@ ${h2.join(`
   var LABEL = { start: "Iniciar", stop: "Parar", restart: "Reiniciar", pause: "Pausar", unpause: "Retomar", logs: "Logs", remove: "Remover" };
   var VERB = { start: "Iniciando…", stop: "Parando…", restart: "Reiniciando…", pause: "Pausando…", unpause: "Retomando…", remove: "Removendo…" };
   var DONE = { start: "iniciado", stop: "parado", restart: "reiniciado", pause: "pausado", unpause: "retomado", remove: "removido" };
-  var COMPOSE_VERB = { up: "Subindo…", down: "Derrubando…", pull: "Baixando…" };
+  var COMPOSE_VERB = { up: "Subindo…", rebuild: "Reconstruindo…", down: "Derrubando…", pull: "Baixando…", restart: "Reiniciando…" };
+  var COMPOSE_CMD = { up: "compose up", rebuild: "compose up --build", down: "compose down", pull: "compose pull", restart: "compose restart" };
   var PRIMARY = { running: "stop", restarting: "stop", paused: "unpause", exited: "start", created: "start" };
   var SECONDARY = { running: "restart", paused: "stop" };
   var STOPPABLE = ["running", "paused", "restarting"];
@@ -10059,6 +10113,7 @@ ${h2.join(`
   var lastSay = "";
   var dirty = false;
   var seen = null;
+  var logProject = null;
   var toastFn = null;
   function toast(msg, ok = false, action = null) {
     toastFn = action?.[1] || null;
@@ -10239,7 +10294,17 @@ ${h2.join(`
   }
   var rowCache = /* @__PURE__ */ new Map();
   function row(c, withProject = false) {
-    const sig = JSON.stringify([c, withProject, busy.get(c.ID), arming?.id === c.ID, errors.get(c.ID), health[c.ID + c.Status], stats[c.ID], TOUCH]);
+    const sig = JSON.stringify([
+      c,
+      withProject,
+      busy.get(c.ID),
+      arming?.id === c.ID,
+      errors.get(c.ID),
+      health[c.ID + c.Status],
+      stats[c.ID],
+      composing.has(project(c)),
+      TOUCH
+    ]);
     const hit = rowCache.get(c.ID);
     if (hit?.sig === sig) return hit.html;
     const html = rowHtml(c, withProject);
@@ -10253,8 +10318,10 @@ ${h2.join(`
     const slot = (w = "lg:w-20") => `<span aria-hidden="true" class="${w} shrink-0 max-lg:hidden"></span>`;
     const btn = (a, cls = "text-fg hover:bg-hover", text = LABEL[a], aria = `${LABEL[a]} ${esc(c.Names)}`) => `<button data-id="${c.ID}" data-a="${a}" ${b2 && a !== "logs" ? 'aria-disabled="true"' : ""}
       aria-label="${aria}" aria-describedby="st-${c.ID}" onclick="act('${a}','${c.ID}')" class="lg:w-20 shrink-0 ${BTN} ${cls}">${text}</button>`;
+    const svc = p && workingDir(c) && service(c);
     const more = [
       sec && [sec, LABEL[sec]],
+      svc && ["srestart", `Reiniciar serviço ${esc(svc)}`],
       c.State === "running" && ["pause", "Pausar"],
       c.State === "running" && ["shell", "Abrir terminal"],
       c.State === "running" && ["exec", "Copiar docker exec"],
@@ -10266,7 +10333,7 @@ ${h2.join(`
         class="list-none [&::-webkit-details-marker]:hidden cursor-pointer grid place-items-center lg:w-9 max-lg:w-11 ${BTN} text-fg hover:bg-hover">
         <svg aria-hidden="true" viewBox="0 0 16 16" fill="currentColor" class="size-4"><circle cx="3.5" cy="8" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="12.5" cy="8" r="1.3"/></svg></summary>
       <div class="fixed z-30 min-w-48 rounded-lg bg-raised ring-1 ring-line-strong p-1 shadow-lg shadow-black/40">
-        ${more.map(([a, text]) => `<button data-id="${c.ID}" data-a="m-${a}" ${b2 ? 'aria-disabled="true"' : ""} onclick="menuPick(this); ${a === "exec" ? `copyExec('${c.ID}')` : a === "shell" ? `openShell('${c.ID}')` : `act('${a}','${c.ID}')`}"
+        ${more.map(([a, text]) => `<button data-id="${c.ID}" data-a="m-${a}" ${b2 || a === "srestart" && composing.has(p) ? 'aria-disabled="true"' : ""} onclick="menuPick(this); ${a === "exec" ? `copyExec('${c.ID}')` : a === "shell" ? `openShell('${c.ID}')` : a === "srestart" ? `restartService('${c.ID}')` : `act('${a}','${c.ID}')`}"
           class="${item} ${a === "remove" ? "text-bad-fg" : "text-fg"}">${text}</button>`).join("")}
       </div></details>`;
     const healthBox = hasHealth(c) && !b2 ? `<details data-keep="health" class="mt-1 text-xs" ontoggle="this.open && loadHealth('${c.ID}')">
@@ -10320,7 +10387,8 @@ ${h2.join(`
       <span class="text-xs font-medium uppercase tracking-wider text-fg">${label}</span>
       ${k ? `<span class="text-xs text-muted">compose · ${on2} de ${all.length} rodando</span>` : ""}
       ${k && inBand ? `<span class="text-xs text-bad-fg">${inBand} na faixa de atenção ↑</span>` : ""}
-      <span class="ml-auto flex flex-wrap gap-1.5">${STACK.map(([a, text]) => sbtn(a, stackList(a, k).length, text)).join("")}${dir ? cbtn("up", "compose up") + cbtn("pull", "compose pull") + (armed ? cbtn("down", "Confirmar down", "bg-danger text-white ring-danger hover:bg-danger-hover", `Confirmar compose down do projeto ${esc(k)}`) : cbtn("down", "compose down…")) : ""}</span>
+      <span class="ml-auto flex flex-wrap gap-1.5">${STACK.map(([a, text]) => sbtn(a, stackList(a, k).length, text)).join("")}${dir ? `<button data-id="stack-${esc(k)}" data-a="plogs" data-p="${esc(k)}" aria-label="Logs do projeto ${esc(k)}" onclick="projectLogs(this.dataset.p)"
+            class="${BTN} text-fg hover:bg-hover normal-case tracking-normal">Logs</button>` + cbtn("up", "compose up") + cbtn("rebuild", "compose up --build") + cbtn("pull", "compose pull") + (armed ? cbtn("down", "Confirmar down", "bg-danger text-white ring-danger hover:bg-danger-hover", `Confirmar compose down do projeto ${esc(k)}`) : cbtn("down", "compose down…")) : ""}</span>
       ${armed ? `<p aria-hidden="true" class="w-full text-xs text-bad-soft lg:text-right">Derrubar o projeto? Os volumes ficam; o projeto some da lista e só volta com up. ${TOUCH ? "Cancela sozinho em 8 s." : "Esc cancela."}</p>` : ""}
     </div></th></tr>`;
   }
@@ -10470,28 +10538,39 @@ ${h2.join(`
     disarm(false);
     return true;
   }
-  async function composeAct(a, p) {
+  async function composeAct(a, p, svc = "") {
     const c = data.find((c2) => project(c2) === p);
     if (!c || composing.has(p) || data.some((c2) => project(c2) === p && busy.has(c2.ID))) return;
     if (a === "down" && !confirmed(`stack-${p}`, p, "down", "Os volumes ficam; o projeto some da lista e só volta com up.")) return;
+    const ids = svc ? data.filter((c2) => project(c2) === p && service(c2) === svc).map((c2) => c2.ID) : [];
+    const what = `${COMPOSE_CMD[a]}${svc ? ` ${svc}` : ""}`;
+    let ok = false;
     composing.set(p, a);
+    ids.forEach((id) => busy.set(id, "restart"));
     render();
-    $2("#shown").textContent = `${COMPOSE_VERB[a]} ${p}`;
+    $2("#shown").textContent = `${COMPOSE_VERB[a]} ${svc || p}`;
     try {
       const r = await api(`/api/compose/${a}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ project: p, dir: workingDir(c) })
+        body: JSON.stringify({ project: p, dir: workingDir(c), ...svc ? { service: svc } : {} })
       });
       const msg = await r.json();
-      toast(r.ok ? `${p}: compose ${a} concluído.` : `${p}: compose ${a} falhou. ${msg.trim().split("\n").at(-1) || "Erro sem mensagem."}`, r.ok);
+      ok = r.ok;
+      toast(r.ok ? `${p}: ${what} concluído${ids.length ? ", conferindo se ficou de pé…" : "."}` : `${p}: ${what} falhou. ${msg.trim().split("\n").at(-1) || "Erro sem mensagem."}`, r.ok);
     } catch {
       toast(`${p}: sem resposta do servidor do Docker GUI.`);
     }
     composing.delete(p);
+    ids.forEach((id) => busy.delete(id));
     render();
+    if (ok && ids.length) return confirmUp(ids);
     await load();
     if (a === "down") $2("#q").focus();
+  }
+  function restartService(id) {
+    const c = data.find((c2) => c2.ID === id);
+    if (c) composeAct("restart", project(c), service(c));
   }
   function armTick() {
     if (!arming) return;
@@ -10525,6 +10604,12 @@ ${h2.join(`
   });
   function renderDlg() {
     if (!$2("#dlg").open) return;
+    if (logProject) {
+      const p = logProject.project, all = data.filter((c2) => project(c2) === p), on2 = all.filter((c2) => c2.State === "running").length;
+      $2("#dlg-status").innerHTML = `<span class="text-muted">${all.length ? `Projeto compose · ${on2} de ${all.length} rodando · todos os serviços` : "Este projeto não tem mais containers."}</span>`;
+      $2("#dlg-acts").innerHTML = "";
+      return;
+    }
     const c = data.find((c2) => c2.ID === logId);
     if (!c) {
       $2("#dlg-status").innerHTML = '<span class="text-muted">Este container não existe mais.</span>';
@@ -10541,24 +10626,37 @@ ${h2.join(`
   async function fetchLogs() {
     const lb = $2("#lb"), atEnd = lb.scrollHeight - lb.scrollTop - lb.clientHeight < 40;
     try {
-      const r = await api("/api/logs/" + logId), j2 = await r.json();
+      const r = await api(logProject ? `/api/compose/logs?${new URLSearchParams(logProject)}` : "/api/logs/" + logId), j2 = await r.json();
       if (stream) return;
       lb.textContent = r.ok ? j2 || "(sem logs)" : `Não consegui ler os logs: ${j2}`;
-      $2("#lmeta").textContent = `Últimas 500 linhas · atualizado às ${(/* @__PURE__ */ new Date()).toLocaleTimeString("pt-BR")}`;
+      $2("#lmeta").textContent = `${tail()} · atualizado às ${(/* @__PURE__ */ new Date()).toLocaleTimeString("pt-BR")}`;
     } catch {
       lb.textContent = "Não consegui carregar os logs. O servidor do Docker GUI está rodando?";
     }
     if (atEnd) lb.scrollTop = lb.scrollHeight;
   }
-  function logs(id) {
-    logId = id;
-    $2("#lt").textContent = data.find((c) => c.ID === id).Names;
+  var tail = () => logProject ? "Últimas 500 linhas de cada container" : "Últimas 500 linhas";
+  function openLogs(title) {
+    $2("#lt").textContent = title;
     $2("#lb").textContent = "Carregando…";
-    $2("#lmeta").textContent = "Últimas 500 linhas";
+    $2("#lmeta").textContent = tail();
     $2("#dlg-msg").innerHTML = "";
+    $2("#insp").hidden = !!logProject;
     $2("#dlg").showModal();
     renderDlg();
     fetchLogs();
+  }
+  function logs(id) {
+    logId = id;
+    logProject = null;
+    openLogs(data.find((c) => c.ID === id).Names);
+  }
+  function projectLogs(p) {
+    const c = data.find((c2) => project(c2) === p);
+    if (!c) return;
+    logId = null;
+    logProject = { project: p, dir: workingDir(c) };
+    openLogs(p);
   }
   var MAX_LINES = 5e3;
   function flushLogs() {
@@ -10573,16 +10671,16 @@ ${h2.join(`
     stream = null;
     if (was) flushLogs();
     if (on2) {
-      const es2 = stream = new EventSource(`/api/logs/${logId}/stream?t=${encodeURIComponent(TOKEN)}`);
+      const es2 = stream = new EventSource(logProject ? `/api/compose/logs/stream?${new URLSearchParams({ ...logProject, t: TOKEN })}` : `/api/logs/${logId}/stream?t=${encodeURIComponent(TOKEN)}`);
       es2.onopen = () => {
         pending = [];
         $2("#lb").textContent = "";
-        $2("#lmeta").textContent = "Ao vivo · últimas 500 linhas e as novas";
+        $2("#lmeta").textContent = `Ao vivo · ${tail().toLowerCase()} e as novas`;
       };
       es2.onmessage = (e) => {
         if (pending.push(JSON.parse(e.data)) === 1) setTimeout(flushLogs, 50);
       };
-      es2.addEventListener("end", () => toggleFollow(false, "o container parou"));
+      es2.addEventListener("end", () => toggleFollow(false, logProject ? "os containers pararam" : "o container parou"));
       es2.onerror = () => {
         if (es2.readyState === EventSource.CLOSED) toggleFollow(false, "falhou");
         else $2("#lmeta").textContent = "Ao vivo · reconectando…";
@@ -10634,7 +10732,7 @@ ${h2.join(`
     toggleFollow(false);
     $2("#insp").removeAttribute("open");
     $2("#insp-body").textContent = "Carregando…";
-    document.querySelector(`[data-id="${logId}"][data-a="logs"]`)?.focus();
+    document.querySelector(logProject ? `[data-id="${CSS.escape(`stack-${logProject.project}`)}"][data-a="plogs"]` : `[data-id="${logId}"][data-a="logs"]`)?.focus();
   }
   var xtermCss = document.createElement("style");
   xtermCss.textContent = xterm_default;
@@ -10749,8 +10847,10 @@ ${h2.join(`
     menuPick,
     openShell,
     placeMenu,
+    projectLogs,
     prune,
     refreshLogs,
+    restartService,
     runToastAction,
     stackAct,
     toggleFollow

@@ -16,6 +16,7 @@ import unittest
 from http.server import ThreadingHTTPServer
 from typing import ClassVar
 from unittest import mock
+from urllib.parse import urlencode
 
 import docker_gui
 
@@ -264,6 +265,25 @@ class LogsStreamTest(ServerTest):
             self.assertEqual(status, 401, token)
         self.assertFalse(os.path.exists(os.path.join(self.dir, "args")))
 
+    def test_compose_project_stream(self):
+        # o par {project, dir} é conferido nos labels (docker mockado); o compose logs -f roda o script
+        self.docker.return_value = ok(ComposeTest.PS)
+        self.fake_docker("printf 'api-1  | oi\\n'")
+        status, body = self.request("GET", "/api/compose/logs/stream?" + urlencode({**ComposeTest.SHOP, "t": docker_gui.TOKEN}))
+        self.assertEqual((status, body), (200, 'data: "api-1  | oi\\n"\n\nevent: end\ndata:\n\n'))
+        with open(os.path.join(self.dir, "args")) as f:
+            self.assertEqual(f.read().split(), [*ComposeTest.BASE, "logs", "--no-color", "--timestamps", "--tail", "500", "--follow"])
+
+    def test_compose_stream_checks_token_and_project(self):
+        self.docker.return_value = ok(ComposeTest.PS)
+        self.fake_docker("echo nunca")
+        for q, code in (({**ComposeTest.SHOP}, 401), ({**ComposeTest.SHOP, "t": "errado"}, 401),
+                        ({"project": "shop", "dir": "/srv/blog", "t": docker_gui.TOKEN}, 404),
+                        ({"project": "shop", "t": docker_gui.TOKEN}, 400)):
+            status, _ = self.request("GET", "/api/compose/logs/stream?" + urlencode(q))  # o header com o token não vale
+            self.assertEqual(status, code, q)
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "args")))
+
     def test_disconnect_kills_docker_and_server_keeps_serving(self):
         self.fake_docker(f"echo $$ > {self.dir}/pid\necho oi\nexec sleep 30")
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
@@ -352,27 +372,101 @@ class ActionsTest(ServerTest):
 
 
 class ComposeTest(ServerTest):
-    """O cliente só escolhe o projeto; diretório e arquivos saem dos labels dos containers."""
+    """O cliente só escolhe o projeto (e o serviço); diretório, arquivos e serviços saem dos labels dos containers."""
 
+    # uma linha por container: projeto, pasta, arquivos e serviço
     PS = "\n".join(json.dumps(r) for r in (
-        ["shop", "/srv/shop", "/srv/shop/compose.yml,/srv/shop/compose.override.yml"],
-        ["blog", "/srv/blog", "/srv/blog/compose.yml"])) + "\n"
+        ["shop", "/srv/shop", "/srv/shop/compose.yml,/srv/shop/compose.override.yml", "api"],
+        ["shop", "/srv/shop", "/srv/shop/compose.yml,/srv/shop/compose.override.yml", "db"],
+        ["blog", "/srv/blog", "/srv/blog/compose.yml", "web"])) + "\n"
     SHOP: ClassVar[dict] = {"project": "shop", "dir": "/srv/shop"}
+    BASE = ("compose", "-p", "shop", "--project-directory", "/srv/shop",
+            "-f", "/srv/shop/compose.yml", "-f", "/srv/shop/compose.override.yml")
 
-    def ps_call(self):
+    @staticmethod
+    def ps_call():
         return mock.call("ps", "-a", "--filter", "label=com.docker.compose.project", "--format", docker_gui.COMPOSE_FORMAT)
 
     def test_each_action_builds_argv_from_labels(self):
-        self.assertEqual(docker_gui.COMPOSE, {"up": ["up", "-d"], "down": ["down"], "pull": ["pull"]})
+        self.assertEqual(docker_gui.COMPOSE, {"up": ["up", "-d"], "rebuild": ["up", "-d", "--build"],
+                                              "down": ["down"], "pull": ["pull"]})
         for action, args in docker_gui.COMPOSE.items():
             self.docker.reset_mock()
             self.docker.side_effect = [ok(self.PS), ok(stderr="Container shop-api-1  Started\n")]
             self.assertEqual(self.request("POST", f"/api/compose/{action}", body=self.SHOP),
                              (200, "Container shop-api-1  Started"), action)
             self.assertEqual(self.docker.call_args_list, [self.ps_call(), mock.call(
-                "compose", "-p", "shop", "--project-directory", "/srv/shop",
-                "-f", "/srv/shop/compose.yml", "-f", "/srv/shop/compose.override.yml", *args,
-                timeout=docker_gui.COMPOSE_TIMEOUT)])
+                *self.BASE, *args, timeout=docker_gui.COMPOSE_TIMEOUT)])
+
+    def test_restart_one_service(self):
+        self.assertEqual(docker_gui.COMPOSE_SERVICE, {"restart": ["restart"]})
+        self.docker.side_effect = [ok(self.PS), ok(stderr="Container shop-db-1  Started\n")]
+        self.assertEqual(self.request("POST", "/api/compose/restart", body={**self.SHOP, "service": "db"}),
+                         (200, "Container shop-db-1  Started"))
+        self.assertEqual(self.docker.call_args_list, [self.ps_call(), mock.call(
+            *self.BASE, "restart", "--", "db", timeout=docker_gui.COMPOSE_TIMEOUT)])
+
+    def test_restart_service_must_be_from_the_project(self):
+        # web existe, mas é do blog; o resto não é serviço de ninguém (nem vira flag do compose)
+        for service in ("web", "nope", "--help", "-t", "db api", "DB"):
+            self.docker.reset_mock()
+            self.docker.side_effect = None
+            self.docker.return_value = ok(self.PS)
+            self.assertEqual(self.request("POST", "/api/compose/restart", body={**self.SHOP, "service": service}),
+                             (404, "serviço não encontrado no projeto"), service)
+            self.assertEqual(self.docker.call_args_list, [self.ps_call()])
+
+    def test_restart_without_valid_service_is_400_without_docker(self):
+        for body in (self.SHOP, {**self.SHOP, "service": ""}, {**self.SHOP, "service": 1},
+                     {**self.SHOP, "service": ["db"]}, {**self.SHOP, "service": None}, {"service": "db"}):
+            status, _ = self.request("POST", "/api/compose/restart", body=body)
+            self.assertEqual(status, 400, body)
+        self.docker.assert_not_called()
+
+    def test_restart_unknown_pair_is_404(self):
+        self.docker.return_value = ok(self.PS)
+        status, _ = self.request("POST", "/api/compose/restart", body={"project": "shop", "dir": "/srv/blog", "service": "web"})
+        self.assertEqual(status, 404)
+        self.assertEqual(self.docker.call_args_list, [self.ps_call()])
+
+    def logs_path(self, **q):
+        return "/api/compose/logs?" + urlencode(q)
+
+    def test_project_logs_in_time_order(self):
+        # sem -f, o compose despeja um container de cada vez; a fração do RFC3339Nano vem sem os zeros do fim
+        out = ("db-1   | 2026-10-05T14:04:48.6213387Z db 0\n"
+               "db-1   | 2026-10-05T14:04:50Z db 2\n"
+               "api-1  | 2026-10-05T14:04:48.62Z api 0\n"
+               "api-1  | 2026-10-05T14:04:49.5Z api 1 \r com \\r\n")
+        self.docker.side_effect = [ok(self.PS), ok(out, "WARN obsoleto\n")]
+        self.assertEqual(self.request("GET", self.logs_path(project="shop", dir="/srv/shop")), (200, (
+                         "api-1  | 2026-10-05T14:04:48.62Z api 0\n"
+                         "db-1   | 2026-10-05T14:04:48.6213387Z db 0\n"
+                         "api-1  | 2026-10-05T14:04:49.5Z api 1 \r com \\r\n"
+                         "db-1   | 2026-10-05T14:04:50Z db 2\n")))
+        self.assertEqual(self.docker.call_args_list, [self.ps_call(), mock.call(
+            *self.BASE, "logs", "--no-color", "--timestamps", "--tail", "500")])
+
+    def test_by_time_keeps_lines_without_timestamp_on_top(self):
+        self.assertEqual(docker_gui.by_time(""), "")
+        self.assertEqual(docker_gui.by_time("a | 2026-01-01T00:00:02Z x\nsem hora\n\nb | 2026-01-01T00:00:01Z y"),
+                         "sem hora\nb | 2026-01-01T00:00:01Z y\na | 2026-01-01T00:00:02Z x\n")
+
+    def test_project_logs_errors(self):
+        self.docker.return_value = ok(self.PS)
+        for path in (self.logs_path(project="shop", dir="/srv/blog"), self.logs_path(project="nope", dir="/srv/shop")):
+            self.docker.reset_mock()
+            self.assertEqual(self.request("GET", path), (404, "projeto compose não encontrado"), path)
+            self.assertEqual(self.docker.call_args_list, [self.ps_call()])
+        self.docker.reset_mock()
+        for path in ("/api/compose/logs", self.logs_path(project="shop"), self.logs_path(project="", dir="/srv/shop")):
+            self.assertEqual(self.request("GET", path)[0], 400, path)
+        # o token só vale no header: na query, só as rotas de stream aceitam
+        for token, path in ((None, self.logs_path(**self.SHOP)), (None, self.logs_path(**self.SHOP, t=docker_gui.TOKEN))):
+            self.assertEqual(self.request("GET", path, token=token)[0], 401, path)
+        self.docker.assert_not_called()
+        self.docker.side_effect = [ok(self.PS), fail("no such service\n")]
+        self.assertEqual(self.request("GET", self.logs_path(**self.SHOP)), (500, "no such service"))
 
     def test_compose_error_is_500_with_stderr(self):
         self.docker.side_effect = [ok(self.PS), fail("pull access denied\n")]
@@ -401,7 +495,7 @@ class ComposeTest(ServerTest):
         self.docker.assert_not_called()
 
     def test_unknown_action(self):
-        for action in ("start", "rm", "UP", "exec", "build"):
+        for action in ("start", "rm", "UP", "exec", "build", "logs"):
             status, _ = self.request("POST", f"/api/compose/{action}", body=self.SHOP)
             self.assertEqual(status, 404, action)
         self.docker.assert_not_called()

@@ -54,3 +54,70 @@ test('compose que falha mostra a última linha do stderr', async ({ page, gui })
   await expect(page.locator('#toast')).toHaveText('shop: compose pull falhou. Error response from daemon: pull access denied for acme/api');
   expect(gui.read().compose_calls).toEqual([[...PREFIX, 'pull']]);
 });
+
+test('compose up --build reconstrói o projeto', async ({ page, gui }) => {
+  await gui.open({ containers: containers() });
+  await page.getByRole('button', { name: 'compose up --build do projeto shop', exact: true }).click();
+  await expect(page.locator('#toast')).toHaveText('shop: compose up --build concluído.');
+  expect(gui.read().compose_calls).toEqual([[...PREFIX, 'up', '-d', '--build']]);
+  expect(gui.container('api')!.State).toBe('running');
+});
+
+test('Reiniciar serviço pelo menu roda compose restart só daquele serviço', async ({ page, gui }) => {
+  // duas réplicas do db: as duas passam pelo "conferindo se ficou de pé"
+  await gui.open({ containers: [...containers(), ctr('db-2', { Labels: shop('db') })] });
+  await page.locator('summary[aria-label="Mais ações para solto"]').click();
+  await expect(page.getByRole('button', { name: 'Pausar' })).toBeVisible();
+  await expect(page.getByRole('button', { name: /Reiniciar serviço/ })).toHaveCount(0);  // sem compose, sem o item
+  await page.keyboard.press('Escape');
+
+  await page.locator('summary[aria-label="Mais ações para db"]').click();
+  await page.getByRole('button', { name: 'Reiniciar serviço db' }).click();
+  await expect(page.locator('#toast')).toHaveText('Os 2 containers estão de pé.');
+  expect(gui.read().compose_calls).toEqual([[...PREFIX, 'restart', '--', 'db']]);
+  expect(gui.container('api')!.State).toBe('exited');  // outro serviço: fica como estava
+});
+
+test('Reiniciar serviço que falha mostra a última linha do stderr', async ({ page, gui }) => {
+  await gui.open({ containers: containers(), compose_fail: 'no such service: db' });
+  await page.locator('summary[aria-label="Mais ações para db"]').click();
+  await page.getByRole('button', { name: 'Reiniciar serviço db' }).click();
+  await expect(page.locator('#toast')).toHaveText('shop: compose restart db falhou. no such service: db');
+});
+
+test('Logs do projeto juntam os serviços em ordem, com o prefixo de cada um', async ({ page, gui }) => {
+  const cs = containers();
+  cs[0].logs = '2026-10-05T10:00:02Z api pronto\n';
+  cs[1].logs = '2026-10-05T10:00:01Z db pronto\n';
+  await gui.open({ containers: cs });
+  await page.getByRole('button', { name: 'Logs do projeto shop' }).click();
+  await expect(page.locator('#lt')).toHaveText('shop');
+  await expect(page.locator('#lb')).toHaveText('db-1  | 2026-10-05T10:00:01Z db pronto\napi-1  | 2026-10-05T10:00:02Z api pronto\n');
+  await expect(page.locator('#dlg-status')).toHaveText('Projeto compose · 1 de 2 rodando · todos os serviços');
+  await expect(page.locator('#lmeta')).toContainText('Últimas 500 linhas de cada container');
+  await expect(page.locator('#insp')).toBeHidden();  // o inspect é de um container só
+  expect(gui.read().compose_calls).toEqual([[...PREFIX, 'logs', '--no-color', '--timestamps', '--tail', '500']]);
+
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('button', { name: 'Logs do projeto shop' })).toBeFocused();
+  await page.getByRole('button', { name: 'Logs db' }).click();
+  await expect(page.locator('#insp')).toBeVisible();
+  await expect(page.locator('#lb')).toHaveText('2026-10-05T10:00:01Z db pronto\n');
+});
+
+test('Logs do projeto ao vivo trazem as linhas novas e param quando tudo para', async ({ page, gui }) => {
+  const cs = containers();
+  cs[1].logs = 'db 1\n';
+  await gui.open({ containers: cs });
+  await page.getByRole('button', { name: 'Logs do projeto shop' }).click();
+  await page.locator('#follow').click();
+  await expect(page.locator('#lmeta')).toHaveText('Ao vivo · últimas 500 linhas de cada container e as novas');
+  await expect(page.locator('#lb')).toHaveText('db-1  | db 1\n');
+  gui.update(s => { s.containers[1].logs = 'db 1\ndb 2\n'; });
+  await expect(page.locator('#lb')).toHaveText('db-1  | db 1\ndb-1  | db 2\n');
+  expect(gui.read().compose_calls).toContainEqual([...PREFIX, 'logs', '--no-color', '--timestamps', '--tail', '500', '--follow']);
+
+  gui.update(s => { Object.assign(s.containers[1], { State: 'exited', Status: 'Exited (0) 1 second ago' }); });
+  await expect(page.locator('#follow')).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('#lmeta')).toContainText('os containers pararam');
+});

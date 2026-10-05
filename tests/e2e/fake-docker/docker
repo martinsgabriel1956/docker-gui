@@ -14,7 +14,9 @@ No topo do JSON, "ps_error" faz o `docker ps` falhar (daemon fora do ar), "df" �
 `docker system df` (lista de linhas) e "pruned" registra os prunes que rodaram. O prune zera o
 "Reclaimable" da categoria e diz que liberou o que estava lá. "compose_fail" faz todo
 `docker compose` falhar com esse stderr, e cada `docker compose` grava o argv em "compose_calls".
-`compose up` deixa os containers do projeto rodando, `down` os remove e `pull` não muda nada.
+`compose up` (com ou sem --build) deixa os containers do projeto rodando, `down` os remove, `pull` não
+muda nada, `restart <serviço>` deixa os containers do serviço rodando e `logs` junta os logs do projeto
+com o prefixo do serviço ("api-1  | "), como o compose; com --follow, acompanha como o `logs -f`.
 O `docker exec -it` do terminal vira um sh local.
 """
 import contextlib
@@ -60,17 +62,19 @@ def save(f, state):
     json.dump(state, f)
 
 
-def follow(path, ref):
-    """logs -f: manda o que já tem, depois só o que for acrescentado; termina quando o container para, como o docker."""
-    sent = 0
+def follow(path, pick, fmt=lambda c, text: text):
+    """logs -f: manda o que já tem, depois só o que for acrescentado; termina quando nenhum dos containers
+    acompanhados (pick: um no docker logs, o projeto no compose logs) está rodando, como o docker."""
+    sent = {}
     while True:
         with locked(path, exclusive=False) as (_, state):
-            c = find(state, ref)
-        logs = c.get("logs", "")
-        sys.stdout.write(logs[sent:])
+            cs = pick(state)
+        for c in cs:
+            logs = c.get("logs", "")
+            sys.stdout.write(fmt(c, logs[sent.get(c["ID"], 0):]))
+            sent[c["ID"]] = len(logs)
         sys.stdout.flush()
-        sent = len(logs)
-        if c["State"] not in ("running", "paused"):
+        if not any(c["State"] in ("running", "paused") for c in cs):
             return
         time.sleep(0.2)  # dorme fora do lock
 
@@ -80,17 +84,42 @@ def labels(c):
     return dict(re.findall(r"(?:^|,)([\w.-]+)=((?:[^,]|,(?![\w.-]+=))*)", c.get("Labels", "")))
 
 
+def project(state, args):
+    p = args[args.index("-p") + 1]
+    return [c for c in state["containers"] if labels(c).get("com.docker.compose.project") == p]
+
+
+def prefixed(c, text):
+    # o compose prefixa cada linha com o nome do container sem o projeto ("api-1")
+    svc = labels(c).get("com.docker.compose.service", "")
+    return "".join(f"{svc}-1  | {line}" for line in text.splitlines(keepends=True))
+
+
+def subcommand(args):
+    """compose -p X --project-directory D -f F... <sub> <resto>: pula as flags globais."""
+    i = 0
+    while args[i] in ("-p", "--project-directory", "-f"):
+        i += 2
+    return args[i], args[i + 1:]
+
+
 def compose(state, args):
     state.setdefault("compose_calls", []).append(["compose", *args])
     if state.get("compose_fail"):
         return state["compose_fail"]
-    p = args[args.index("-p") + 1]
-    mine = [c for c in state["containers"] if labels(c).get("com.docker.compose.project") == p]
+    sub, rest = subcommand(args)
+    mine = project(state, args)
+    if sub == "restart":
+        mine = [c for c in mine if labels(c).get("com.docker.compose.service") == rest[-1]]
+        if not mine:
+            return f"no such service: {rest[-1]}"
     for c in mine:
-        if "down" in args:
+        if sub == "down":
             state["containers"].remove(c)
-        elif "up" in args:
+        elif sub in ("up", "restart"):
             c.update(RUNNING)
+        elif sub == "logs" and "--follow" not in rest:
+            sys.stdout.write(prefixed(c, c.get("logs", "")))
     return None
 
 
@@ -99,7 +128,7 @@ def main(args):
     cmd, ref = args[0], args[-1]
     action = "remove" if cmd == "rm" else cmd
     if cmd == "logs" and "-f" in args:
-        return follow(path, ref)
+        return follow(path, lambda state: [find(state, ref)])
 
     if cmd == "exec":
         # terminal: confere o argv que o servidor monta e roda um sh local no lugar do container
@@ -125,8 +154,8 @@ def main(args):
                 if "--filter" not in args:
                     print(json.dumps({k: c.get(k, "") for k in PS_FIELDS}))
                 elif "com.docker.compose.project" in labels(c):  # o COMPOSE_FORMAT do servidor
-                    print(json.dumps([labels(c).get("com.docker.compose.project" + k, "")
-                                      for k in ("", ".working_dir", ".config_files")]))
+                    print(json.dumps([labels(c).get("com.docker.compose." + k, "")
+                                      for k in ("project", "project.working_dir", "project.config_files", "service")]))
         elif cmd == "compose":
             err = compose(state, args[1:])
             save(f, state)
@@ -160,6 +189,10 @@ def main(args):
             else:
                 c.update(c.get("after", {}).get(action) or AFTER[action])
             save(f, state)
+
+    # compose logs --follow: a chamada já ficou registrada; acompanha fora do lock, que o follow pega a cada volta
+    if cmd == "compose" and subcommand(args[1:])[0] == "logs" and "--follow" in args:
+        follow(path, lambda state: project(state, args[1:]), prefixed)
 
 
 if __name__ == "__main__":
