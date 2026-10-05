@@ -143,6 +143,16 @@ test('workingDir lê a pasta do projeto compose', () => {
   assert.equal(f.workingDir({}), '');
 });
 
+test('service lê o serviço do compose sem confundir com outros labels', () => {
+  const labels = 'com.docker.compose.depends_on=db:service_started:false,redis:service_started:false,'
+               + 'com.docker.compose.project=shop,com.docker.compose.service=api,com.docker.compose.service.extra=x';
+  assert.equal(f.service({Labels: labels}), 'api');
+  assert.equal(f.service({Labels: 'com.docker.compose.service=db'}), 'db');
+  assert.equal(f.service({Labels: 'xcom.docker.compose.service=falso'}), '');
+  assert.equal(f.service({Labels: 'com.docker.compose.project=shop'}), '');
+  assert.equal(f.service({}), '');
+});
+
 test('shortImage tira o host do registry e mantém a tag', () => {
   assert.equal(f.shortImage('ghcr.io/acme/api:1.4'), 'acme/api:1.4');
   assert.equal(f.shortImage('localhost:5000/app:dev'), 'app:dev');
@@ -160,9 +170,172 @@ test('todo código de saída explicado tem texto', () => {
   for (const [code, txt] of Object.entries(f.EXIT)) assert.ok(txt.length > 3, code);
 });
 
-test('usage mostra CPU e a memória usada; o limite fica no title', () => {
+test('usage mostra CPU e a memória usada; o limite, a rede e o disco ficam no title', () => {
   assert.deepEqual(f.usage({ID: 'a', CPUPerc: '0.52%', MemUsage: '10.5MiB / 1.944GiB', MemPerc: '0.53%'}),
-                   ['CPU 0.52% · RAM 10.5MiB', 'Memória: 10.5MiB / 1.944GiB (0.53%)']);
+                   ['CPU 0.52%', 'RAM 10.5MiB', 'Memória: 10.5MiB / 1.944GiB (0.53%)']);
+  assert.equal(f.usage({ID: 'a', CPUPerc: '0.52%', MemUsage: '10.5MiB / 1.944GiB', MemPerc: '0.53%',
+                        NetIO: '1.2kB / 648B', BlockIO: '0B / 4.1kB'})[2],
+               'Memória: 10.5MiB / 1.944GiB (0.53%)\nRede: 1.2kB recebidos · 648B enviados\nDisco: 0B lidos · 4.1kB gravados');
+});
+
+test('bytes entende as unidades binárias do docker e as decimais do podman', () => {
+  assert.equal(f.bytes('10.5MiB'), 10.5 * 2 ** 20);
+  assert.equal(f.bytes('1.944GiB'), 1.944 * 2 ** 30);
+  assert.equal(f.bytes('512KiB'), 512 * 1024);
+  assert.equal(f.bytes('0B'), 0);
+  assert.equal(f.bytes('1.2kB'), 1200);   // rede e disco do docker, e tudo no podman
+  assert.equal(f.bytes('10.5MB'), 10.5e6);
+  assert.equal(f.bytes(' 2GB '), 2e9);
+  assert.equal(f.bytes('--'), null);
+  assert.equal(f.bytes('10.5 parsecs'), null);
+});
+
+test('percent lê o CPUPerc e recusa o "--" de quem ainda não mediu', () => {
+  assert.equal(f.percent('0.52%'), 0.52);
+  assert.equal(f.percent('142.30%'), 142.3);  // mais de um núcleo passa de 100
+  assert.equal(f.percent('--'), null);
+  assert.equal(f.percent(''), null);
+});
+
+test('fmtBytes mostra memória em unidade binária', () => {
+  assert.equal(f.fmtBytes(0), '0 B');
+  assert.equal(f.fmtBytes(512), '512 B');
+  assert.equal(f.fmtBytes(10.5 * 2 ** 20), '10.5 MiB');
+  assert.equal(f.fmtBytes(300 * 2 ** 20), '300 MiB');
+  assert.equal(f.fmtBytes(1.5 * 2 ** 30), '1.5 GiB');
+});
+
+test('pair e io separam rede e disco; campo ausente ou estranho some', () => {
+  assert.deepEqual(f.pair('1.2kB / 648B'), ['1.2kB', '648B']);
+  assert.deepEqual(f.pair('10.5MB / 2.06GB'), ['10.5MB', '2.06GB']);  // podman
+  assert.equal(f.pair('-- / --'), null);
+  assert.equal(f.pair(undefined), null);
+  assert.deepEqual(f.io({NetIO: '1.2kB / 648B', BlockIO: '0B / 4.1kB'}),
+                   ['Rede: 1.2kB recebidos · 648B enviados', 'Disco: 0B lidos · 4.1kB gravados']);
+  assert.deepEqual(f.io({NetIO: '-- / --', BlockIO: '0B / 0B'}), ['Disco: 0B lidos · 0B gravados']);
+  assert.deepEqual(f.io({}), []);
+});
+
+test('pushSample guarda as últimas N leituras sem mexer no array anterior', () => {
+  const s = t => ({t, cpu: t, mem: t});
+  let buf = [];
+  for (let t = 0; t < 70_000; t += 1000) buf = f.pushSample(buf, s(t), 60);
+  assert.equal(buf.length, 60);
+  assert.equal(buf[0].t, 10_000);
+  assert.equal(buf.at(-1).t, 69_000);
+  const before = buf, after = f.pushSample(buf, s(70_000), 60);
+  assert.equal(before.length, 60);
+  assert.equal(before.at(-1).t, 69_000);
+  assert.equal(after.at(-1).t, 70_000);
+  assert.equal(f.HISTORY, 60);
+});
+
+test('pushSample recomeça a série depois de um buraco (aba escondida, servidor fora)', () => {
+  const buf = [{t: 0, cpu: 1, mem: 1}, {t: 5000, cpu: 2, mem: 2}];
+  assert.equal(f.pushSample(buf, {t: 10_000, cpu: 3, mem: 3}).length, 3);
+  assert.deepEqual(f.pushSample(buf, {t: 60_000, cpu: 3, mem: 3}), [{t: 60_000, cpu: 3, mem: 3}]);
+});
+
+test('sparkPoints alinha à direita numa janela fixa e escala de 0 ao máximo', () => {
+  // janela de 3 leituras em 40 px: cada uma ocupa 20 px; 14 px de altura com 1 de margem
+  assert.equal(f.sparkPoints([0, 5, 10], 40, 14, 3), '0,13 20,7 40,1');
+  assert.equal(f.sparkPoints([10, 10], 40, 14, 3), '20,1 40,1');  // série menor que a janela começa no meio
+  assert.equal(f.sparkPoints([0, 0], 40, 14, 3), '20,13 40,13');  // tudo zero não divide por zero
+  // piso: 0,5% de CPU com piso de 1% fica na metade, não no topo
+  assert.equal(f.sparkPoints([0.5, 0.5], 40, 14, 3, 1), '20,7 40,7');
+});
+
+test('trend descreve o sparkline em palavras', () => {
+  const pct = n => `${n.toFixed(2)}%`;
+  assert.equal(f.trend('CPU', [1, 3, 2], 10_000, pct), 'CPU nos últimos 10 s: mín 1.00%, máx 3.00%, agora 2.00%');
+  assert.equal(f.trend('CPU', [1, 2], 200, pct), 'CPU nos últimos 1 s: mín 1.00%, máx 2.00%, agora 2.00%');
+  assert.equal(f.trend('Memória', [2 ** 20, 2 ** 21], 295_000, f.fmtBytes),
+               'Memória nos últimos 5 min: mín 1.0 MiB, máx 2.0 MiB, agora 2.0 MiB');
+});
+
+test('age escreve a idade a partir do epoch', () => {
+  const now = 1_800_000_000, ago = s => now - s;
+  assert.equal(f.age(ago(10), now), '<1 min');
+  assert.equal(f.age(ago(5 * 60), now), '5 min');
+  assert.equal(f.age(ago(3 * 3600), now), '3 h');
+  assert.equal(f.age(ago(47 * 3600), now), '47 h');
+  assert.equal(f.age(ago(3 * 86400), now), '3 d');
+  assert.equal(f.age(ago(20 * 86400), now), '2 sem');
+  assert.equal(f.age(ago(100 * 86400), now), '3 meses');
+  assert.equal(f.age(ago(800 * 86400), now), '2 anos');
+});
+
+// mensagens reais do docker 29 e do podman
+test('rmHint explica por que a remoção falhou', () => {
+  const inUse = 'Em uso: remova o container que usa (ou tire ele da rede) antes.';
+  for (const msg of [
+    'Error response from daemon: conflict: unable to delete fd7dc98638c8 (cannot be forced) - image is being used by running container e0a85417a665',
+    'Error response from daemon: conflict: unable to delete fd7dc98638c8 (must be forced) - image is being used by stopped container e0a85417a665',
+    'Error response from daemon: remove pgdata: volume is in use - [8341cdc825766a6d]',
+    'Error response from daemon: error while removing network: network loja_default has active endpoints (name:"web" id:"55e1ed46acab")',
+    'Error: image used by 3f1c2b9a8e7d: image is in use by a container: consider listing external containers and force-removing image',
+    'Error: volume pgdata is being used by the following container(s): 3f1c2b9a8e7d: volume is being used',
+    'Error: "loja_default" has associated containers with it. Use -f to forcibly delete containers and pods: network is being used',
+  ]) assert.equal(f.rmHint(msg), inUse, msg);
+  assert.match(f.rmHint('Error response from daemon: conflict: unable to delete 3e58ae0f7a49 (must be forced) - image is referenced in multiple repositories'), /mais de uma tag/);
+  assert.match(f.rmHint('Error response from daemon: conflict: unable to delete 3e58ae0f7a49 (cannot be forced) - image has dependent child images'), /construídas sobre esta/);
+  assert.equal(f.rmHint('Error response from daemon: get pgdata: no such volume'), '');
+});
+
+test('logFilter busca o texto literal, sem diferenciar maiúsculas', () => {
+  assert.equal(f.logFilter(''), null);
+  const re = f.logFilter('erro');
+  assert.deepEqual('Erro: deu ERRO e erro'.split(re), ['', 'Erro', ': deu ', 'ERRO', ' e ', 'erro', '']);
+  assert.deepEqual('tudo certo'.split(re), ['tudo certo']);  // não casou: a linha inteira, sozinha
+  // caractere especial de regex vale como texto
+  assert.deepEqual('GET /a?b=1 (x) [y] a.b*c'.split(f.logFilter('?b=1 (x) [y]')), ['GET /a', '?b=1 (x) [y]', ' a.b*c']);
+  assert.deepEqual('a.b axb'.split(f.logFilter('a.b')), ['', 'a.b', ' axb']);
+  assert.deepEqual('C:\\tmp\\x $HOME ^|'.split(f.logFilter('\\tmp\\')), ['C:', '\\tmp\\', 'x $HOME ^|']);
+  assert.deepEqual('${x} ^|'.split(f.logFilter('${x} ^|')), ['', '${x} ^|', '']);
+});
+
+// criar container: as mesmas regras do run_argv do servidor (RunArgvTest em tests/test_docker_gui.py)
+const form = (o = {}) => ({image: 'nginx', name: '', ports: '', all_interfaces: false, env: '', restart: 'no', volume: '', ...o});
+const errs = o => f.runSpec(form(o)).errors;
+
+test('runSpec monta o corpo do POST /api/run', () => {
+  assert.deepEqual(f.runSpec(form({
+    image: ' ghcr.io/acme/api:1.4 ', name: 'api', ports: '8080:80, 5353:53/udp\n9000:9000/tcp', all_interfaces: true,
+    env: 'A=1\n\n# comentário\nB=x=y\r\nMSG=olá; $(id)\nVAZIA=', restart: 'unless-stopped', volume: 'dados:/var/lib/x',
+  })), {
+    spec: {image: 'ghcr.io/acme/api:1.4', name: 'api', ports: ['8080:80', '5353:53/udp', '9000:9000/tcp'], all_interfaces: true,
+           env: ['A=1', 'B=x=y', 'MSG=olá; $(id)', 'VAZIA='], restart: 'unless-stopped', volume: 'dados:/var/lib/x'},
+    errors: {},
+  });
+  assert.deepEqual(f.runSpec(form()).spec, {image: 'nginx', name: '', ports: [], all_interfaces: false, env: [], restart: 'no', volume: ''});
+});
+
+test('runSpec aceita as imagens que o docker aceita', () => {
+  for (const image of ['nginx', 'nginx:1.25-alpine', 'library/nginx:latest', 'localhost:5000/minha_app:v1.0',
+                       'registry-1.example.com:443/a/b/c', 'my.app__x-y', `redis@sha256:${'a'.repeat(64)}`, `redis:7@sha256:${'0'.repeat(64)}`])
+    assert.deepEqual(errs({image}), {}, image);
+});
+
+test('runSpec recusa imagem que vira flag ou foge do formato', () => {
+  for (const image of ['', '-it', '--privileged', '--network=host', 'nginx --privileged', 'nginx;id', 'Nginx', 'nginx:',
+                       ':latest', 'nginx:-x', 'nginx@sha256:abc', '../nginx', '/nginx', 'a//b', 'nginx$(id)', 'a'.repeat(600)])
+    assert.ok(errs({image}).image, image);
+});
+
+test('runSpec confere nome, portas, env, restart e volume', () => {
+  for (const name of ['a', '-x', '--privileged', '.web', 'web app', 'web;id', 'web/x', 'wéb', 'x'.repeat(129)])
+    assert.ok(errs({name}).name, name);
+  for (const ports of ['8080', '0:80', '65536:80', '8080:80/sctp', '127.0.0.1:8080:80', '8080-8090:80', '-p', '8080:80 8080:81'])
+    assert.ok(errs({ports}).ports, ports);
+  assert.deepEqual(errs({ports: '53:53/tcp 53:53/udp'}), {});  // tcp e udp não colidem
+  for (const env of ['A', '=x', '1A=x', 'A-B=x', '-e=x', 'A.B=x', ' A=x', 'A=1\nA=2', `A=${'x'.repeat(f.MAX_ENV_VALUE + 1)}`])
+    assert.ok(errs({env}).env, env);
+  for (const restart of ['', 'ALWAYS', 'on-failure:3', 'sempre']) assert.ok(errs({restart}).restart, restart);
+  for (const r of f.RESTART) assert.deepEqual(errs({restart: r}), {}, r);
+  for (const volume of ['/etc:/x', './data:/data', '~/d:/d', 'data', 'data:rel', 'data:/', 'data:/x:ro', 'data:/x,type=bind',
+                        'data:/a/../b', 'C:/data', '-v:/x', 'data:/a b'])
+    assert.ok(errs({volume}).volume, volume);
+  assert.deepEqual(errs({volume: 'pg.data_1:/var/lib/postgresql/data'}), {});
 });
 
 test('bulkSummary junta sucessos e falhas num aviso só', () => {

@@ -11,6 +11,9 @@ const FAKE_BIN = path.join(HERE, 'fake-docker');
 
 type Action = 'start' | 'stop' | 'restart' | 'pause' | 'unpause' | 'remove';
 
+// linha do `docker stats`; sem NetIO e BlockIO, a página não mostra rede e disco
+export type Stats = { CPUPerc: string; MemUsage: string; MemPerc: string; NetIO?: string; BlockIO?: string };
+
 // campos do `docker ps` que a página lê, mais os extras que o docker falso entende (ver fake-docker/docker)
 export type Container = {
   ID: string; Names: string; Image: string; State: string; Status: string; Ports: string; Labels: string;
@@ -20,12 +23,18 @@ export type Container = {
   fail?: Partial<Record<Action, string>>;
   delay?: Partial<Record<Action, number>>;
   after?: Partial<Record<Action, { State: string; Status: string }>>;
-  stats?: { CPUPerc: string; MemUsage: string; MemPerc: string };
+  stats?: Stats | Stats[];  // lista: uma leitura por `docker stats`, a última se repete
 };
 export type DiskUsage = { Type: string; TotalCount: string; Active: string; Size: string; Reclaimable: string };
+// linhas reais do `docker image ls --no-trunc` (uma por tag), `volume ls` e `network ls --no-trunc`, em '{{json .}}'
+export type ImageRow = { ID: string; Repository: string; Tag: string; Size: string; CreatedAt: string };
+export type VolumeRow = { Name: string; Driver: string };
+export type NetworkRow = { ID: string; Name: string; Driver: string; Scope: string };
 export type DockerState = {
   containers: Container[]; ps_error?: string; df?: DiskUsage[]; pruned?: string[];
   compose_fail?: string; compose_calls?: string[][];
+  run_calls?: string[][]; run_fail?: string; run_delay?: number; run_after?: { State: string; Status: string };
+  images?: ImageRow[]; volumes?: VolumeRow[]; networks?: NetworkRow[]; removed?: string[];
 };
 
 // ID estável por nome: o mesmo container tem o mesmo ID em todo teste
