@@ -211,7 +211,26 @@ class LogsAndHealthTest(ServerTest):
     def test_logs_join_stdout_and_stderr(self):
         self.docker.return_value = ok("out\n", "err\n")
         self.assertEqual(self.request("GET", f"/api/logs/{HEX_ID}"), (200, "out\nerr\n"))
-        self.docker.assert_called_once_with("logs", "--timestamps", "--tail", "500", HEX_ID)
+        self.docker.assert_called_once_with("logs", "--timestamps", "--tail", "500", HEX_ID, timeout=docker_gui.READ_TIMEOUT)
+
+    def test_logs_tail_from_whitelist(self):
+        cases = {"500": ["--tail", "500"], "2000": ["--tail", "2000"], "10000": ["--tail", "10000"], "all": []}
+        for tail, args in cases.items():
+            self.docker.reset_mock()
+            self.assertEqual(self.request("GET", f"/api/logs/{HEX_ID}?tail={tail}")[0], 200, tail)
+            # o log inteiro pode demorar: "all" ganha o prazo longo
+            timeout = docker_gui.ACTION_TIMEOUT if tail == "all" else docker_gui.READ_TIMEOUT
+            self.docker.assert_called_once_with("logs", "--timestamps", *args, HEX_ID, timeout=timeout)
+
+    def test_logs_tail_outside_whitelist_never_reaches_docker(self):
+        for tail in ("", "1", "499", "501", "-1", "0", "100000", "ALL", "+500", "500%20--help", "--help",
+                     "500;rm", "all%00", "500&tail=all"):
+            status, _ = self.request("GET", f"/api/logs/{HEX_ID}?tail={tail}")
+            self.assertIn(status, (400, 404), tail)
+        for query in ("tail=500&x=1", "x=1", "tail=500&tail=all", "t=1&tail=500"):
+            status, _ = self.request("GET", f"/api/logs/{HEX_ID}?{query}")
+            self.assertEqual(status, 404, query)  # só ?tail=... e nada mais
+        self.docker.assert_not_called()
 
     def test_logs_error(self):
         self.docker.return_value = fail("No such container")
@@ -258,6 +277,25 @@ class LogsStreamTest(ServerTest):
         with open(os.path.join(self.dir, "args")) as f:
             self.assertEqual(f.read().split(), ["logs", "-f", "--timestamps", "--tail", "500", HEX_ID])
 
+    def test_tail_from_whitelist(self):
+        cases = {"500": ["--tail", "500"], "2000": ["--tail", "2000"], "10000": ["--tail", "10000"], "all": []}
+        for tail, args in cases.items():
+            self.fake_docker("echo oi")
+            status, _ = self.request("GET", self.path() + f"&tail={tail}")
+            self.assertEqual(status, 200, tail)
+            with open(os.path.join(self.dir, "args")) as f:
+                self.assertEqual(f.read().split(), ["logs", "-f", "--timestamps", *args, HEX_ID])
+
+    def test_tail_outside_whitelist_is_400_without_docker(self):
+        self.fake_docker("echo nunca")
+        for query in ("tail=", "tail=1", "tail=-1", "tail=ALL", "tail=500%20--help", "tail=--help", "tail=500;rm",
+                      "tail=500&tail=all", "tail=10000%00"):
+            status, body = self.request("GET", self.path() + "&" + query)
+            self.assertEqual((status, body), (400, "tail inválido"), query)
+        # sem token, nem chega a olhar o tail
+        self.assertEqual(self.request("GET", f"/api/logs/{HEX_ID}/stream?tail=x")[0], 401)
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "args")))
+
     def test_token_goes_in_query(self):
         self.fake_docker("echo nunca")
         for token in (None, "", "errado", docker_gui.TOKEN[:-1]):
@@ -273,6 +311,19 @@ class LogsStreamTest(ServerTest):
         self.assertEqual((status, body), (200, 'data: "api-1  | oi\\n"\n\nevent: end\ndata:\n\n'))
         with open(os.path.join(self.dir, "args")) as f:
             self.assertEqual(f.read().split(), [*ComposeTest.BASE, "logs", "--no-color", "--timestamps", "--tail", "500", "--follow"])
+
+    def test_compose_project_stream_tail(self):
+        self.docker.return_value = ok(ComposeTest.PS)
+        self.fake_docker("true")
+        q = {**ComposeTest.SHOP, "t": docker_gui.TOKEN}
+        self.assertEqual(self.request("GET", "/api/compose/logs/stream?" + urlencode({**q, "tail": "all"}))[0], 200)
+        with open(os.path.join(self.dir, "args")) as f:
+            self.assertEqual(f.read().split(), [*ComposeTest.BASE, "logs", "--no-color", "--timestamps", "--follow"])
+        os.remove(os.path.join(self.dir, "args"))
+        for tail in ("", "1", "--help", "500;rm"):
+            self.assertEqual(self.request("GET", "/api/compose/logs/stream?" + urlencode({**q, "tail": tail})),
+                             (400, "tail inválido"), tail)
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "args")))
 
     def test_compose_stream_checks_token_and_project(self):
         self.docker.return_value = ok(ComposeTest.PS)
@@ -445,7 +496,24 @@ class ComposeTest(ServerTest):
                          "api-1  | 2026-10-05T14:04:49.5Z api 1 \r com \\r\n"
                          "db-1   | 2026-10-05T14:04:50Z db 2\n")))
         self.assertEqual(self.docker.call_args_list, [self.ps_call(), mock.call(
-            *self.BASE, "logs", "--no-color", "--timestamps", "--tail", "500")])
+            *self.BASE, "logs", "--no-color", "--timestamps", "--tail", "500", timeout=docker_gui.READ_TIMEOUT)])
+
+    def test_project_logs_tail_from_whitelist(self):
+        # mesma whitelist dos logs de um container; no compose o --tail vale por container
+        cases = {"500": ["--tail", "500"], "2000": ["--tail", "2000"], "10000": ["--tail", "10000"], "all": []}
+        for tail, args in cases.items():
+            self.docker.reset_mock()
+            self.docker.side_effect = [ok(self.PS), ok("")]
+            self.assertEqual(self.request("GET", self.logs_path(**self.SHOP, tail=tail))[0], 200, tail)
+            timeout = docker_gui.ACTION_TIMEOUT if tail == "all" else docker_gui.READ_TIMEOUT
+            self.assertEqual(self.docker.call_args_list, [self.ps_call(), mock.call(
+                *self.BASE, "logs", "--no-color", "--timestamps", *args, timeout=timeout)], tail)
+
+    def test_project_logs_tail_outside_whitelist_is_400_without_docker(self):
+        for tail in ("", "1", "-1", "ALL", "--help", "500 --help", "500;rm", ["500", "all"]):
+            status, body = self.request("GET", self.logs_path(**self.SHOP) + "&" + urlencode({"tail": tail}, doseq=True))
+            self.assertEqual((status, body), (400, "tail inválido"), tail)
+        self.docker.assert_not_called()
 
     def test_by_time_keeps_lines_without_timestamp_on_top(self):
         self.assertEqual(docker_gui.by_time(""), "")

@@ -1,6 +1,6 @@
 import {
   type Bucket, type Container, type ContainerState, type DiskUsage, type Port, type Stats, type Tone,
-  bucket, esc, hasHealth, isProblem, newProblems, ports, project, service, shortImage, status, tone, usage, workingDir,
+  bucket, esc, hasHealth, isProblem, logFilter, newProblems, ports, project, service, shortImage, status, tone, usage, workingDir,
 } from './format';
 import {Terminal} from '@xterm/xterm';
 import {FitAddon} from '@xterm/addon-fit';
@@ -572,8 +572,14 @@ function disarm(redraw = true) {
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') closeMenus();
   if (e.key === 'Escape' && arming) return disarm();
-  if ($<HTMLDialogElement>('#dlg').open || $<HTMLDialogElement>('#shell').open || e.ctrlKey || e.metaKey || e.altKey) return;
+  if ($<HTMLDialogElement>('#shell').open || e.ctrlKey || e.metaKey || e.altKey) return;
   const el = document.activeElement as HTMLElement, typing = /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName);
+  // nos logs, / vai para o filtro das linhas (o mesmo atalho da busca da lista). Ctrl+F fica com o navegador:
+  // a busca dele já acha texto na caixa, e quem aperta Ctrl+F espera ela
+  if ($<HTMLDialogElement>('#dlg').open) {
+    if (e.key === '/' && !typing) { e.preventDefault(); $('#lf').focus(); }
+    return;
+  }
   if (e.key === '/' && !typing) { e.preventDefault(); return $('#q').focus(); }
   if ((e.key === 'z' || e.key === 'Z') && !typing && toastFn) return runToastAction();
   // ↑↓ movem o foco para o Logs da linha de cima/baixo: é seguro (Enter não muda estado) e existe em toda linha
@@ -613,24 +619,93 @@ function renderDlg() {
     + (c.State === 'running' ? `<button data-id="dlg" data-a="exec" onclick="copyExec('${c.ID}')" class="${BTN} text-fg hover:bg-hover">Copiar docker exec</button>` : '');
 }
 
-async function fetchLogs() {
-  const lb = $('#lb'), atEnd = lb.scrollHeight - lb.scrollTop - lb.clientHeight < 40;  // só gruda no fim se já estava lá
-  try {
-    const r = await api(logProject ? `/api/compose/logs?${new URLSearchParams(logProject)}` : '/api/logs/' + logId), j: string = await r.json();
-    if (stream) return;  // o ao vivo ligou enquanto esta resposta vinha: ele é quem preenche a caixa
-    lb.textContent = r.ok ? j || '(sem logs)' : `Não consegui ler os logs: ${j}`;
-    $('#lmeta').textContent = `${tail()} · atualizado às ${new Date().toLocaleTimeString('pt-BR')}`;
-  } catch { lb.textContent = 'Não consegui carregar os logs. O servidor do Docker GUI está rodando?'; }
+// histórico que o "Carregar mais" vai pedindo; o servidor só aceita estes (LOG_TAIL no docker_gui.py)
+const TAILS = ['500', '2000', '10000', 'all'] as const;
+// o ao vivo vai até 10000: o teto de linhas na tela tem que caber o histórico, e "tudo" ao vivo não teria teto
+const LIVE_TAILS = 3;
+// trecho que casou com o filtro
+const MARK = 'rounded-sm bg-warn/30 text-fg-strong';
+// linhas carregadas (cada uma com o \n), que o filtro relê; ocorrências e linhas que casaram; tudo veio (log curto)
+let tailAt = 0, buf: string[] = [], hits = 0, hitLines = 0, complete = false;
+
+const fmt = (n: number) => n.toLocaleString('pt-BR');
+// o compose aplica o --tail em cada container do projeto
+const hist = () => TAILS[tailAt] === 'all' ? 'todas as linhas'
+  : `últimas ${fmt(+TAILS[tailAt])} linhas${logProject ? ' de cada container' : ''}`;
+const filterRe = () => logFilter($<HTMLInputElement>('#lf').value);
+
+// a linha com os trechos marcados, ou null se não casou (aí ela nem entra na caixa)
+function hitNode(line: string, re: RegExp) {
+  const parts = line.split(re);
+  if (parts.length < 2) return null;
+  hits += (parts.length - 1) / 2; hitLines++;
+  const span = document.createElement('span');
+  parts.forEach((p, i) => {
+    if (i % 2 === 0) return p && span.append(p);
+    const m = document.createElement('mark');
+    m.className = MARK; m.textContent = p; span.append(m);
+  });
+  return span;
+}
+
+function renderHits() {
+  const txt = !filterRe() ? '' : hits
+    ? `${fmt(hits)} ${hits === 1 ? 'ocorrência' : 'ocorrências'} em ${fmt(hitLines)} ${hitLines === 1 ? 'linha' : 'linhas'}`
+    : 'Nenhuma ocorrência';
+  if ($('#lcount').textContent !== txt) $('#lcount').textContent = txt;  // é aria-live: só fala quando muda
+}
+
+// redesenha a caixa a partir de buf: sem filtro, o texto como veio; com filtro, só as linhas que casam.
+// Ao vivo, um nó por linha (o teto tira do começo); parado, um texto só, que pesa menos com o log inteiro
+function paint() {
+  const lb = $('#lb'), re = filterRe(), atEnd = lb.scrollHeight - lb.scrollTop - lb.clientHeight < 40;
+  hits = hitLines = 0;
+  if (buf.length && (re || stream)) {  // sem linhas, a caixa tem um aviso ("(sem logs)", erro): fica
+    // num fragment, um a um: espalhar o log inteiro em argumentos (replaceChildren(...)) estoura a pilha
+    const frag = document.createDocumentFragment();
+    for (const l of buf) { const n = re ? hitNode(l, re) : l; if (n) frag.append(n); }
+    lb.replaceChildren(frag);
+  } else if (buf.length) lb.textContent = buf.join('');
+  renderHits();
   if (atEnd) lb.scrollTop = lb.scrollHeight;
 }
 
-// o compose aplica o --tail em cada container do projeto
-const tail = () => logProject ? 'Últimas 500 linhas de cada container' : 'Últimas 500 linhas';
+// "Carregar mais": diz quanto vem. Sem mais o que pedir, aria-disabled (continua no Tab, como o Atualizar)
+function renderMore() {
+  const next = TAILS[tailAt + 1], b = $('#more');
+  b.textContent = !next || complete ? 'Tudo carregado' : next === 'all' ? 'Carregar tudo' : `Carregar ${fmt(+next)} linhas`;
+  b.setAttribute('aria-disabled', String(!next || complete || (!!stream && tailAt + 1 >= LIVE_TAILS)));
+}
+
+// more: veio do "Carregar mais", com as linhas antigas entrando em cima; a tela fica parada nas mesmas linhas
+async function fetchLogs(more = false) {
+  const lb = $('#lb'), atEnd = lb.scrollHeight - lb.scrollTop - lb.clientHeight < 40;  // só gruda no fim se já estava lá
+  const fromEnd = lb.scrollHeight - lb.scrollTop, tail = TAILS[tailAt], who = logProject ?? logId;
+  try {
+    const r = await api(logProject ? `/api/compose/logs?${new URLSearchParams({...logProject, tail})}` : `/api/logs/${logId}?tail=${tail}`);
+    const j: string = await r.json();
+    if (stream) return;  // o ao vivo ligou enquanto esta resposta vinha: ele é quem preenche a caixa
+    // já pediram outro container (ou projeto) ou mais histórico: vale a resposta nova
+    if (who !== (logProject ?? logId) || tail !== TAILS[tailAt]) return;
+    buf = r.ok && j ? j.match(/[^\n]*\n|[^\n]+$/g)! : [];
+    // menos linhas que o pedido: o log inteiro já está aqui (no projeto, o total abaixo do pedido também garante isso)
+    complete = r.ok && (tail === 'all' || buf.length < +tail);
+    if (buf.length) paint();
+    else { lb.textContent = r.ok ? '(sem logs)' : `Não consegui ler os logs: ${j}`; renderHits(); }
+    $('#lmeta').textContent = `${hist().replace(/^./, c => c.toUpperCase())} · atualizado às ${new Date().toLocaleTimeString('pt-BR')}`;
+  } catch { buf = []; lb.textContent = 'Não consegui carregar os logs. O servidor do Docker GUI está rodando?'; }
+  renderMore();
+  if (more) lb.scrollTop = lb.scrollHeight - fromEnd;
+  else if (atEnd) lb.scrollTop = lb.scrollHeight;
+}
 
 function openLogs(title: string) {
+  tailAt = 0; buf = []; complete = false;
   $('#lt').textContent = title;
-  $('#lb').textContent = 'Carregando…'; $('#lmeta').textContent = tail(); $('#dlg-msg').innerHTML = '';
+  $<HTMLInputElement>('#lf').value = '';  // cada container (ou projeto) começa sem filtro
+  $('#lb').textContent = 'Carregando…'; $('#lmeta').textContent = hist().replace(/^./, c => c.toUpperCase()); $('#dlg-msg').innerHTML = '';
   $('#insp').hidden = !!logProject;  // a configuração (inspect) é de um container só
+  renderHits(); renderMore();
   $<HTMLDialogElement>('#dlg').showModal(); renderDlg(); fetchLogs();
 }
 
@@ -647,14 +722,36 @@ function projectLogs(p: string) {
   openLogs(p);
 }
 
-// ponytail: teto fixo; um container falante por horas não pode crescer o DOM sem limite
+// mais histórico: 500 -> 2000 -> 10000 -> tudo. Ao vivo, reconecta pedindo mais (até 10000)
+function loadMore() {
+  if ($('#more').getAttribute('aria-disabled') === 'true') {
+    if (stream && TAILS[tailAt + 1]) toast(`Ao vivo, o histórico vai até ${fmt(+TAILS[LIVE_TAILS - 1])} linhas. Para carregar tudo, desligue o ao vivo.`);
+    return;
+  }
+  tailAt++;
+  if (stream) toggleFollow(true); else fetchLogs(true);
+  renderMore();
+}
+
+// ponytail: teto fixo; um container falante por horas não pode crescer o DOM sem limite.
+// Com mais histórico pedido, o teto sobe junto (no máximo 10000, ver LIVE_TAILS)
 const MAX_LINES = 5000;
 
 // as linhas do ao vivo chegam em rajada (500 de uma vez ao conectar): entram no DOM juntas, não uma a uma
 function flushLogs() {
-  const lb = $('#lb'), atEnd = lb.scrollHeight - lb.scrollTop - lb.clientHeight < 40;
-  lb.append(...pending.splice(0));  // anexar (em vez de trocar o texto) não apaga a seleção de quem está copiando
-  for (let n = lb.childNodes.length - MAX_LINES; n > 0; n--) lb.firstChild!.remove();  // um nó de texto por linha
+  const lb = $('#lb'), atEnd = lb.scrollHeight - lb.scrollTop - lb.clientHeight < 40, re = filterRe();
+  const add = pending.splice(0);
+  buf.push(...add);
+  // anexar (em vez de trocar o texto) não apaga a seleção de quem está copiando
+  lb.append(...(re ? add.map(l => hitNode(l, re)).filter(n => !!n) : add));
+  // o teto vale para as linhas carregadas; na tela, com filtro, só as que casaram têm nó
+  for (const l of buf.splice(0, Math.max(0, buf.length - Math.max(MAX_LINES, +TAILS[tailAt])))) {
+    const n = re ? (l.split(re).length - 1) / 2 : 1;
+    if (!n) continue;
+    lb.firstChild!.remove();
+    if (re) { hits -= n; hitLines--; }
+  }
+  if (re) renderHits();
   if (atEnd) lb.scrollTop = lb.scrollHeight;
 }
 
@@ -664,11 +761,15 @@ function toggleFollow(on = !stream, why = '') {
   stream?.close(); stream = null;
   if (was) flushLogs();  // o que já chegou entra antes de parar
   if (on) {
+    tailAt = Math.min(tailAt, LIVE_TAILS - 1); complete = false;
     // EventSource não manda header: o token vai na query, só nestas rotas
-    const es = stream = new EventSource(logProject ? `/api/compose/logs/stream?${new URLSearchParams({...logProject, t: TOKEN})}`
-                                                   : `/api/logs/${logId}/stream?t=${encodeURIComponent(TOKEN)}`);
-    // cada conexão (inclusive a reconexão automática) recomeça das últimas 500 linhas: limpa para não duplicar
-    es.onopen = () => { pending = []; $('#lb').textContent = ''; $('#lmeta').textContent = `Ao vivo · ${tail().toLowerCase()} e as novas`; };
+    const q = new URLSearchParams({...logProject, t: TOKEN, tail: TAILS[tailAt]});
+    const es = stream = new EventSource(logProject ? `/api/compose/logs/stream?${q}` : `/api/logs/${logId}/stream?${q}`);
+    // cada conexão (inclusive a reconexão automática) recomeça do histórico pedido: limpa para não duplicar
+    es.onopen = () => {
+      pending = []; buf = []; hits = hitLines = 0; $('#lb').textContent = ''; renderHits();
+      $('#lmeta').textContent = `Ao vivo · ${hist()} e as novas`;
+    };
     es.onmessage = e => { if (pending.push(JSON.parse(e.data)) === 1) setTimeout(flushLogs, 50); };
     es.addEventListener('end', () => toggleFollow(false, logProject ? 'os containers pararam' : 'o container parou'));
     // queda de rede: o EventSource reconecta sozinho; CLOSED é recusa do servidor (token, erro)
@@ -676,6 +777,7 @@ function toggleFollow(on = !stream, why = '') {
   } else if (was) $('#lmeta').textContent = `Ao vivo parado às ${new Date().toLocaleTimeString('pt-BR')}${why ? ` · ${why}` : ''}`;
   $('#follow').setAttribute('aria-pressed', String(on));
   $('#refresh').setAttribute('aria-disabled', String(on));  // com o ao vivo ligado, Atualizar é redundante (mas continua no Tab)
+  renderMore();
 }
 
 // botão Atualizar: com o ao vivo ligado não faz nada (já atualiza sozinho)
@@ -831,14 +933,20 @@ async function prune(k: DiskKind) {
 // esta lista é a interface completa entre o HTML e o código
 Object.assign(window, {
   act, afterClose, askNotify, clearFilters, composeAct, copyAddr, copyExec, copyLogs, downloadLogs, filterBy, loadDisk,
-  loadHealth, loadInspect, menuPick, openShell, placeMenu, projectLogs, prune, refreshLogs, restartService, runToastAction,
-  stackAct, toggleFollow,
+  loadHealth, loadInspect, loadMore, menuPick, openShell, placeMenu, projectLogs, prune, refreshLogs, restartService,
+  runToastAction, stackAct, toggleFollow,
 });
 
 $('#dlg').addEventListener('close', afterClose);
 $('#shell').addEventListener('close', closeShell);
 $('#shell').addEventListener('cancel', e => e.preventDefault());  // Esc é do vim/less, não do modal
 $<HTMLInputElement>('#q').oninput = render;
+$('#lf').oninput = paint;
+// Esc no filtro com texto limpa o filtro; vazio, segue para o modal, que fecha
+$('#lf').addEventListener('keydown', e => {
+  const f = e.target as HTMLInputElement;
+  if (e.key === 'Escape' && f.value) { e.preventDefault(); f.value = ''; paint(); }
+});
 // aba escondida não consulta o docker (a não ser com as notificações ligadas: é para elas que serve); ao voltar, atualiza na hora
 document.addEventListener('visibilitychange', () => document.hidden || load());
 $('#notify').hidden = !canAsk();

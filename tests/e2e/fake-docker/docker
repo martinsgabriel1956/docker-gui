@@ -3,7 +3,7 @@
 
 Cenários que o Docker de verdade não reproduz sob demanda (healthcheck falhando, loop de reinício,
 ação que falha ou demora) viram dados. Campos extras por container, fora do formato do `docker ps`:
-  logs    texto do `docker logs`; com -f, o que for acrescentado depois sai na hora
+  logs    texto do `docker logs` (respeita o --tail); com -f, o que for acrescentado depois sai na hora
   health  objeto do `inspect --format {{json .State.Health}}`
   inspect objeto do `inspect --format {{json .}}` (HostConfig, NetworkSettings, Mounts, Config...)
   fail    {ação: stderr}: a ação falha com essa mensagem
@@ -62,16 +62,23 @@ def save(f, state):
     json.dump(state, f)
 
 
-def follow(path, pick, fmt=lambda c, text: text):
-    """logs -f: manda o que já tem, depois só o que for acrescentado; termina quando nenhum dos containers
-    acompanhados (pick: um no docker logs, o projeto no compose logs) está rodando, como o docker."""
+def tail(logs, args):
+    """--tail N: só as últimas N linhas; sem ele, tudo (como o docker)."""
+    if "--tail" not in args:
+        return logs
+    return "".join(logs.splitlines(keepends=True)[-int(args[args.index("--tail") + 1]):])
+
+
+def follow(path, pick, fmt=lambda c, text: text, args=()):
+    """logs -f: manda o que já tem (respeitando o --tail), depois só o que for acrescentado; termina quando
+    nenhum dos containers acompanhados (pick: um no docker logs, o projeto no compose logs) está rodando, como o docker."""
     sent = {}
     while True:
         with locked(path, exclusive=False) as (_, state):
             cs = pick(state)
         for c in cs:
             logs = c.get("logs", "")
-            sys.stdout.write(fmt(c, logs[sent.get(c["ID"], 0):]))
+            sys.stdout.write(fmt(c, tail(logs, args) if c["ID"] not in sent else logs[sent[c["ID"]]:]))
             sent[c["ID"]] = len(logs)
         sys.stdout.flush()
         if not any(c["State"] in ("running", "paused") for c in cs):
@@ -119,7 +126,7 @@ def compose(state, args):
         elif sub in ("up", "restart"):
             c.update(RUNNING)
         elif sub == "logs" and "--follow" not in rest:
-            sys.stdout.write(prefixed(c, c.get("logs", "")))
+            sys.stdout.write(prefixed(c, tail(c.get("logs", ""), rest)))
     return None
 
 
@@ -128,7 +135,7 @@ def main(args):
     cmd, ref = args[0], args[-1]
     action = "remove" if cmd == "rm" else cmd
     if cmd == "logs" and "-f" in args:
-        return follow(path, lambda state: [find(state, ref)])
+        return follow(path, lambda state: [find(state, ref)], args=args)
 
     if cmd == "exec":
         # terminal: confere o argv que o servidor monta e roda um sh local no lugar do container
@@ -176,7 +183,7 @@ def main(args):
             # o builder prune resume diferente dos outros
             print(f"Total:\t{freed}" if cmd == "builder" else f"Total reclaimed space: {freed}")
         elif cmd == "logs":
-            sys.stdout.write(find(state, ref).get("logs", ""))
+            sys.stdout.write(tail(find(state, ref).get("logs", ""), args))
         elif cmd == "inspect":
             c = find(state, ref)
             print(json.dumps(c.get("health") if ".State.Health" in args[-2] else c.get("inspect", {})))
@@ -192,7 +199,7 @@ def main(args):
 
     # compose logs --follow: a chamada já ficou registrada; acompanha fora do lock, que o follow pega a cada volta
     if cmd == "compose" and subcommand(args[1:])[0] == "logs" and "--follow" in args:
-        follow(path, lambda state: project(state, args[1:]), prefixed)
+        follow(path, lambda state: project(state, args[1:]), prefixed, args)
 
 
 if __name__ == "__main__":

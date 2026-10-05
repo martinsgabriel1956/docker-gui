@@ -105,6 +105,29 @@ test('Logs do projeto juntam os serviços em ordem, com o prefixo de cada um', a
   await expect(page.locator('#lb')).toHaveText('2026-10-05T10:00:01Z db pronto\n');
 });
 
+test('Logs do projeto também têm filtro e Carregar mais (o --tail vale por container)', async ({ page, gui }) => {
+  const cs = containers();
+  cs[0].logs = Array.from({ length: 600 }, (_, i) => `api ${i}\n`).join('');
+  cs[1].logs = 'db 0\ndb 1\ndb 2\n';
+  await gui.open({ containers: cs });
+  await page.getByRole('button', { name: 'Logs do projeto shop' }).click();
+  const lb = page.locator('#lb'), more = page.locator('#more');
+  await expect(lb).toContainText('db-1  | db 2');
+  await expect(lb).not.toContainText('api-1  | api 99\n');  // 500 do api: do 100 ao 599
+  await expect(more).toHaveText('Carregar 2.000 linhas');
+
+  await more.click();
+  await expect(lb).toContainText('api-1  | api 0\n');
+  await expect(page.locator('#lmeta')).toContainText('Últimas 2.000 linhas de cada container');
+  await expect(more).toHaveText('Tudo carregado');  // 603 linhas no total, menos que o pedido
+  expect(gui.read().compose_calls).toEqual([[...PREFIX, 'logs', '--no-color', '--timestamps', '--tail', '500'],
+                                            [...PREFIX, 'logs', '--no-color', '--timestamps', '--tail', '2000']]);
+
+  await page.locator('#lf').fill('DB-1');
+  await expect(page.locator('#lcount')).toHaveText('3 ocorrências em 3 linhas');
+  await expect(lb).toHaveText('db-1  | db 0\ndb-1  | db 1\ndb-1  | db 2\n');
+});
+
 test('Logs do projeto ao vivo trazem as linhas novas e param quando tudo para', async ({ page, gui }) => {
   const cs = containers();
   cs[1].logs = 'db 1\n';

@@ -121,3 +121,8 @@ export interface Stats {
 // [texto curto, title com o limite de memória]
 export const usage = (s: Stats): StatusText =>
   [`CPU ${s.CPUPerc} · RAM ${s.MemUsage.split(' / ')[0]}`, `Memória: ${s.MemUsage} (${s.MemPerc})`];
+
+// filtro do modal de logs: texto literal (nada de regex do usuário), sem diferenciar maiúsculas; '' = sem filtro.
+// O grupo faz o split devolver os trechos que casaram: "erro e Erro".split(re) -> ['', 'erro', ' e ', 'Erro', '']
+export const logFilter = (q: string): RegExp | null =>
+  q ? new RegExp(`(${q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'i') : null;
