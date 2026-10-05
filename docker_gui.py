@@ -49,6 +49,12 @@ COMPOSE_FORMAT = ('[{{json (.Label "com.docker.compose.project")}},{{json (.Labe
 MAX_BODY = 64 * 1024
 # comandos que imprimem um JSON por linha; o stats só lista os rodando e leva ~2 s para medir a CPU
 LISTS = {"/api/containers": ["ps", "-a"], "/api/stats": ["stats", "--no-stream"]}
+# eventos que não mudam nada na lista, além dos exec*: o healthcheck roda um exec a cada intervalo (exec_create,
+# exec_start e exec_die; no podman, exec e exec_died), e o resultado só importa quando muda, no health_status
+EVENTS_IGNORE = ("attach", "resize", "top", "archive-path", "extract-to-dir", "export", "commit", "copy", "mount", "unmount")
+# cada stream de eventos é um `docker events` e uma thread presos enquanto a aba está aberta: teto por servidor.
+# Acima disso o servidor recusa e a página fica no poll de 2 s
+EVENTS_SLOTS = threading.BoundedSemaphore(8)
 
 
 def docker(*args, timeout=READ_TIMEOUT):
@@ -82,6 +88,19 @@ def containers(out):
     rows = json.loads(out) if out.lstrip().startswith("[") else [json.loads(line) for line in out.splitlines()]
     # pela forma da linha, não pelo binário: o podman-docker (docker que chama o podman) também cai aqui
     return [from_podman(c) if "Id" in c else c for c in rows]
+
+
+def relevant(line):
+    """Uma linha do `docker events` (ou `podman events`) muda a lista? Na dúvida, sim: o custo é uma consulta a mais."""
+    if not line.strip():
+        return False
+    try:
+        ev = json.loads(line)
+        # docker: Action ("health_status: healthy", "exec_start: sh -c ..."); docker antigo: status; podman: Status
+        name = (ev.get("Action") or ev.get("status") or ev.get("Status") or "").partition(":")[0].strip().lower()
+    except (ValueError, AttributeError):
+        return True
+    return not (name.startswith("exec") or name in EVENTS_IGNORE)
 
 
 def summary(info, reveal=False):
@@ -155,11 +174,11 @@ class Handler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/exec/([0-9a-f]{12,64})", path)
         if m:
             return self.terminal(m[1])
-        m = re.fullmatch(r"/api/logs/([0-9a-f]{12,64})/stream", path)
-        if m:  # EventSource não manda header custom: só esta rota (GET, só leitura) aceita o token na query
+        m = re.fullmatch(r"/api/logs/([0-9a-f]{12,64})/stream|/api/events/stream", path)
+        if m:  # EventSource não manda header custom: só estas rotas (GET, só leitura) aceitam o token na query
             if not hmac.compare_digest(parse_qs(query).get("t", [""])[0].encode(), TOKEN.encode()):
                 return self.send(401, '"token ausente ou inválido"')
-            return self.stream_logs(m[1])
+            return self.stream_logs(m[1]) if m[1] else self.stream_events()
         if not self.token_ok():
             return self.send(401, '"token ausente ou inválido"')
         if self.path in LISTS or self.path == "/api/df":
@@ -192,10 +211,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def stream_logs(self, cid):
         """Server-Sent Events com o `docker logs -f`: uma linha por evento e um "end" quando o docker termina."""
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-cache")
-        self.end_headers()
+        self.sse_start()
 
         def sse(line):  # em JSON: \r ou \n dentro do log não quebram o formato do SSE
             return f"data: {json.dumps(line.decode(errors='replace'))}\n\n".encode()
@@ -222,6 +238,49 @@ class Handler(BaseHTTPRequestHandler):
                 pass
             finally:
                 p.kill()
+
+    def sse_start(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+
+    def stream_events(self):
+        """SSE com o `docker events`: só um aviso "mudou" por leva de eventos (o evento em si não sai do servidor);
+        quem busca a lista é a página. Um "end" quando o docker events termina (daemon fora do ar, podman sem events)."""
+        if not EVENTS_SLOTS.acquire(blocking=False):
+            return self.send(503, '"streams de eventos demais abertos"')
+        try:
+            # o podman nem sempre entende {{json .}}; o "json" dele já sai um JSON por linha, como o do docker
+            fmt = "json" if os.path.basename(CLI[0]).startswith("podman") else "{{json .}}"
+            try:
+                p = subprocess.Popen([*CLI, "events", "--format", fmt, "--filter", "type=container"],
+                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            except OSError as e:  # binário não encontrado: a página fica no poll, que mostra o erro
+                return self.send(500, json.dumps(str(e)))
+            # mesmo ciclo de vida do stream_logs: o select percebe o cliente fechando com o docker quieto,
+            # e o with espera o processo morto
+            with p:
+                rest = b""
+                try:
+                    self.sse_start()  # aqui dentro: o cliente que some antes dos headers também mata o processo
+                    while True:
+                        ready, _, _ = select.select([p.stdout, self.connection], [], [])
+                        if self.connection in ready:
+                            return
+                        chunk = os.read(p.stdout.fileno(), 65536)
+                        if not chunk:
+                            self.wfile.write(b"event: end\ndata:\n\n")
+                            return
+                        *lines, rest = (rest + chunk).split(b"\n")
+                        if any(map(relevant, lines)):  # a rajada que chega junta (compose up) vira um aviso só
+                            self.wfile.write(b"data: 1\n\n")
+                except OSError:
+                    pass
+                finally:
+                    p.kill()
+        finally:
+            EVENTS_SLOTS.release()
 
     def do_POST(self):
         if not self.host_ok():
@@ -10093,6 +10152,7 @@ ${h2.join(`
     if (!lastOk) render();
   }
   async function load() {
+    lastLoad = Date.now();
     try {
       const r = await api("/api/containers"), j2 = await r.json();
       if (r.status === 401) return showProblem([
@@ -10120,6 +10180,60 @@ ${h2.join(`
         "server"
       ]);
     }
+  }
+  var POLL = 2e3;
+  var POLL_LIVE = 3e4;
+  var COALESCE = 200;
+  var events = null;
+  var live = false;
+  var lastLoad = 0;
+  var evTimer;
+  var evRetry;
+  var loading = null;
+  var again = false;
+  var watching = () => !document.hidden || notifying();
+  function refresh() {
+    if (loading) {
+      again = true;
+      return;
+    }
+    loading = load().finally(() => {
+      loading = null;
+      if (again) {
+        again = false;
+        refresh();
+      }
+    });
+  }
+  function connectEvents() {
+    clearTimeout(evRetry);
+    evRetry = void 0;
+    if (events || !watching()) return;
+    const es2 = events = new EventSource(`/api/events/stream?t=${encodeURIComponent(TOKEN)}`);
+    es2.onopen = () => {
+      live = true;
+      refresh();
+    };
+    es2.onmessage = () => {
+      if (watching() && evTimer === void 0) evTimer = setTimeout(() => {
+        evTimer = void 0;
+        refresh();
+      }, COALESCE);
+    };
+    const drop = () => {
+      closeEvents();
+      evRetry = setTimeout(connectEvents, POLL_LIVE);
+    };
+    es2.addEventListener("end", drop);
+    es2.onerror = () => {
+      live = false;
+      if (es2.readyState === EventSource.CLOSED) drop();
+    };
+  }
+  function closeEvents() {
+    events?.close();
+    events = null;
+    live = false;
   }
   var canAsk = () => isSecureContext && "Notification" in window && Notification.permission === "default";
   var notifying = () => "Notification" in window && Notification.permission === "granted";
@@ -10759,13 +10873,20 @@ ${h2.join(`
   $2("#shell").addEventListener("close", closeShell);
   $2("#shell").addEventListener("cancel", (e) => e.preventDefault());
   $2("#q").oninput = render;
-  document.addEventListener("visibilitychange", () => document.hidden || load());
+  document.addEventListener("visibilitychange", () => {
+    if (watching()) connectEvents();
+    else closeEvents();
+    if (!document.hidden) load();
+  });
   $2("#notify").hidden = !canAsk();
   readHash();
   render();
   load();
-  setInterval(() => document.hidden && !notifying() || load(), 2e3);
+  connectEvents();
   statsLoop();
+  setInterval(() => {
+    if (watching() && Date.now() - lastLoad > (live ? POLL_LIVE : POLL) - 500) load();
+  }, POLL);
 })();
 /*! Bundled license information:
 

@@ -10,12 +10,14 @@ ação que falha ou demora) viram dados. Campos extras por container, fora do fo
   delay   {ação: segundos}: a ação demora (para ver o estado "ocupado" na tela)
   after   {ação: {State, Status}}: estado depois da ação, no lugar do padrão (ex.: start que cai)
   stats   {CPUPerc, MemUsage, MemPerc}: linha do `docker stats`; sem ele, o container não aparece lá
-No topo do JSON, "ps_error" faz o `docker ps` falhar (daemon fora do ar), "df" é a saída do
+No topo do JSON, "ps_error" faz o `docker ps` (e o `docker events`) falhar (daemon fora do ar),
+"events_error" faz só o `docker events` falhar (como um podman sem events), "df" é a saída do
 `docker system df` (lista de linhas) e "pruned" registra os prunes que rodaram. O prune zera o
 "Reclaimable" da categoria e diz que liberou o que estava lá. "compose_fail" faz todo
 `docker compose` falhar com esse stderr, e cada `docker compose` grava o argv em "compose_calls".
 `compose up` deixa os containers do projeto rodando, `down` os remove e `pull` não muda nada.
-O `docker exec -it` do terminal vira um sh local.
+O `docker exec -it` do terminal vira um sh local. O `docker events` manda uma linha por container que mudou
+no que o `docker ps` mostra, enquanto o servidor o mantiver vivo.
 """
 import contextlib
 import fcntl
@@ -75,6 +77,25 @@ def follow(path, ref):
         time.sleep(0.2)  # dorme fora do lock
 
 
+def events(path):
+    """events: olha o estado a cada 50 ms. O docker de verdade não avisa a passagem do tempo ("Up 5 minutes"),
+    mas aqui qualquer mudança no ps vale um evento: é assim que os testes mudam o "mundo" por fora."""
+    seen, parent = None, os.getppid()
+    while os.getppid() == parent:  # servidor morto (gui.stop()): sem isto o falso ficaria órfão, em loop
+        with locked(path, exclusive=False) as (_, state):
+            err = state.get("events_error") or state.get("ps_error")
+            now = {c["ID"]: [c.get(k, "") for k in PS_FIELDS] for c in state["containers"]}
+        if err:  # o docker events termina quando o daemon cai
+            fail(err)
+        if seen is not None:
+            for cid in sorted(seen.keys() | now.keys()):
+                if seen.get(cid) != now.get(cid):
+                    action = "destroy" if cid not in now else "create" if cid not in seen else "update"
+                    print(json.dumps({"Type": "container", "Action": action, "Actor": {"ID": cid}}), flush=True)
+        seen = now
+        time.sleep(0.05)  # dorme fora do lock
+
+
 def labels(c):
     # valor pode ter vírgula (config_files): só quebra antes de uma vírgula seguida de "chave="
     return dict(re.findall(r"(?:^|,)([\w.-]+)=((?:[^,]|,(?![\w.-]+=))*)", c.get("Labels", "")))
@@ -100,6 +121,10 @@ def main(args):
     action = "remove" if cmd == "rm" else cmd
     if cmd == "logs" and "-f" in args:
         return follow(path, ref)
+    if cmd == "events":
+        if args[1:] != ["--format", "{{json .}}", "--filter", "type=container"]:
+            fail(f"events inesperado: {args}")
+        return events(path)
 
     if cmd == "exec":
         # terminal: confere o argv que o servidor monta e roda um sh local no lugar do container

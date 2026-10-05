@@ -25,7 +25,7 @@ export type Container = {
 export type DiskUsage = { Type: string; TotalCount: string; Active: string; Size: string; Reclaimable: string };
 export type DockerState = {
   containers: Container[]; ps_error?: string; df?: DiskUsage[]; pruned?: string[];
-  compose_fail?: string; compose_calls?: string[][];
+  compose_fail?: string; compose_calls?: string[][]; events_error?: string;
 };
 
 // ID estável por nome: o mesmo container tem o mesmo ID em todo teste

@@ -24,7 +24,7 @@ A saída do `podman ps` tem outro formato (`Names` em lista, portas como objetos
 
 ## O que faz
 
-- **Lista ao vivo** de todos os containers, atualizada a cada 2s. Só as linhas que mudaram são redesenhadas, e o poll pausa quando a aba fica escondida.
+- **Lista ao vivo** de todos os containers, atualizada pelos eventos do `docker events`: quando um container é criado, sobe, cai, pausa ou muda de saúde (`health_status`), a lista é consultada de novo em até 200 ms, e uma rajada (um `compose up`, por exemplo) vira uma consulta só. Os `exec` que o healthcheck roda a cada intervalo são ignorados. Como o Docker não avisa a passagem do tempo ("Up 5 minutes"), um poll de segurança roda a cada 30s. Se o stream de eventos cair, for recusado ou não existir (um Podman antigo, por exemplo), a lista volta ao poll de 2s e tenta os eventos de novo depois de 30s. Só as linhas que mudaram são redesenhadas, e com a aba escondida a página para de consultar e fecha o stream.
 - **CPU e memória** de cada container rodando, do `docker stats`, atualizadas a cada 5s (num poll à parte, porque o stats leva uns 2s para medir).
 - **Faixa "Precisa de atenção"** com o que está quebrado: healthcheck falhando, loop de reinício e saída com código diferente de zero. O status vem traduzido, por exemplo "Saiu com código 137 · morto à força ou sem memória (OOM)".
 - **Agrupamento por projeto do compose** (`com.docker.compose.project`), com **Iniciar / Reiniciar / Parar tudo** e "Iniciar de novo" para desfazer.
@@ -59,10 +59,11 @@ O servidor só escuta em `127.0.0.1` e foi pensado para uso local em máquina de
 | IDs só em hex, lista fixa de ações e nenhum shell no host | Injeção de comando |
 | Terminal: `Origin` conferido (só a própria página) e token na query do WebSocket | Sites maliciosos abrindo um shell no container pelo seu navegador (cross-site WebSocket hijacking) |
 | Timeout em toda chamada ao `docker` (15 s para leitura, 120 s para ações) | Daemon travado acumulando threads presas |
+| Streams (logs ao vivo, eventos da lista) encerram o `docker` quando a aba fecha; no máximo 8 streams de eventos ao mesmo tempo | Abas esquecidas acumulando processos e threads |
 
 O token chega à página pelo `#fragmento` do link: o fragmento não é enviado ao servidor e sai da URL assim que a página carrega. Ele fica no `localStorage`, que é isolado por porta, e não em cookie, que vazaria para outros servidores em `localhost`. Cada execução gera um token novo. Se a página mostrar "sem token", abra o link impresso no terminal.
 
-O WebSocket do navegador não manda cabeçalho próprio, por isso o terminal leva o token na query (`/api/exec/<id>?t=…`). O servidor não registra URLs. Fechar o terminal mata o `docker exec`, mas o shell dentro do container nem sempre morre junto ([moby#9098](https://github.com/moby/moby/issues/9098)): um processo que você deixou rodando nele pode continuar até o container parar.
+O WebSocket e o `EventSource` do navegador não mandam cabeçalho próprio, por isso o terminal e os streams (logs ao vivo e eventos da lista, só leitura) levam o token na query (`/api/exec/<id>?t=…`, `/api/logs/<id>/stream?t=…`, `/api/events/stream?t=…`). As outras rotas só aceitam o cabeçalho. O servidor não registra URLs, e o stream de eventos só avisa que algo mudou: o evento em si não sai do servidor. Fechar o terminal mata o `docker exec`, mas o shell dentro do container nem sempre morre junto ([moby#9098](https://github.com/moby/moby/issues/9098)): um processo que você deixou rodando nele pode continuar até o container parar.
 
 > Quem consegue rodar `docker` na sua máquina já tem poder equivalente ao de root. O token impede que a GUI amplie esse acesso, mas não substitui o cuidado com quem está no grupo `docker`.
 
@@ -109,7 +110,7 @@ As funções de `src/format.ts` têm testes próprios. O Node (22.18+) importa o
 node --test tests/format.test.js
 ```
 
-Os testes de UI usam o [Playwright](https://playwright.dev) e cobrem o que a página faz na tela: agrupamento e faixa de atenção, filtros e atalhos, ações (incluindo a remoção em 2 passos e o "conferindo se ficou de pé"), modal de logs, terminal, healthcheck, estados de erro e o que o redesenho a cada 2 s preserva (foco, seleção de texto, menus abertos). Cada teste sobe o próprio `docker_gui.py` contra um `docker` falso (`tests/e2e/fake-docker/docker`), que lê os containers de um JSON. Assim dá para montar cenários exatos (healthcheck falhando, loop de reinício, ação que falha ou demora) sem precisar de daemon:
+Os testes de UI usam o [Playwright](https://playwright.dev) e cobrem o que a página faz na tela: agrupamento e faixa de atenção, filtros e atalhos, ações (incluindo a remoção em 2 passos e o "conferindo se ficou de pé"), modal de logs, terminal, healthcheck, estados de erro, o que o redesenho preserva (foco, seleção de texto, menus abertos) e a lista ao vivo (eventos, rajadas e a volta ao poll de 2 s). Cada teste sobe o próprio `docker_gui.py` contra um `docker` falso (`tests/e2e/fake-docker/docker`), que lê os containers de um JSON (e, no `docker events`, avisa qualquer mudança nele). Assim dá para montar cenários exatos (healthcheck falhando, loop de reinício, ação que falha ou demora) sem precisar de daemon:
 
 ```bash
 npx playwright install chromium   # uma vez

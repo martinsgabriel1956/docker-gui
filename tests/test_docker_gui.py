@@ -228,8 +228,8 @@ class LogsAndHealthTest(ServerTest):
 
 
 @unittest.skipUnless(os.name == "posix", "usa script shell")
-class LogsStreamTest(ServerTest):
-    """Logs ao vivo (SSE): o docker é um script shell de verdade, porque o stream roda um processo longo."""
+class StreamTest(ServerTest):
+    """Base dos streams SSE: o docker é um script shell de verdade, porque o stream roda um processo longo."""
 
     def setUp(self):
         super().setUp()
@@ -240,11 +240,26 @@ class LogsStreamTest(ServerTest):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def fake_docker(self, body):
-        path = os.path.join(self.dir, "docker")
+    def fake_docker(self, body, name="docker"):
+        path = os.path.join(self.dir, name)
         with open(path, "w") as f:
             f.write(f'#!/bin/sh\necho "$@" > {self.dir}/args\n{body}\n')
         os.chmod(path, 0o755)
+
+    def wait_dead(self, what):
+        with open(os.path.join(self.dir, "pid")) as f:
+            pid = int(f.read())
+        for _ in range(50):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.1)
+        self.fail(f"{what} continuou vivo depois que o cliente desconectou")
+
+
+class LogsStreamTest(StreamTest):
+    """Logs ao vivo (SSE)."""
 
     def path(self, token=docker_gui.TOKEN):
         return f"/api/logs/{HEX_ID}/stream" + (f"?t={token}" if token is not None else "")
@@ -273,17 +288,102 @@ class LogsStreamTest(ServerTest):
         self.assertEqual(r.readline(), b'data: "oi\\n"\n')
         # com o stream aberto, o resto da API continua respondendo
         self.assertEqual(self.request("GET", "/api/containers"), (200, []))
-        with open(os.path.join(self.dir, "pid")) as f:
-            pid = int(f.read())
         r.close()  # a resposta segura o socket aberto: sem fechar as duas, a conexão não cai
         conn.close()
-        for _ in range(50):
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                return
-            time.sleep(0.1)
-        self.fail("docker logs -f continuou vivo depois que o cliente desconectou")
+        self.wait_dead("docker logs -f")
+
+
+class RelevantEventTest(unittest.TestCase):
+    """Que linha do docker/podman events vale um aviso "a lista mudou"."""
+
+    def test_docker(self):
+        line = '{"Type":"container","Action":"%s","Actor":{"ID":"abc","Attributes":{}},"scope":"local"}'
+        for action in ("create", "start", "die", "destroy", "pause", "rename", "health_status: unhealthy"):
+            self.assertTrue(docker_gui.relevant(line % action), action)
+        # o healthcheck é um exec a cada intervalo: sem filtrar, a lista seria buscada a cada probe
+        for action in ("exec_create: /bin/sh -c test -f /tmp/ok", "exec_start: /bin/sh -c true", "exec_die",
+                       "attach", "resize", "top", "archive-path"):
+            self.assertFalse(docker_gui.relevant(line % action), action)
+
+    def test_old_docker_and_podman(self):
+        self.assertTrue(docker_gui.relevant(b'{"status":"start","id":"abc"}'))
+        self.assertTrue(docker_gui.relevant(b'{"ID":"abc","Status":"health_status","HealthStatus":"unhealthy","Type":"container"}'))
+        self.assertTrue(docker_gui.relevant(b'{"ID":"abc","Name":"web","Status":"died","Type":"container"}'))
+        self.assertFalse(docker_gui.relevant(b'{"ID":"abc","Name":"web","Status":"exec_died","Type":"container"}'))
+        self.assertFalse(docker_gui.relevant(b'{"ID":"abc","Name":"web","Status":"exec","Type":"container"}'))
+
+    def test_unknown_lines_count_as_change(self):
+        for line in (b"2026-10-05 container start abc (image=web)", b"[1]", b'{"Action": 5}', b"\xff"):
+            self.assertTrue(docker_gui.relevant(line), line)
+        self.assertFalse(docker_gui.relevant(b"  "))
+
+
+class EventsStreamTest(StreamTest):
+    """Eventos da lista (SSE): um "data: 1" por leva de eventos que importam, nada do evento em si."""
+
+    def path(self, token=docker_gui.TOKEN):
+        return "/api/events/stream" + (f"?t={token}" if token is not None else "")
+
+    def test_batch_becomes_one_message_and_end(self):
+        self.fake_docker("""cat <<'EOF'
+{"Type":"container","Action":"exec_start: sh -c curl -f localhost","Actor":{"ID":"abc"}}
+{"Type":"container","Action":"exec_die","Actor":{"ID":"abc"}}
+EOF
+sleep 0.3
+cat <<'EOF'
+{"Type":"container","Action":"health_status: unhealthy","Actor":{"ID":"abc"}}
+{"Type":"container","Action":"die","Actor":{"ID":"abc"}}
+EOF""")
+        status, body = self.request("GET", self.path())
+        self.assertEqual(status, 200)
+        self.assertEqual(body, "data: 1\n\nevent: end\ndata:\n\n")  # os exec do healthcheck não avisam nada
+        with open(os.path.join(self.dir, "args")) as f:
+            self.assertEqual(f.read().strip(), "events --format {{json .}} --filter type=container")
+
+    def test_podman_uses_json_format(self):
+        self.fake_docker("""echo '{"ID":"abc","Status":"start","Type":"container"}'""", name="podman")
+        with mock.patch.object(docker_gui, "CLI", ["podman"]):
+            self.assertEqual(self.request("GET", self.path()), (200, "data: 1\n\nevent: end\ndata:\n\n"))
+        with open(os.path.join(self.dir, "args")) as f:
+            self.assertEqual(f.read().strip(), "events --format json --filter type=container")
+
+    def test_token_goes_in_query(self):
+        self.fake_docker("echo nunca")
+        for token in (None, "", "errado", docker_gui.TOKEN[:-1]):
+            status, _ = self.request("GET", self.path(token))  # o header com o token certo não vale aqui
+            self.assertEqual(status, 401, token)
+        self.assertEqual(self.request("GET", self.path(), host="evil.example:80")[0], 403)
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "args")))
+
+    def test_missing_binary_is_500_and_frees_slot(self):
+        with mock.patch.object(docker_gui, "EVENTS_SLOTS", threading.BoundedSemaphore(1)):
+            with mock.patch.object(docker_gui, "CLI", [os.path.join(self.dir, "nao-existe")]):
+                self.assertEqual(self.request("GET", self.path())[0], 500)
+            self.fake_docker("true")
+            self.assertEqual(self.request("GET", self.path()), (200, "event: end\ndata:\n\n"))
+
+    def test_disconnect_kills_docker_and_frees_slot(self):
+        self.fake_docker(f"echo $$ > {self.dir}/pid\nexec sleep 30")
+        with mock.patch.object(docker_gui, "EVENTS_SLOTS", threading.BoundedSemaphore(1)):
+            conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+            conn.request("GET", self.path(), headers={"Host": f"localhost:{self.port}"})
+            r = conn.getresponse()
+            self.assertEqual(r.getheader("Content-Type"), "text/event-stream; charset=utf-8")
+            # sem vaga: recusa na hora, sem rodar outro docker events (a página fica no poll de 2 s)
+            self.assertEqual(self.request("GET", self.path())[0], 503)
+            for _ in range(50):
+                if os.path.exists(os.path.join(self.dir, "pid")):
+                    break
+                time.sleep(0.1)
+            r.close()
+            conn.close()
+            self.wait_dead("docker events")
+            self.fake_docker("true")
+            for _ in range(50):  # a vaga volta logo depois de o processo morrer
+                if self.request("GET", self.path())[0] == 200:
+                    return
+                time.sleep(0.1)
+            self.fail("a vaga do stream não foi devolvida")
 
 
 class InspectTest(ServerTest):
@@ -852,6 +952,19 @@ class RealDockerTest(ServerTest):
         self.assertTrue({"Images", "Local Volumes", "Build Cache"} <= {r["Type"] for r in rows})
         for field in ("TotalCount", "Active", "Size", "Reclaimable"):
             self.assertIn(field, rows[0])  # campos que a página lê
+
+    def test_events_stream(self):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
+        self.addCleanup(conn.close)
+        conn.request("GET", f"/api/events/stream?t={docker_gui.TOKEN}", headers={"Host": f"localhost:{self.port}"})
+        r = conn.getresponse()
+        self.addCleanup(r.close)
+        self.assertEqual(r.status, 200)
+        time.sleep(1)  # o docker events precisa estar ouvindo antes do create
+        c = subprocess.run(["docker", "create", "--label", "docker-gui-test=1", self.IMAGE, "true"],
+                           capture_output=True, text=True, check=True).stdout.strip()
+        self.addCleanup(subprocess.run, ["docker", "rm", "-f", c], capture_output=True, check=False)
+        self.assertEqual(r.readline(), b"data: 1\n")
 
     def test_action_on_missing_container(self):
         status, err = self.request("POST", f"/api/stop/{'0' * 64}")
