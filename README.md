@@ -20,12 +20,13 @@ DOCKER_GUI_CLI=podman python3 docker_gui.py
 python3 docker_gui.py --context producao
 ```
 
-A saída do `podman ps` tem outro formato (`Names` em lista, portas como objetos, labels como dicionário…). O servidor converte tudo para o formato do `docker ps`, então a página funciona igual. O mesmo vale para as listas de imagens (tamanho em bytes, data em epoch), volumes e redes (chaves em minúsculas no Podman 4+). Uma rede que venha sem ID (formatos antigos do Podman) aparece na lista, mas sem o botão de remover. O "Copiar `docker exec`" usa o mesmo binário e contexto.
+A saída do `podman ps` tem outro formato (`Names` em lista, portas como objetos, labels como dicionário…), e a do `podman stats` também (`cpu_percent`, `net_io`…; pelo `podman-docker`, números crus). O servidor converte tudo para o formato do `docker ps` e do `docker stats`, então a página funciona igual. O mesmo vale para as listas de imagens (tamanho em bytes, data em epoch), volumes e redes (chaves em minúsculas no Podman 4+). Uma rede que venha sem ID (formatos antigos do Podman) aparece na lista, mas sem o botão de remover. O "Copiar `docker exec`" usa o mesmo binário e contexto.
 
 ## O que faz
 
 - **Lista ao vivo** de todos os containers, atualizada a cada 2s. Só as linhas que mudaram são redesenhadas, e o poll pausa quando a aba fica escondida (a não ser com as notificações ligadas).
-- **CPU e memória** de cada container rodando, do `docker stats`, atualizadas a cada 5s (num poll à parte, porque o stats leva uns 2s para medir).
+- **CPU e memória** de cada container rodando, do `docker stats`, atualizadas a cada 5s (num poll à parte, porque o stats leva uns 2s para medir), com um **sparkline** de cada uma: as últimas 60 leituras (uns 5 a 7 min, conforme o stats demora), guardadas só na página. O leitor de tela (e o mouse, no hover) recebe o mínimo, o máximo e o valor atual. Se a aba ficar escondida, o histórico recomeça ao voltar, em vez de ligar os pontos por cima do buraco.
+- **Rede e disco** (`NetIO` e `BlockIO`, totais desde que o container subiu) no title do uso de recursos e no modal de logs, com sparklines maiores, para não poluir a tabela.
 - **Faixa "Precisa de atenção"** com o que está quebrado: healthcheck falhando, loop de reinício e saída com código diferente de zero. O status vem traduzido, por exemplo "Saiu com código 137 · morto à força ou sem memória (OOM)".
 - **Favicon com a contagem** da faixa de atenção (`9+` acima de 9) e `!` quando a lista não consegue atualizar.
 - **Notificação do sistema** quando um container entra na faixa de atenção, só se você pedir pelo botão "Notificar quando algo der problema", abaixo da busca. O botão aparece em contexto seguro (`localhost` é) enquanto a permissão não foi decidida. A notificação só sai com a página em segundo plano (aba escondida ou janela sem foco): `<nome> precisa de atenção`, com o status no corpo, ou `N containers precisam de atenção`, com os nomes, quando entram vários juntos. Quem já estava na faixa ao abrir a página não notifica e quem continua nela não repete; sair e voltar conta como entrada nova. Clicar na notificação traz a página para a frente. No Chrome do Android ela não aparece, e fica só o favicon.
@@ -84,7 +85,7 @@ Quem usa baixa só o `docker_gui.py` e não precisa de nada além de Python. Par
 |---|---|
 | `docker_gui.py` | Servidor (Python, editado à mão) + bloco gerado no fim, com HTML, JS compilado e CSS |
 | `src/page.html` | Estrutura da página |
-| `src/format.ts` | Tipos (`Container`, `Port`…) e funções puras que traduzem a saída do `docker` (status, portas, projeto…) |
+| `src/format.ts` | Tipos (`Container`, `Port`…) e funções puras que traduzem a saída do `docker` (status, portas, projeto, tamanhos do `stats`, pontos do sparkline…) |
 | `src/app.ts` | Renderização, ações e eventos; no fim, a lista das funções que o HTML chama (`onclick="act(...)"`) |
 | `src/theme.css` | Entrada do [Tailwind CSS v4](https://tailwindcss.com) com os **tokens semânticos** dos dois temas (`bg-canvas`, `text-muted`, `bg-ok`, `text-bad-fg`, `bg-accent`…) |
 
@@ -119,7 +120,7 @@ As funções de `src/format.ts` têm testes próprios. O Node (22.18+) importa o
 node --test tests/format.test.js
 ```
 
-Os testes de UI usam o [Playwright](https://playwright.dev) e cobrem o que a página faz na tela: agrupamento e faixa de atenção, filtros e atalhos, ações (incluindo a remoção em 2 passos e o "conferindo se ficou de pé"), modal de logs (filtro e mais histórico, também ao vivo), terminal, healthcheck, estados de erro e o que o redesenho a cada 2 s preserva (foco, seleção de texto, menus abertos). Cada teste sobe o próprio `docker_gui.py` contra um `docker` falso (`tests/e2e/fake-docker/docker`), que lê os containers de um JSON. Assim dá para montar cenários exatos (healthcheck falhando, loop de reinício, ação que falha ou demora) sem precisar de daemon:
+Os testes de UI usam o [Playwright](https://playwright.dev) e cobrem o que a página faz na tela: agrupamento e faixa de atenção, filtros e atalhos, ações (incluindo a remoção em 2 passos e o "conferindo se ficou de pé"), modal de logs (filtro e mais histórico, também ao vivo), terminal, healthcheck, sparklines do stats, estados de erro e o que o redesenho a cada 2 s preserva (foco, seleção de texto, menus abertos). Cada teste sobe o próprio `docker_gui.py` contra um `docker` falso (`tests/e2e/fake-docker/docker`), que lê os containers de um JSON. Assim dá para montar cenários exatos (healthcheck falhando, loop de reinício, ação que falha ou demora, `stats` que muda a cada leitura) sem precisar de daemon:
 
 ```bash
 npx playwright install chromium   # uma vez

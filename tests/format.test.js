@@ -170,9 +170,87 @@ test('todo código de saída explicado tem texto', () => {
   for (const [code, txt] of Object.entries(f.EXIT)) assert.ok(txt.length > 3, code);
 });
 
-test('usage mostra CPU e a memória usada; o limite fica no title', () => {
+test('usage mostra CPU e a memória usada; o limite, a rede e o disco ficam no title', () => {
   assert.deepEqual(f.usage({ID: 'a', CPUPerc: '0.52%', MemUsage: '10.5MiB / 1.944GiB', MemPerc: '0.53%'}),
-                   ['CPU 0.52% · RAM 10.5MiB', 'Memória: 10.5MiB / 1.944GiB (0.53%)']);
+                   ['CPU 0.52%', 'RAM 10.5MiB', 'Memória: 10.5MiB / 1.944GiB (0.53%)']);
+  assert.equal(f.usage({ID: 'a', CPUPerc: '0.52%', MemUsage: '10.5MiB / 1.944GiB', MemPerc: '0.53%',
+                        NetIO: '1.2kB / 648B', BlockIO: '0B / 4.1kB'})[2],
+               'Memória: 10.5MiB / 1.944GiB (0.53%)\nRede: 1.2kB recebidos · 648B enviados\nDisco: 0B lidos · 4.1kB gravados');
+});
+
+test('bytes entende as unidades binárias do docker e as decimais do podman', () => {
+  assert.equal(f.bytes('10.5MiB'), 10.5 * 2 ** 20);
+  assert.equal(f.bytes('1.944GiB'), 1.944 * 2 ** 30);
+  assert.equal(f.bytes('512KiB'), 512 * 1024);
+  assert.equal(f.bytes('0B'), 0);
+  assert.equal(f.bytes('1.2kB'), 1200);   // rede e disco do docker, e tudo no podman
+  assert.equal(f.bytes('10.5MB'), 10.5e6);
+  assert.equal(f.bytes(' 2GB '), 2e9);
+  assert.equal(f.bytes('--'), null);
+  assert.equal(f.bytes('10.5 parsecs'), null);
+});
+
+test('percent lê o CPUPerc e recusa o "--" de quem ainda não mediu', () => {
+  assert.equal(f.percent('0.52%'), 0.52);
+  assert.equal(f.percent('142.30%'), 142.3);  // mais de um núcleo passa de 100
+  assert.equal(f.percent('--'), null);
+  assert.equal(f.percent(''), null);
+});
+
+test('fmtBytes mostra memória em unidade binária', () => {
+  assert.equal(f.fmtBytes(0), '0 B');
+  assert.equal(f.fmtBytes(512), '512 B');
+  assert.equal(f.fmtBytes(10.5 * 2 ** 20), '10.5 MiB');
+  assert.equal(f.fmtBytes(300 * 2 ** 20), '300 MiB');
+  assert.equal(f.fmtBytes(1.5 * 2 ** 30), '1.5 GiB');
+});
+
+test('pair e io separam rede e disco; campo ausente ou estranho some', () => {
+  assert.deepEqual(f.pair('1.2kB / 648B'), ['1.2kB', '648B']);
+  assert.deepEqual(f.pair('10.5MB / 2.06GB'), ['10.5MB', '2.06GB']);  // podman
+  assert.equal(f.pair('-- / --'), null);
+  assert.equal(f.pair(undefined), null);
+  assert.deepEqual(f.io({NetIO: '1.2kB / 648B', BlockIO: '0B / 4.1kB'}),
+                   ['Rede: 1.2kB recebidos · 648B enviados', 'Disco: 0B lidos · 4.1kB gravados']);
+  assert.deepEqual(f.io({NetIO: '-- / --', BlockIO: '0B / 0B'}), ['Disco: 0B lidos · 0B gravados']);
+  assert.deepEqual(f.io({}), []);
+});
+
+test('pushSample guarda as últimas N leituras sem mexer no array anterior', () => {
+  const s = t => ({t, cpu: t, mem: t});
+  let buf = [];
+  for (let t = 0; t < 70_000; t += 1000) buf = f.pushSample(buf, s(t), 60);
+  assert.equal(buf.length, 60);
+  assert.equal(buf[0].t, 10_000);
+  assert.equal(buf.at(-1).t, 69_000);
+  const before = buf, after = f.pushSample(buf, s(70_000), 60);
+  assert.equal(before.length, 60);
+  assert.equal(before.at(-1).t, 69_000);
+  assert.equal(after.at(-1).t, 70_000);
+  assert.equal(f.HISTORY, 60);
+});
+
+test('pushSample recomeça a série depois de um buraco (aba escondida, servidor fora)', () => {
+  const buf = [{t: 0, cpu: 1, mem: 1}, {t: 5000, cpu: 2, mem: 2}];
+  assert.equal(f.pushSample(buf, {t: 10_000, cpu: 3, mem: 3}).length, 3);
+  assert.deepEqual(f.pushSample(buf, {t: 60_000, cpu: 3, mem: 3}), [{t: 60_000, cpu: 3, mem: 3}]);
+});
+
+test('sparkPoints alinha à direita numa janela fixa e escala de 0 ao máximo', () => {
+  // janela de 3 leituras em 40 px: cada uma ocupa 20 px; 14 px de altura com 1 de margem
+  assert.equal(f.sparkPoints([0, 5, 10], 40, 14, 3), '0,13 20,7 40,1');
+  assert.equal(f.sparkPoints([10, 10], 40, 14, 3), '20,1 40,1');  // série menor que a janela começa no meio
+  assert.equal(f.sparkPoints([0, 0], 40, 14, 3), '20,13 40,13');  // tudo zero não divide por zero
+  // piso: 0,5% de CPU com piso de 1% fica na metade, não no topo
+  assert.equal(f.sparkPoints([0.5, 0.5], 40, 14, 3, 1), '20,7 40,7');
+});
+
+test('trend descreve o sparkline em palavras', () => {
+  const pct = n => `${n.toFixed(2)}%`;
+  assert.equal(f.trend('CPU', [1, 3, 2], 10_000, pct), 'CPU nos últimos 10 s: mín 1.00%, máx 3.00%, agora 2.00%');
+  assert.equal(f.trend('CPU', [1, 2], 200, pct), 'CPU nos últimos 1 s: mín 1.00%, máx 2.00%, agora 2.00%');
+  assert.equal(f.trend('Memória', [2 ** 20, 2 ** 21], 295_000, f.fmtBytes),
+               'Memória nos últimos 5 min: mín 1.0 MiB, máx 2.0 MiB, agora 2.0 MiB');
 });
 
 test('age escreve a idade a partir do epoch', () => {

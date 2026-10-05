@@ -11,6 +11,9 @@ const FAKE_BIN = path.join(HERE, 'fake-docker');
 
 type Action = 'start' | 'stop' | 'restart' | 'pause' | 'unpause' | 'remove';
 
+// linha do `docker stats`; sem NetIO e BlockIO, a página não mostra rede e disco
+export type Stats = { CPUPerc: string; MemUsage: string; MemPerc: string; NetIO?: string; BlockIO?: string };
+
 // campos do `docker ps` que a página lê, mais os extras que o docker falso entende (ver fake-docker/docker)
 export type Container = {
   ID: string; Names: string; Image: string; State: string; Status: string; Ports: string; Labels: string;
@@ -20,7 +23,7 @@ export type Container = {
   fail?: Partial<Record<Action, string>>;
   delay?: Partial<Record<Action, number>>;
   after?: Partial<Record<Action, { State: string; Status: string }>>;
-  stats?: { CPUPerc: string; MemUsage: string; MemPerc: string };
+  stats?: Stats | Stats[];  // lista: uma leitura por `docker stats`, a última se repete
 };
 export type DiskUsage = { Type: string; TotalCount: string; Active: string; Size: string; Reclaimable: string };
 // linhas reais do `docker image ls --no-trunc` (uma por tag), `volume ls` e `network ls --no-trunc`, em '{{json .}}'
