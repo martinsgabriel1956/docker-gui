@@ -204,6 +204,53 @@ class StatsTest(ServerTest):
         self.docker.return_value = fail("Cannot connect to the Docker daemon\n")
         self.assertEqual(self.request("GET", "/api/stats"), (500, "Cannot connect to the Docker daemon"))
 
+    def test_podman_uses_json_array_and_is_normalized(self):
+        self.docker.return_value = ok(json.dumps(PODMAN_STATS, indent=1) + "\n")
+        with mock.patch.object(docker_gui, "CLI", ["/usr/bin/podman"]):
+            self.assertEqual(self.request("GET", "/api/stats"), (200, [PODMAN_STATS_EXPECTED]))
+        self.docker.assert_called_once_with("stats", "--no-stream", "--format", "json")
+
+
+# `podman stats --no-stream --format json` do podman 5: array indentado, nomes em snake_case, tudo em texto
+PODMAN_STATS = [{"id": "3f1c2b9a8e7d", "name": "loja_db_1", "cpu_time": "1.5s", "cpu_percent": "0.52%",
+                 "avg_cpu": "0.40%", "mem_usage": "10.5MB / 2.06GB", "mem_percent": "0.51%",
+                 "net_io": "1.2kB / 648B", "block_io": "0B / 4.1kB", "pids": "3"}]
+PODMAN_STATS_EXPECTED = {"ID": "3f1c2b9a8e7d", "Name": "loja_db_1", "CPUPerc": "0.52%", "MemUsage": "10.5MB / 2.06GB",
+                         "MemPerc": "0.51%", "NetIO": "1.2kB / 648B", "BlockIO": "0B / 4.1kB"}
+
+
+class NormalizeStatsTest(unittest.TestCase):
+    """Saída do `podman stats` -> o formato do `docker stats` que a página lê."""
+
+    def test_docker_lines_pass_through(self):
+        row = {"ID": "a" * 12, "CPUPerc": "0.52%", "MemUsage": "10.5MiB / 1.944GiB", "MemPerc": "0.53%",
+               "NetIO": "1.2kB / 648B", "BlockIO": "0B / 0B"}
+        self.assertEqual(docker_gui.stats(json.dumps(row) + "\n"), [row])
+        self.assertEqual(docker_gui.stats(""), [])
+
+    def test_podman_array(self):
+        self.assertEqual(docker_gui.stats(json.dumps(PODMAN_STATS, indent=1)), [PODMAN_STATS_EXPECTED])
+        self.assertEqual(docker_gui.stats("[]\n"), [])
+
+    def test_podman_raw_struct_from_docker_shim(self):
+        # podman-docker: `docker stats --format '{{json .}}'` chama o podman, que serializa a struct crua (números)
+        raw = {"AvgCPU": 0.4, "ContainerID": "3f1c2b9a8e7d" + "0" * 52, "Name": "loja_db_1", "CPU": 0.5234,
+               "MemUsage": 10_500_000, "MemLimit": 2_060_000_000, "MemPerc": 0.509,
+               "Network": {"eth0": {"RxBytes": 1200, "TxBytes": 648}, "eth1": {"RxBytes": 34, "TxBytes": 0}},
+               "BlockInput": 0, "BlockOutput": 4096, "PIDs": 3}
+        self.assertEqual(docker_gui.stats(json.dumps(raw) + "\n"), [
+            {"ID": "3f1c2b9a8e7d", "Name": "loja_db_1", "CPUPerc": "0.52%", "MemUsage": "10.5MB / 2.06GB",
+             "MemPerc": "0.51%", "NetIO": "1.234kB / 648B", "BlockIO": "0B / 4.096kB"}])
+        # sem rede (network none) e sem nada medido ainda
+        got = docker_gui.from_podman_stats({"ContainerID": "b" * 64, "Network": None})
+        self.assertEqual((got["CPUPerc"], got["MemUsage"], got["NetIO"]), ("0.00%", "0B / 0B", "0B / 0B"))
+
+    def test_human_matches_go_units(self):
+        # go-units HumanSize: base 1000, 4 algarismos significativos
+        for n, want in ((0, "0B"), (648, "648B"), (1200, "1.2kB"), (10_500_000, "10.5MB"), (2_060_000_000, "2.06GB"),
+                        (1_234_567, "1.235MB"), (5 * 10**15, "5PB")):
+            self.assertEqual(docker_gui.human(n), want, n)
+
 
 class LogsAndHealthTest(ServerTest):
 
@@ -820,7 +867,7 @@ class RealDockerTest(ServerTest):
         # a página casa o stats com o ps pelo ID: os dois precisam vir no mesmo formato (curto)
         _, rows = self.request("GET", "/api/stats")
         s = next(s for s in rows if s["ID"] == c["ID"])
-        for field in ("CPUPerc", "MemUsage", "MemPerc"):
+        for field in ("CPUPerc", "MemUsage", "MemPerc", "NetIO", "BlockIO"):
             self.assertIn(field, s)
 
         short = c["ID"]

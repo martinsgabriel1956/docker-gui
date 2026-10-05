@@ -1,6 +1,7 @@
 import {
-  type Bucket, type Container, type ContainerState, type DiskUsage, type Port, type Stats, type Tone,
-  bucket, esc, hasHealth, isProblem, newProblems, ports, project, shortImage, status, tone, usage, workingDir,
+  type Bucket, type Container, type ContainerState, type DiskUsage, type Port, type Sample, type Stats, type Tone,
+  HISTORY, bucket, bytes, esc, fmtBytes, hasHealth, io, isProblem, newProblems, percent, ports, project, pushSample, shortImage,
+  sparkPoints, status, tone, trend, usage, workingDir,
 } from './format';
 import {Terminal} from '@xterm/xterm';
 import {FitAddon} from '@xterm/addon-fit';
@@ -154,20 +155,42 @@ function setIcon(badge: string) {
   if (icon.getAttribute('href') !== href) icon.href = href;  // trocar o href a cada poll faz a aba piscar
 }
 
-// CPU e memória vêm à parte e mais devagar que a lista: o docker stats leva ~2 s para medir
+// CPU e memória vêm à parte e mais devagar que a lista: o docker stats leva ~2 s para medir. Tudo indexado
+// pelos 12 primeiros caracteres do ID: o podman manda o ID inteiro no ps e o curto no stats
 let stats: Record<string, Stats> = {};
+const hist = new Map<string, Sample[]>();  // últimas leituras de cada container, para o sparkline
+const sid = (id: string) => id.slice(0, 12);
 async function loadStats() {
   let next: Record<string, Stats> = {};
   try {
     const r = await api('/api/stats');
-    if (r.ok) next = Object.fromEntries((await r.json() as Stats[]).map(s => [s.ID, s]));
+    if (r.ok) next = Object.fromEntries((await r.json() as Stats[]).map(s => [sid(s.ID), s]));
   } catch { /* sem conexão: o banner do load() já avisa */ }
-  if (JSON.stringify(next) === JSON.stringify(stats)) return;
+  const t = Date.now();
+  for (const k of hist.keys()) if (!next[k]) hist.delete(k);  // parou (ou o stats falhou): a série recomeça do zero
+  for (const [k, s] of Object.entries(next)) {
+    const cpu = percent(s.CPUPerc), mem = bytes(s.MemUsage.split(' / ')[0]);
+    if (cpu !== null && mem !== null) hist.set(k, pushSample(hist.get(k) ?? [], {t, cpu, mem}));
+  }
+  // sempre redesenha: mesmo com os números iguais, o sparkline andou uma amostra
   stats = next;
   if (selectingRows()) dirty = true; else render();
 }
+
 // setTimeout encadeado em vez de setInterval: um docker lento não empilha consultas
 async function statsLoop() { if (!document.hidden) await loadStats(); setTimeout(statsLoop, 5000); }
+
+// sparkline em SVG inline, sem animação. A janela tem largura fixa (HISTORY leituras) com a linha de base
+// inteira: a série cresce da direita até preencher. Para leitor de tela e no hover, um texto com mín, máx e o
+// valor atual. O CPU tem piso de 1% na escala, para ruído de 0,01% não parecer pico
+const CPU_FMT = (n: number) => `${n.toFixed(2)}%`;
+function spark(h: Sample[], k: 'cpu' | 'mem', w = 48, ht = 14) {
+  if (h.length < 2) return '';
+  const vs = h.map(s => s[k]), label = esc(trend(k === 'cpu' ? 'CPU' : 'Memória', vs, h.at(-1)!.t - h[0].t, k === 'cpu' ? CPU_FMT : fmtBytes));
+  return `<span role="img" data-spark="${k}" aria-label="${label}" title="${label}" class="inline-block align-middle -mt-0.5 mr-0.5"><svg aria-hidden="true"
+    viewBox="0 0 ${w} ${ht}" width="${w}" height="${ht}" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M0 ${ht - 0.5}H${w}" class="stroke-line-strong"/><polyline points="${sparkPoints(vs, w, ht, HISTORY, k === 'cpu' ? 1 : 0)}" stroke-width="1.5" class="stroke-accent"/></svg></span>`;
+}
 
 function renderCount() {
   const n = (k: Bucket) => data.filter(c => bucket(c) === k).length, running = data.filter(c => c.State === 'running').length;
@@ -247,7 +270,7 @@ async function loadHealth(id: string) {
 
 const rowCache = new Map<string, {sig: string; html: string}>();
 function row(c: Container, withProject = false) {
-  const sig = JSON.stringify([c, withProject, busy.get(c.ID), arming?.id === c.ID, errors.get(c.ID), health[c.ID + c.Status], stats[c.ID], TOUCH]);
+  const sig = JSON.stringify([c, withProject, busy.get(c.ID), arming?.id === c.ID, errors.get(c.ID), health[c.ID + c.Status], stats[sid(c.ID)], hist.get(sid(c.ID))?.at(-1)?.t, TOUCH]);
   const hit = rowCache.get(c.ID);
   if (hit?.sig === sig) return hit.html;
   const html = rowHtml(c, withProject);
@@ -258,7 +281,7 @@ function row(c: Container, withProject = false) {
 function rowHtml(c: Container, withProject: boolean) {
   const b = busy.get(c.ID), t = TONE[b ? 'busy' : tone(c)], st = status(c), pp = ports(c.Ports), p = project(c);
   const armed = arming?.id === c.ID, prim = PRIMARY[c.State], sec = SECONDARY[c.State];
-  const u = c.State === 'running' && !b && stats[c.ID] ? usage(stats[c.ID]) : null;
+  const u = c.State === 'running' && !b && stats[sid(c.ID)] ? usage(stats[sid(c.ID)]) : null, h = hist.get(sid(c.ID)) ?? [];
   const slot = (w = 'lg:w-20') => `<span aria-hidden="true" class="${w} shrink-0 max-lg:hidden"></span>`;
   const btn = (a: RowAction, cls = 'text-fg hover:bg-hover', text = LABEL[a], aria = `${LABEL[a]} ${esc(c.Names)}`) =>
     `<button data-id="${c.ID}" data-a="${a}" ${b && a !== 'logs' ? 'aria-disabled="true"' : ''}
@@ -288,7 +311,7 @@ function rowHtml(c: Container, withProject: boolean) {
       <span class="sr-only lg:hidden">Imagem: </span><div class="lg:truncate lg:max-w-[24ch] lg:[direction:rtl] lg:text-left" title="${esc(c.Image)}"><bdi dir="ltr">${esc(shortImage(c.Image))}</bdi></div></td>
     <td role="cell" class="text-sm pr-4 lg:min-w-[24ch] max-lg:block max-lg:p-0 max-lg:pl-5" title="${esc(c.Status)}">
       <span id="st-${c.ID}" class="${t[1]}">${b ? VERB[b] : esc(st[0])}${st[1] && !b ? `<span class="block text-xs text-muted">${st[1]}</span>` : ''}</span>${
-      u ? `<span id="us-${c.ID}" class="block text-xs font-mono text-muted" title="${esc(u[1])}">${esc(u[0])}</span>` : ''}${b ? '' : errHtml(c) + healthBox}</td>
+      u ? `<span id="us-${c.ID}" class="block text-xs font-mono text-muted" title="${esc(u[2])}">${esc(u[0])} ${spark(h, 'cpu')} · ${esc(u[1])} ${spark(h, 'mem')}</span>` : ''}${b ? '' : errHtml(c) + healthBox}</td>
     <td role="cell" class="pr-4 max-lg:hidden max-lg:has-[div]:block max-lg:p-0 max-lg:pl-5 max-lg:pt-1">${pp.length
       ? `<div class="flex flex-wrap gap-1 max-lg:gap-2">${pp.map(x => portChip(c, x)).join('')}</div>` : ''}</td>
     <td role="cell" class="pr-4 max-lg:block max-lg:p-0 max-lg:pt-2"><div class="flex justify-end max-lg:justify-start items-center gap-1.5 max-lg:gap-2">
@@ -575,8 +598,12 @@ function renderDlg() {
   const b = busy.get(c.ID), t = TONE[b ? 'busy' : tone(c)], st = status(c);
   const h = hasHealth(c) && health[c.ID + c.Status];
   if (hasHealth(c) && !h) loadHealth(c.ID);
+  // uso de recursos com sparkline maior, e rede e disco, que não cabem na tabela
+  const s = c.State === 'running' && !b ? stats[sid(c.ID)] : undefined, u = s && usage(s), hs = hist.get(sid(c.ID)) ?? [];
   $('#dlg-status').innerHTML = `<span class="${t[1]}">${b ? VERB[b] : esc(st[0])}</span>${st[1] && !b ? `<span class="text-muted"> · ${st[1]}</span>` : ''}${b ? '' : errHtml(c)}${
-    h ? `<div class="mt-1 text-xs text-muted">Último healthcheck: <span class="font-mono text-fg-soft">${esc(h)}</span></div>` : ''}`;
+    h ? `<div class="mt-1 text-xs text-muted">Último healthcheck: <span class="font-mono text-fg-soft">${esc(h)}</span></div>` : ''}${
+    s && u ? `<div id="dlg-usage" class="mt-1 text-xs text-muted"><span class="font-mono text-fg-soft">${esc(u[0])}</span> ${spark(hs, 'cpu', 96, 20)} · <span class="font-mono text-fg-soft">${esc(u[1])}</span> ${spark(hs, 'mem', 96, 20)}${
+      io(s).length ? `<div class="mt-0.5">${io(s).map(esc).join(' · ')} <span class="whitespace-nowrap">(totais desde que o container subiu)</span></div>` : ''}</div>` : ''}`;
   $('#dlg-acts').innerHTML = [PRIMARY[c.State], SECONDARY[c.State]].filter((a): a is Action => !!a).map(a =>
     `<button data-id="dlg" data-a="${a}" ${b ? 'aria-disabled="true"' : ''} aria-label="${LABEL[a]} ${esc(c.Names)}" onclick="act('${a}', '${c.ID}')"
       class="${BTN} ${a === 'start' ? 'text-ok-fg hover:bg-ok/10' : 'text-fg hover:bg-hover'}">${LABEL[a]}</button>`).join('')
