@@ -10,35 +10,25 @@
 <!-- só com daemon remoto (app.ts): lembra o tempo todo onde as ações caem -->
 <div id="remote" role="note" hidden class="sticky top-0 z-30 border-b border-warn/40 bg-warn/15 px-4 py-2 text-center text-sm text-warn-fg"></div>
 <main class="max-w-7xl mx-auto px-4 pt-8 pb-[calc(2rem+var(--dock,0px))]">
-  <header class="flex flex-wrap items-start justify-between gap-4 mb-6">
-    <div>
-      <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
-        <h1 class="text-2xl font-semibold text-fg-strong tracking-tight flex items-center gap-2.5">
-          <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" class="size-6 text-accent"><path d="M12 2.5 3.5 7v10l8.5 4.5 8.5-4.5V7z"/><path d="M3.5 7 12 11.5 20.5 7M12 11.5v10"/></svg>
-          Containers
-        </h1>
-        <!-- onde as ações caem: o contexto do docker, em âmbar quando o daemon é remoto (app.ts preenche) -->
-        <span id="where" class="empty:hidden font-mono text-xs px-2 py-0.5 rounded-md ring-1 ring-line-strong text-muted"></span>
-        <button id="new" onclick="openCreate()" class="px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 rounded-md text-sm font-medium ring-1 ring-accent/40 bg-accent/10 text-accent-fg hover:bg-accent/20 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">+ Novo container</button>
-      </div>
-      <div id="count" role="group" aria-label="Filtrar por estado" class="flex flex-wrap gap-1 mt-2 text-sm text-muted">Carregando…</div>
+  <header class="flex flex-wrap items-center justify-between gap-4 mb-4">
+    <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
+      <h1 class="text-2xl font-semibold text-fg-strong tracking-tight flex items-center gap-2.5">
+        <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" class="size-6 text-accent"><path d="M12 2.5 3.5 7v10l8.5 4.5 8.5-4.5V7z"/><path d="M3.5 7 12 11.5 20.5 7M12 11.5v10"/></svg>
+        Docker GUI
+      </h1>
+      <!-- onde as ações caem: o contexto do docker, em âmbar quando o daemon é remoto (app.ts preenche) -->
+      <span id="where" class="empty:hidden font-mono text-xs px-2 py-0.5 rounded-md ring-1 ring-line-strong text-muted"></span>
     </div>
-    <div class="w-full sm:w-72">
-      <label for="q" class="sr-only">Filtrar containers por nome, imagem ou projeto</label>
-      <input id="q" type="search" placeholder="Filtrar por nome, imagem ou projeto…" aria-describedby="q-hint"
-        class="w-full rounded-lg bg-raised ring-1 ring-line px-3 py-2 max-lg:py-3 text-sm text-fg-strong placeholder:text-muted focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
-      <!-- o que o leitor de tela ouve ao focar a busca: só o atalho dela, não a lista inteira do popover -->
-      <span id="q-hint" class="sr-only">Atalho: barra (/) volta para esta busca; interrogação (?) mostra todos os atalhos.</span>
-      <div class="mt-1.5 flex flex-wrap items-center gap-x-4">
-        <button popovertarget="hint" aria-keyshortcuts="?" class="max-lg:hidden text-xs text-muted hover:text-fg rounded focus-visible:outline-2 focus-visible:outline-accent">
-          <kbd class="font-mono px-1 rounded ring-1 ring-line-strong text-fg-soft">?</kbd> Atalhos</button>
-        <button id="notify" hidden onclick="askNotify()" class="max-lg:py-3 text-xs text-accent-fg underline underline-offset-4 hover:text-accent-soft rounded focus-visible:outline-2 focus-visible:outline-accent">Notificar quando algo der problema</button>
-      </div>
+    <div class="flex flex-wrap items-center gap-x-4">
+      <button popovertarget="hint" aria-keyshortcuts="?" class="max-lg:hidden text-xs text-muted hover:text-fg rounded focus-visible:outline-2 focus-visible:outline-accent">
+        <kbd class="font-mono px-1 rounded ring-1 ring-line-strong text-fg-soft">?</kbd> Atalhos</button>
+      <button id="notify" hidden onclick="askNotify()" class="max-lg:py-3 text-xs text-accent-fg underline underline-offset-4 hover:text-accent-soft rounded focus-visible:outline-2 focus-visible:outline-accent">Notificar quando algo der problema</button>
       <!-- popover nativo: fecha com Esc e com clique fora -->
       <div id="hint" popover class="m-auto w-[min(26rem,calc(100vw-2rem))] rounded-xl bg-raised ring-1 ring-line-strong p-4 text-sm text-fg-soft shadow-lg shadow-black/40 backdrop:bg-transparent">
         <p class="mb-3 font-semibold text-fg-strong">Atalhos do teclado</p>
         <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 [&_kbd]:font-mono [&_kbd]:text-xs [&_kbd]:px-1.5 [&_kbd]:rounded [&_kbd]:ring-1 [&_kbd]:ring-line-strong [&_kbd]:text-fg-strong">
-          <dt><kbd>/</kbd></dt><dd>busca na lista (nos logs, filtra as linhas)</dd>
+          <dt><kbd>/</kbd></dt><dd>busca na lista de containers (nos logs, filtra as linhas)</dd>
+          <dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>nas abas, troca de aba</dd>
           <dt><kbd>↑</kbd> <kbd>↓</kbd></dt><dd>anda entre os botões Logs</dd>
           <dt><kbd>r</kbd></dt><dd>reinicia o container da linha em foco</dd>
           <dt><kbd>x</kbd></dt><dd>marca ou desmarca a linha em foco</dd>
@@ -50,50 +40,70 @@
       </div>
     </div>
   </header>
+  <!-- abas: Containers é a principal; as outras só vão ao docker quando abrem (app.ts). Setas, Home e End andam entre elas -->
+  <div id="tabs" role="tablist" aria-label="Seções" class="flex overflow-x-auto [scrollbar-width:none] border-b border-line mb-6">
+    <button role="tab" id="tab-containers" aria-controls="panel-containers" aria-selected="true" tabindex="0" onclick="pickTab('containers')"
+      class="max-lg:min-h-11 px-3 max-sm:px-2 py-2 border-b-2 border-transparent text-sm font-medium text-muted whitespace-nowrap hover:text-fg aria-selected:border-accent aria-selected:text-fg-strong focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent">Containers</button>
+    <button role="tab" id="tab-images" aria-controls="panel-images" aria-selected="false" tabindex="-1" onclick="pickTab('images')"
+      class="max-lg:min-h-11 px-3 max-sm:px-2 py-2 border-b-2 border-transparent text-sm font-medium text-muted whitespace-nowrap hover:text-fg aria-selected:border-accent aria-selected:text-fg-strong focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent">Imagens<span id="obj-images-n" class="font-normal text-muted"></span></button>
+    <button role="tab" id="tab-volumes" aria-controls="panel-volumes" aria-selected="false" tabindex="-1" onclick="pickTab('volumes')"
+      class="max-lg:min-h-11 px-3 max-sm:px-2 py-2 border-b-2 border-transparent text-sm font-medium text-muted whitespace-nowrap hover:text-fg aria-selected:border-accent aria-selected:text-fg-strong focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent">Volumes<span id="obj-volumes-n" class="font-normal text-muted"></span></button>
+    <button role="tab" id="tab-networks" aria-controls="panel-networks" aria-selected="false" tabindex="-1" onclick="pickTab('networks')"
+      class="max-lg:min-h-11 px-3 max-sm:px-2 py-2 border-b-2 border-transparent text-sm font-medium text-muted whitespace-nowrap hover:text-fg aria-selected:border-accent aria-selected:text-fg-strong focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent">Redes<span id="obj-networks-n" class="font-normal text-muted"></span></button>
+  </div>
   <p id="shown" class="sr-only" aria-live="polite"></p>
 
   <div id="banner" role="alert" class="hidden mb-4 rounded-lg ring-1 ring-warn/30 bg-warn/10 px-4 py-3 text-sm"></div>
 
-  <!-- ações em lote: só aparece com algo selecionado. Flutua embaixo (fora do fluxo: marcar uma caixa não empurra a tabela
-       para longe do cursor), mas fica aqui no DOM, antes da lista que ela comanda, para o Tab e o leitor de tela -->
-  <div id="bulk" role="region" aria-label="Ações em lote" class="hidden fixed bottom-4 left-1/2 -translate-x-1/2 z-30 w-max max-w-[min(64rem,calc(100vw-2rem))] flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl ring-1 ring-accent/40 bg-raised px-4 py-2.5 shadow-lg shadow-black/30"></div>
-  <!-- fora da barra: região viva escondida com display:none não anuncia nada -->
-  <p id="sel-live" class="sr-only" aria-live="polite"></p>
-
-  <div id="table" tabindex="-1" class="rounded-xl ring-1 ring-line bg-raised/40 overflow-x-auto transition-opacity motion-reduce:transition-none focus:outline-none">
-    <table role="table" aria-label="Containers" class="w-full text-left max-lg:block">
-      <!-- no celular o cabeçalho some, menos o "selecionar todos" -->
-      <thead role="rowgroup" class="max-lg:block text-xs uppercase tracking-wider text-muted">
-        <tr role="row" class="max-lg:block"><th role="columnheader" scope="col" aria-label="Nome" class="py-3 pl-4 font-medium max-lg:block max-lg:px-4"><div class="flex items-center gap-3">
-              <input id="all" type="checkbox" disabled onchange="selectAll(this.checked)" class="size-4 max-lg:size-6 shrink-0 accent-accent cursor-pointer disabled:cursor-default focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
-              <label for="all" class="lg:sr-only normal-case tracking-normal text-sm cursor-pointer">Selecionar todos os visíveis</label><span class="max-lg:hidden">Nome</span></div></th>
-            <th role="columnheader" scope="col" class="font-medium max-lg:hidden">Imagem</th>
-            <th role="columnheader" scope="col" class="font-medium max-lg:hidden">Status</th><th role="columnheader" scope="col" class="font-medium max-lg:hidden">Portas</th>
-            <th role="columnheader" scope="col" class="pr-4 font-medium max-lg:hidden"><span class="sr-only">Ações</span></th></tr>
-      </thead>
-      <tbody id="rows" role="rowgroup" class="max-lg:block"></tbody>
-    </table>
-  </div>
-
-  <!-- o docker system df é caro (soma os volumes): só roda ao abrir, nunca no poll; cada lista, só ao abrir a lista -->
-  <details id="disk" ontoggle="this.open && loadDisk()" class="mt-4 rounded-xl ring-1 ring-line bg-raised/40">
-    <summary class="cursor-pointer px-4 py-3 max-lg:py-4 rounded-xl text-sm font-medium text-fg-strong focus-visible:outline-2 focus-visible:outline-accent">Uso de disco, imagens, volumes e redes</summary>
-    <div id="df" class="px-4 pb-1 text-sm"></div>
-    <div class="px-4 pb-4 space-y-2 text-sm">
-      <details id="obj-images" ontoggle="this.open && loadObjects('images')" class="rounded-lg ring-1 ring-line">
-        <summary class="cursor-pointer px-3 py-2 max-lg:py-3.5 rounded-lg font-medium text-fg-strong focus-visible:outline-2 focus-visible:outline-accent">Imagens, uma a uma<span id="obj-images-n" class="font-normal text-muted"></span></summary>
-        <div id="obj-images-list" class="px-3"></div>
-      </details>
-      <details id="obj-volumes" ontoggle="this.open && loadObjects('volumes')" class="rounded-lg ring-1 ring-line">
-        <summary class="cursor-pointer px-3 py-2 max-lg:py-3.5 rounded-lg font-medium text-fg-strong focus-visible:outline-2 focus-visible:outline-accent">Volumes, um a um<span id="obj-volumes-n" class="font-normal text-muted"></span></summary>
-        <div id="obj-volumes-list" class="px-3"></div>
-      </details>
-      <details id="obj-networks" ontoggle="this.open && loadObjects('networks')" class="rounded-lg ring-1 ring-line">
-        <summary class="cursor-pointer px-3 py-2 max-lg:py-3.5 rounded-lg font-medium text-fg-strong focus-visible:outline-2 focus-visible:outline-accent">Redes<span id="obj-networks-n" class="font-normal text-muted"></span></summary>
-        <div id="obj-networks-list" class="px-3"></div>
-      </details>
+  <section id="panel-containers" role="tabpanel" aria-labelledby="tab-containers">
+    <div class="flex flex-wrap items-start justify-between gap-4 mb-6">
+      <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <button id="new" onclick="openCreate()" class="px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 rounded-md text-sm font-medium ring-1 ring-accent/40 bg-accent/10 text-accent-fg hover:bg-accent/20 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">+ Novo container</button>
+        <div id="count" role="group" aria-label="Filtrar por estado" class="flex flex-wrap gap-1 text-sm text-muted">Carregando…</div>
+      </div>
+      <div class="w-full sm:w-72">
+        <label for="q" class="sr-only">Filtrar containers por nome, imagem ou projeto</label>
+        <input id="q" type="search" placeholder="Filtrar por nome, imagem ou projeto…" aria-describedby="q-hint"
+          class="w-full rounded-lg bg-raised ring-1 ring-line px-3 py-2 max-lg:py-3 text-sm text-fg-strong placeholder:text-muted focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+        <!-- o que o leitor de tela ouve ao focar a busca: só o atalho dela, não a lista inteira do popover -->
+        <span id="q-hint" class="sr-only">Atalho: barra (/) volta para esta busca; interrogação (?) mostra todos os atalhos.</span>
+      </div>
     </div>
-  </details>
+
+    <!-- ações em lote: só aparece com algo selecionado. Flutua embaixo (fora do fluxo: marcar uma caixa não empurra a tabela
+         para longe do cursor), mas fica aqui no DOM, antes da lista que ela comanda, para o Tab e o leitor de tela -->
+    <div id="bulk" role="region" aria-label="Ações em lote" class="hidden fixed bottom-4 left-1/2 -translate-x-1/2 z-30 w-max max-w-[min(64rem,calc(100vw-2rem))] flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl ring-1 ring-accent/40 bg-raised px-4 py-2.5 shadow-lg shadow-black/30"></div>
+    <!-- fora da barra: região viva escondida com display:none não anuncia nada -->
+    <p id="sel-live" class="sr-only" aria-live="polite"></p>
+
+    <div id="table" tabindex="-1" class="rounded-xl ring-1 ring-line bg-raised/40 overflow-x-auto transition-opacity motion-reduce:transition-none focus:outline-none">
+      <table role="table" aria-label="Containers" class="w-full text-left max-lg:block">
+        <!-- no celular o cabeçalho some, menos o "selecionar todos" -->
+        <thead role="rowgroup" class="max-lg:block text-xs uppercase tracking-wider text-muted">
+          <tr role="row" class="max-lg:block"><th role="columnheader" scope="col" aria-label="Nome" class="py-3 pl-4 font-medium max-lg:block max-lg:px-4"><div class="flex items-center gap-3">
+                <input id="all" type="checkbox" disabled onchange="selectAll(this.checked)" class="size-4 max-lg:size-6 shrink-0 accent-accent cursor-pointer disabled:cursor-default focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+                <label for="all" class="lg:sr-only normal-case tracking-normal text-sm cursor-pointer">Selecionar todos os visíveis</label><span class="max-lg:hidden">Nome</span></div></th>
+              <th role="columnheader" scope="col" class="font-medium max-lg:hidden">Imagem</th>
+              <th role="columnheader" scope="col" class="font-medium max-lg:hidden">Status</th><th role="columnheader" scope="col" class="font-medium max-lg:hidden">Portas</th>
+              <th role="columnheader" scope="col" class="pr-4 font-medium max-lg:hidden"><span class="sr-only">Ações</span></th></tr>
+        </thead>
+        <tbody id="rows" role="rowgroup" class="max-lg:block"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- o docker system df é caro (soma os volumes): só roda ao abrir a aba, nunca no poll -->
+  <section id="panel-images" role="tabpanel" aria-labelledby="tab-images" hidden class="space-y-4">
+    <div id="df-images" class="rounded-xl ring-1 ring-line bg-raised/40 px-4 text-sm divide-y divide-line/70"></div>
+    <div id="obj-images-list" class="rounded-xl ring-1 ring-line bg-raised/40 px-4 text-sm"></div>
+  </section>
+  <section id="panel-volumes" role="tabpanel" aria-labelledby="tab-volumes" hidden class="space-y-4">
+    <div id="df-volumes" class="rounded-xl ring-1 ring-line bg-raised/40 px-4 text-sm divide-y divide-line/70"></div>
+    <div id="obj-volumes-list" class="rounded-xl ring-1 ring-line bg-raised/40 px-4 text-sm"></div>
+  </section>
+  <section id="panel-networks" role="tabpanel" aria-labelledby="tab-networks" hidden class="space-y-4">
+    <div id="obj-networks-list" class="rounded-xl ring-1 ring-line bg-raised/40 px-4 text-sm"></div>
+  </section>
 </main>
 
 <!-- coluna de altura fixa: o container (encolhe e rola se precisar), as ferramentas dos logs e, com o resto, os logs -->
