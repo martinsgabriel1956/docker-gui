@@ -45,6 +45,6 @@ test('container sem mounts, redes nem env', async ({ page, gui }) => {
   await gui.open({ containers: [ctr('web')] });
   await page.getByRole('button', { name: 'Logs web' }).click();
   await page.locator('#insp summary').click();
-  await expect(page.locator('#insp-body dd')).toHaveText(['no', 'nenhum', 'nenhum', 'nenhum']);
+  await expect(page.locator('#insp-body dd')).toHaveText(['no', 'nenhuma', 'nenhum', 'nenhuma']);
   await expect(page.getByRole('button', { name: 'Revelar valores' })).toHaveCount(0);
 });

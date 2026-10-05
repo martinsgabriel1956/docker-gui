@@ -108,6 +108,15 @@ test('falha parcial: aviso agregado, erro na linha e "Iniciar de novo" com Z', a
   expect(gui.container('cron')!.State).toBe('exited');  // não estava no Parar: não entra no desfazer
 });
 
+test('marcar a primeira caixa não mexe na tabela: a barra flutua embaixo', async ({ page, gui }) => {
+  await gui.open({ containers: [ctr('web'), ctr('db'), ctr('cache')] });
+  const top = () => row(page, 'db').evaluate(tr => Math.round(tr.getBoundingClientRect().top));
+  const before = await top();
+  await row(page, 'web').getByRole('checkbox').check();
+  await expect(bar(page)).toBeVisible();
+  expect(await top()).toBe(before);  // a linha de baixo continua sob o cursor
+});
+
 test('Remover em lote em 2 passos, com quantos vão ser apagados', async ({ page, gui }) => {
   await gui.open({ containers: [stopped('cron'), stopped('velho'), ctr('web')] });
   await page.locator('body').click({ position: { x: 5, y: 5 } });
@@ -118,10 +127,14 @@ test('Remover em lote em 2 passos, com quantos vão ser apagados', async ({ page
 
   await remove.click();
   await expect(confirm).toHaveText('Confirmar remoção (2)');
-  await expect(bar(page)).toContainText('Apagar 2 containers de vez? Os volumes ficam. Esc cancela.');
-  await expect(page.locator('#shown')).toContainText('Clique em Confirmar para apagar 2 containers de vez.');
+  await expect(bar(page)).toContainText('Apagar cron e velho de vez? Os volumes ficam. Esc cancela.');
+  await expect(page.locator('#shown')).toContainText('Clique em Confirmar para apagar cron e velho de vez.');
   await page.keyboard.press('Escape');
   await expect(confirm).toBeHidden();
+  await remove.click();
+  await bar(page).getByRole('button', { name: 'Cancelar remoção em lote' }).click();
+  await expect(confirm).toBeHidden();
+  await page.waitForTimeout(700);  // o clique seguinte não pode cair no anti duplo clique do anterior
 
   await remove.dblclick();  // duplo clique arma mas não confirma
   await expect(confirm).toBeVisible();

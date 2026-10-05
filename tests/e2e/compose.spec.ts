@@ -11,9 +11,28 @@ const containers = () => [
   ctr('db', { Labels: shop('db') }),
   ctr('solto'),
 ];
+// o que não é a ação principal nem Logs fica no "⋯" do projeto
+const projectMenu = (page: import('@playwright/test').Page) => page.locator('summary[aria-label="Mais ações do projeto shop"]');
+
+test('cabeçalho do projeto mostra só a ação principal, Logs e o ⋯', async ({ page, gui }) => {
+  await gui.open({ containers: containers() });
+  const head = page.locator('#rows [data-key="g:shop"]');
+  // api parado: a principal é Iniciar tudo; Reiniciar, Parar e os comandos do compose ficam no menu
+  await expect(head.getByRole('button').filter({ visible: true })).toHaveText(['Iniciar tudo (1)', 'Logs']);
+  await expect(page.getByRole('button', { name: 'compose up do projeto shop', exact: true })).toBeHidden();
+  await projectMenu(page).click();
+  await expect(head.getByRole('button').filter({ visible: true }))
+    .toHaveText(['Iniciar tudo (1)', 'Logs', 'Reiniciar tudo (1)', 'Parar tudo (1)', 'compose up', 'compose up --build', 'compose pull', 'compose down…']);
+  await page.keyboard.press('Escape');
+
+  // tudo rodando: a principal vira Parar tudo
+  gui.update(s => { s.containers[0].State = 'running'; s.containers[0].Status = 'Up 1 second'; });
+  await expect(head.getByRole('button').filter({ visible: true })).toHaveText(['Parar tudo (2)', 'Logs']);
+});
 
 test('compose up sobe o projeto a partir dos labels', async ({ page, gui }) => {
   await gui.open({ containers: containers() });
+  await projectMenu(page).click();
   await page.getByRole('button', { name: 'compose up do projeto shop', exact: true }).click();
   await expect(page.locator('#toast')).toHaveText('shop: compose up concluído.');
   expect(gui.read().compose_calls).toEqual([[...PREFIX, 'up', '-d']]);
@@ -25,12 +44,21 @@ test('compose down em 2 passos: Esc cancela, duplo clique não confirma', async 
   const down = page.getByRole('button', { name: 'compose down do projeto shop', exact: true });
   const confirm = page.getByRole('button', { name: 'Confirmar compose down do projeto shop' });
 
+  await projectMenu(page).click();
   await down.click();
   await expect(confirm).toBeVisible();
-  await expect(page.locator('#rows [data-key="g:shop"]')).toContainText('Os volumes ficam; o projeto some da lista e só volta com up.');
+  await expect(page.getByRole('button', { name: 'Cancelar compose down do projeto shop' })).toBeFocused();
+  await expect(page.locator('#rows [data-key="g:shop"]')).toContainText('Derrubar shop? Remove api e db e as redes do projeto. Os volumes ficam; para subir de novo, use compose up no terminal.');
   await page.keyboard.press('Escape');
   await expect(confirm).toBeHidden();
+  // o × também cancela (no toque não há Esc)
+  await projectMenu(page).click();
+  await down.click();
+  await page.getByRole('button', { name: 'Cancelar compose down do projeto shop' }).click();
+  await expect(confirm).toBeHidden();
+  await expect(projectMenu(page)).toBeFocused();
 
+  await projectMenu(page).click();
   await down.click();
   await confirm.click();  // logo em seguida, < 600 ms: não vale
   await expect(confirm).toBeVisible();
@@ -45,11 +73,23 @@ test('compose down em 2 passos: Esc cancela, duplo clique não confirma', async 
   await expect(page.locator('#q')).toBeFocused();
 });
 
+test('o compose down diz primeiro os containers da faixa de atenção', async ({ page, gui }) => {
+  await gui.open({ containers: [
+    ctr('api', { Labels: shop('api') }), ctr('db', { Labels: shop('db') }), ctr('cache', { Labels: shop('cache') }),
+    ctr('web', { Labels: shop('web'), State: 'exited', Status: 'Exited (137) 2 minutes ago' }),
+  ] });
+  await projectMenu(page).click();
+  await page.getByRole('button', { name: 'compose down do projeto shop', exact: true }).click();
+  // 4 containers: os 3 primeiros pelo nome e "e mais 1"; o que caiu não fica escondido no "e mais"
+  await expect(page.locator('#rows [data-key="g:shop"]')).toContainText('Remove web, api, db e mais 1');
+});
+
 test('compose que falha mostra a última linha do stderr', async ({ page, gui }) => {
   await gui.open({
     containers: containers(),
     compose_fail: ' api Pulling\nError response from daemon: pull access denied for acme/api',
   });
+  await projectMenu(page).click();
   await page.getByRole('button', { name: 'compose pull do projeto shop', exact: true }).click();
   await expect(page.locator('#toast')).toHaveText('shop: compose pull falhou. Error response from daemon: pull access denied for acme/api');
   expect(gui.read().compose_calls).toEqual([[...PREFIX, 'pull']]);
@@ -57,6 +97,7 @@ test('compose que falha mostra a última linha do stderr', async ({ page, gui })
 
 test('compose up --build reconstrói o projeto', async ({ page, gui }) => {
   await gui.open({ containers: containers() });
+  await projectMenu(page).click();
   await page.getByRole('button', { name: 'compose up --build do projeto shop', exact: true }).click();
   await expect(page.locator('#toast')).toHaveText('shop: compose up --build concluído.');
   expect(gui.read().compose_calls).toEqual([[...PREFIX, 'up', '-d', '--build']]);
@@ -100,6 +141,13 @@ test('Logs do projeto juntam os serviços em ordem, com o prefixo de cada um', a
 
   await page.keyboard.press('Escape');
   await expect(page.getByRole('button', { name: 'Logs do projeto shop' })).toBeFocused();
+
+  // cada serviço com a sua cor no prefixo, como no docker compose logs
+  await page.getByRole('button', { name: 'Logs do projeto shop' }).click();
+  const prefixes = page.locator('#lb > span > span');
+  await expect(prefixes.first()).toHaveClass(/text-svc-\d/);
+  expect(await prefixes.nth(0).getAttribute('class')).not.toBe(await prefixes.nth(1).getAttribute('class'));  // db e api
+  await page.keyboard.press('Escape');
   await page.getByRole('button', { name: 'Logs db' }).click();
   await expect(page.locator('#insp')).toBeVisible();
   await expect(page.locator('#lb')).toHaveText('2026-10-05T10:00:01Z db pronto\n');

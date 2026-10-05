@@ -26,6 +26,7 @@ recusa o que está em uso, com a mensagem do docker, e cada rm que deu certo fic
 `run -d` grava o argv em "run_calls" e cria o container rodando, com nome, imagem e portas do argv; "run_fail"
 faz o run falhar com esse stderr, "run_delay" o faz demorar (segundos) e "run_after" ({State, Status}) é o estado
 do container criado (ex.: um que sobe e cai).
+"context" ({Name, Host}) é o que o `context inspect` responde (padrão: default em unix://).
 O `docker exec -it` do terminal vira um sh local; o `docker exec -i` do modo do Windows roda o comando do
 container aqui mesmo (com o `script` local), e "noscript": true simula uma imagem sem `script` (alpine).
 O `docker events` manda uma linha por container que mudou
@@ -132,7 +133,8 @@ def project(state, args):
 def prefixed(c, text):
     # o compose prefixa cada linha com o nome do container sem o projeto ("api-1")
     svc = labels(c).get("com.docker.compose.service", "")
-    return "".join(f"{svc}-1  | {line}" for line in text.splitlines(keepends=True))
+    # cada linha termina em \n, como no compose de verdade (um log sem \n no fim não cola na linha do próximo)
+    return "".join(f"{svc}-1  | {line}\n" for line in text.splitlines())
 
 
 def subcommand(args):
@@ -243,6 +245,11 @@ def main(args):
         if args[1:] != ["--format", "{{json .}}", "--filter", "type=container"]:
             fail(f"events inesperado: {args}")
         return events(path)
+
+    if cmd == "context":  # context inspect --format '{{.Name}}\t{{.Endpoints.docker.Host}}' do contexto atual
+        with locked(path, exclusive=False) as (_, state):
+            ctx = state.get("context", {"Name": "default", "Host": "unix:///var/run/docker.sock"})
+        return print(f"{ctx['Name']}\t{ctx['Host']}")
 
     if cmd == "exec":
         # terminal: confere o argv que o servidor monta e roda um sh local no lugar do container
