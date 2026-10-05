@@ -23,7 +23,9 @@
       <p id="hint" class="mt-1.5 text-xs text-muted max-lg:hidden">Atalhos:
         <kbd class="font-mono text-xs px-1 rounded ring-1 ring-line-strong text-fg-soft">/</kbd> busca ·
         <kbd class="font-mono text-xs px-1 rounded ring-1 ring-line-strong text-fg-soft">↑</kbd>
-        <kbd class="font-mono text-xs px-1 rounded ring-1 ring-line-strong text-fg-soft">↓</kbd> entre os botões Logs</p>
+        <kbd class="font-mono text-xs px-1 rounded ring-1 ring-line-strong text-fg-soft">↓</kbd> entre os botões Logs ·
+        <kbd class="font-mono text-xs px-1 rounded ring-1 ring-line-strong text-fg-soft">x</kbd> seleciona a linha ·
+        <kbd class="font-mono text-xs px-1 rounded ring-1 ring-line-strong text-fg-soft">a</kbd> todos</p>
       <button id="notify" hidden onclick="askNotify()" class="mt-1.5 max-lg:py-3 text-xs text-accent-fg underline underline-offset-4 hover:text-accent-soft rounded focus-visible:outline-2 focus-visible:outline-accent">Notificar quando algo der problema</button>
     </div>
   </header>
@@ -31,12 +33,21 @@
 
   <div id="banner" role="alert" class="hidden mb-4 rounded-lg ring-1 ring-warn/30 bg-warn/10 px-4 py-3 text-sm"></div>
 
+  <!-- ações em lote: só aparece com algo selecionado; gruda no topo para continuar à mão ao rolar a lista -->
+  <div id="bulk" role="region" aria-label="Ações em lote" class="hidden sticky top-2 z-20 mb-3 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl ring-1 ring-accent/40 bg-raised px-4 py-2.5 shadow-lg shadow-black/20"></div>
+  <!-- fora da barra: região viva escondida com display:none não anuncia nada -->
+  <p id="sel-live" class="sr-only" aria-live="polite"></p>
+
   <div id="table" tabindex="-1" class="rounded-xl ring-1 ring-line bg-raised/40 overflow-x-auto transition-opacity motion-reduce:transition-none focus:outline-none">
     <table role="table" aria-label="Containers" class="w-full text-left max-lg:block">
-      <thead role="rowgroup" class="max-lg:hidden text-xs uppercase tracking-wider text-muted">
-        <tr role="row"><th role="columnheader" scope="col" class="py-3 pl-4 font-medium">Nome</th><th role="columnheader" scope="col" class="font-medium">Imagem</th>
-            <th role="columnheader" scope="col" class="font-medium">Status</th><th role="columnheader" scope="col" class="font-medium">Portas</th>
-            <th role="columnheader" scope="col" class="pr-4 font-medium"><span class="sr-only">Ações</span></th></tr>
+      <!-- no celular o cabeçalho some, menos o "selecionar todos" -->
+      <thead role="rowgroup" class="max-lg:block text-xs uppercase tracking-wider text-muted">
+        <tr role="row" class="max-lg:block"><th role="columnheader" scope="col" aria-label="Nome" class="py-3 pl-4 font-medium max-lg:block max-lg:px-4"><div class="flex items-center gap-3">
+              <input id="all" type="checkbox" disabled onchange="selectAll(this.checked)" class="size-4 max-lg:size-6 shrink-0 accent-accent cursor-pointer disabled:cursor-default focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+              <label for="all" class="lg:sr-only normal-case tracking-normal text-sm cursor-pointer">Selecionar todos os visíveis</label><span class="max-lg:hidden">Nome</span></div></th>
+            <th role="columnheader" scope="col" class="font-medium max-lg:hidden">Imagem</th>
+            <th role="columnheader" scope="col" class="font-medium max-lg:hidden">Status</th><th role="columnheader" scope="col" class="font-medium max-lg:hidden">Portas</th>
+            <th role="columnheader" scope="col" class="pr-4 font-medium max-lg:hidden"><span class="sr-only">Ações</span></th></tr>
       </thead>
       <tbody id="rows" role="rowgroup" class="max-lg:block"></tbody>
     </table>

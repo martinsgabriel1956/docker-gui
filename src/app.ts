@@ -1,6 +1,6 @@
 import {
   type Bucket, type Container, type ContainerState, type DiskUsage, type Port, type Stats, type Tone,
-  bucket, esc, hasHealth, isProblem, newProblems, ports, project, shortImage, status, tone, usage, workingDir,
+  bucket, bulkSummary, esc, hasHealth, isProblem, newProblems, ports, project, shortImage, status, tone, usage, workingDir,
 } from './format';
 import {Terminal} from '@xterm/xterm';
 import {FitAddon} from '@xterm/addon-fit';
@@ -28,8 +28,8 @@ type Problem = [title: string, hint: string, detail: unknown, kind: ProblemKind]
 type ToastAction = [label: string, fn: () => unknown];
 type RowError = {msg: string; state: ContainerState; what: string};
 type ComposeAction = 'up' | 'down' | 'pull';
-// confirmação em 2 passos pendente: remover um container, derrubar um projeto (id = "stack-<projeto>") ou limpar
-// uma categoria do disco; a é o data-a do botão e note vai para o leitor de tela
+// confirmação em 2 passos pendente: remover um container (ou os selecionados, id = "bulk"), derrubar um projeto
+// (id = "stack-<projeto>") ou limpar uma categoria do disco; a é o data-a do botão e note vai para o leitor de tela
 type Arming = {id: string; name: string; a: 'remove' | 'down' | 'prune'; note: string; at: number; timer: number};
 type Health = {Log?: {ExitCode: number; Output: string}[]} | null;
 // resumo do /api/inspect; o valor do env vem null (mascarado) até o usuário pedir para revelar
@@ -66,6 +66,11 @@ let data: Container[] = [], busy = new Map<string, Action>(), composing = new Ma
     problem = '', problemKind: ProblemKind | '' = '', only: Bucket | '' = '',
     toastTimer: number | undefined, logId: string | null = null, stream: EventSource | null = null, pending: string[] = [],
     arming: Arming | null = null, lastSay = '', dirty = false, seen: Set<string> | null = null;
+// seleção para as ações em lote: IDs, não nós do DOM, então sobrevive ao redesenho; visible = IDs na tela agora
+// (filtros e busca aplicados); armedIds = o que o Remover em lote armou, para o Confirmar não apagar nada além disso
+let sel = new Set<string>(), visible: string[] = [], bulkBusy: Action | '' = '', bulkHtml = '', armedIds: string[] = [],
+    lastSel = 'Nenhum container selecionado';
+const CHECK = 'size-4 max-lg:size-6 shrink-0 accent-accent cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent';
 
 let toastFn: (() => unknown) | null = null;
 function toast(msg: string, ok = false, action: ToastAction | null = null) {
@@ -94,7 +99,7 @@ function showProblem(p: Problem | null) {
   problem = p?.[0] || ''; problemKind = p?.[3] || '';
   $('#banner').classList.toggle('hidden', !p);
   $('#table').classList.toggle('opacity-40', !!p);
-  $('#table').inert = !!p;  // dados velhos não aceitam clique
+  $('#table').inert = $('#bulk').inert = !!p;  // dados velhos não aceitam clique
   if (p) $('#banner').innerHTML = `<p class="font-medium text-warn-strong">${p[0]}</p>
     <p class="mt-0.5 text-warn-soft">${p[1]}</p>
     <details class="mt-2 text-xs text-warn-soft"><summary class="cursor-pointer w-fit py-1 max-lg:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent">Detalhes técnicos</summary>
@@ -116,6 +121,8 @@ async function load() {
     // só redesenha se mudou (ou na 1ª carga, senão a lista vazia nunca aparece)
     if (first || JSON.stringify(j) !== JSON.stringify(data)) {
       data = j as Container[];
+      // container que sumiu (removido, recriado pelo compose com outro ID) sai da seleção
+      for (const id of sel) if (!data.some(c => c.ID === id)) sel.delete(id);
       if (selectingRows()) dirty = true; else render();
     }
     notify(newProblems(seen, data));
@@ -247,7 +254,7 @@ async function loadHealth(id: string) {
 
 const rowCache = new Map<string, {sig: string; html: string}>();
 function row(c: Container, withProject = false) {
-  const sig = JSON.stringify([c, withProject, busy.get(c.ID), arming?.id === c.ID, errors.get(c.ID), health[c.ID + c.Status], stats[c.ID], TOUCH]);
+  const sig = JSON.stringify([c, withProject, busy.get(c.ID), arming?.id === c.ID, errors.get(c.ID), health[c.ID + c.Status], stats[c.ID], TOUCH, sel.has(c.ID)]);
   const hit = rowCache.get(c.ID);
   if (hit?.sig === sig) return hit.html;
   const html = rowHtml(c, withProject);
@@ -279,17 +286,20 @@ function rowHtml(c: Container, withProject: boolean) {
   const healthBox = hasHealth(c) && !b ? `<details data-keep="health" class="mt-1 text-xs" ontoggle="this.open && loadHealth('${c.ID}')">
       <summary class="cursor-pointer w-fit py-1 max-lg:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent text-muted hover:text-fg">Ver último healthcheck</summary>
       <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-fg-soft">${esc(health[c.ID + c.Status] || 'Carregando…')}</pre></details>` : '';
-  return `<tr data-row data-key="c:${c.ID}" role="row" class="border-t border-line/70 hover:bg-raised/70 transition motion-reduce:transition-none max-lg:block max-lg:px-4 max-lg:py-4 max-lg:space-y-1.5">
+  // no card do celular, imagem, status e portas recuam até o nome (pl-14 = checkbox + bolinha + os gaps)
+  const on = sel.has(c.ID);
+  return `<tr data-row data-key="c:${c.ID}" role="row" class="border-t border-line/70 ${on ? 'bg-accent/10' : 'hover:bg-raised/70'} transition motion-reduce:transition-none max-lg:block max-lg:px-4 max-lg:py-4 max-lg:space-y-1.5">
     <th role="rowheader" scope="row" class="py-3 pl-4 pr-6 max-lg:block max-lg:p-0 text-left font-normal"><div class="flex items-center gap-3">
+      <input type="checkbox" data-id="${c.ID}" data-a="sel" ${on ? 'checked' : ''} aria-label="Selecionar ${esc(c.Names)}" onchange="toggleSel('${c.ID}')" class="${CHECK}">
       <span aria-hidden="true" class="size-2 shrink-0 rounded-full ${t[0]}"></span>
       <div class="min-w-0"><div class="font-medium text-fg-strong lg:truncate lg:max-w-[24ch]" title="${esc(c.Names)}">${esc(c.Names)}</div>
            <div class="text-xs font-mono text-muted">${c.ID.slice(0, 12)}${withProject && p ? `<span class="font-sans"> · ${esc(p)}</span>` : ''}</div></div></div></th>
-    <td role="cell" class="font-mono text-xs text-muted pr-4 max-lg:block max-lg:p-0 max-lg:pl-5 [overflow-wrap:anywhere]">
+    <td role="cell" class="font-mono text-xs text-muted pr-4 max-lg:block max-lg:p-0 max-lg:pl-14 [overflow-wrap:anywhere]">
       <span class="sr-only lg:hidden">Imagem: </span><div class="lg:truncate lg:max-w-[24ch] lg:[direction:rtl] lg:text-left" title="${esc(c.Image)}"><bdi dir="ltr">${esc(shortImage(c.Image))}</bdi></div></td>
-    <td role="cell" class="text-sm pr-4 lg:min-w-[24ch] max-lg:block max-lg:p-0 max-lg:pl-5" title="${esc(c.Status)}">
+    <td role="cell" class="text-sm pr-4 lg:min-w-[24ch] max-lg:block max-lg:p-0 max-lg:pl-14" title="${esc(c.Status)}">
       <span id="st-${c.ID}" class="${t[1]}">${b ? VERB[b] : esc(st[0])}${st[1] && !b ? `<span class="block text-xs text-muted">${st[1]}</span>` : ''}</span>${
       u ? `<span id="us-${c.ID}" class="block text-xs font-mono text-muted" title="${esc(u[1])}">${esc(u[0])}</span>` : ''}${b ? '' : errHtml(c) + healthBox}</td>
-    <td role="cell" class="pr-4 max-lg:hidden max-lg:has-[div]:block max-lg:p-0 max-lg:pl-5 max-lg:pt-1">${pp.length
+    <td role="cell" class="pr-4 max-lg:hidden max-lg:has-[div]:block max-lg:p-0 max-lg:pl-14 max-lg:pt-1">${pp.length
       ? `<div class="flex flex-wrap gap-1 max-lg:gap-2">${pp.map(x => portChip(c, x)).join('')}</div>` : ''}</td>
     <td role="cell" class="pr-4 max-lg:block max-lg:p-0 max-lg:pt-2"><div class="flex justify-end max-lg:justify-start items-center gap-1.5 max-lg:gap-2">
       ${prim ? btn(prim, prim === 'start' ? 'text-ok-fg hover:bg-ok/10' : undefined) : slot()}${btn('logs')}
@@ -353,6 +363,7 @@ function render() {
   // a triagem fica na faixa "Precisa de atenção", o resto agrupado por projeto compose
   const rows = data.filter(c => (!only || bucket(c) === only) && [c.Names, c.Image, project(c)].join(' ').toLowerCase().includes(q))
                    .sort((a, b) => a.Names.localeCompare(b.Names));
+  visible = rows.map(c => c.ID);
   const attn = rows.filter(isProblem), groups = new Map<string, Container[]>();
   for (const c of rows) if (!isProblem(c)) groups.set(project(c), [...(groups.get(project(c)) || []), c]);
   // projeto com todos os containers na faixa ainda precisa do cabeçalho (e das ações do stack)
@@ -371,6 +382,7 @@ function render() {
       : `Nenhum container ${label}${q ? `corresponde a “${esc(q)}”` : 'agora'}.`}</td></tr>`]);
   dirty = false;
   renderCount();
+  renderBulk();
   renderDlg();
   renderDisk();
   if (f?.id) refocus(f.id, f.a);
@@ -478,8 +490,10 @@ async function confirmUp(ids: string[]) {
 }
 
 const STACK: [Action, string][] = [['start', 'Iniciar tudo'], ['restart', 'Reiniciar tudo'], ['stop', 'Parar tudo']];
-const stackList = (a: Action, p: string, ids?: string[]) => data.filter(c => project(c) === p && (ids ? ids.includes(c.ID)
-  : a === 'start' ? PRIMARY[c.State] === 'start' : a === 'restart' ? c.State === 'running' : STOPPABLE.includes(c.State)));
+// em quem a ação de lote faz sentido: Iniciar só nos parados, Reiniciar nos rodando, Remover só no que não está de pé
+const fits = (a: Action, c: Container) => a === 'start' ? PRIMARY[c.State] === 'start' : a === 'restart' ? c.State === 'running'
+  : a === 'remove' ? removable(c) : STOPPABLE.includes(c.State);
+const stackList = (a: Action, p: string, ids?: string[]) => data.filter(c => project(c) === p && (ids ? ids.includes(c.ID) : fits(a, c)));
 
 function copyExec(id: string) {
   // data-cli: binário e --context com que o servidor foi iniciado (ex.: "podman", "docker --context prod")
@@ -499,6 +513,89 @@ async function stackAct(a: Action, p: string, ids?: string[]) {
   else toast(`${p}: ${list.length} ${a === 'start' ? 'iniciados' : 'reiniciados'}, conferindo se ficaram de pé…`, true);
   if (!fails && UP.includes(a)) return confirmUp(okIds);
   load();
+}
+
+// ---- seleção e ações em lote ----
+const BULK: [Action, string][] = [['start', 'Iniciar'], ['stop', 'Parar'], ['restart', 'Reiniciar'], ['remove', 'Remover…']];
+const bulkList = (a: Action, ids: string[] = [...sel]) => data.filter(c => ids.includes(c.ID) && fits(a, c));
+const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
+// mudar a seleção desarma o Remover em lote: o número no Confirmar tem que ser o que vai ser apagado
+function changeSel(fn: () => void) {
+  fn();
+  if (arming?.id === 'bulk') disarm(false);
+  render();
+}
+const toggleSel = (id: string) => changeSel(() => sel.has(id) ? sel.delete(id) : sel.add(id));
+// "selecionar todos" vale só para o que está na tela (filtros e busca); desmarcar tira só esses também
+const selectAll = (on: boolean) => changeSel(() => visible.forEach(id => on ? sel.add(id) : sel.delete(id)));
+function clearSel() { changeSel(() => sel.clear()); $('#all').focus(); }
+
+function renderBulk() {
+  const all = $<HTMLInputElement>('#all'), mine = visible.filter(id => sel.has(id)).length;
+  all.checked = !!visible.length && mine === visible.length;
+  all.indeterminate = mine > 0 && mine < visible.length;
+  all.disabled = !visible.length;
+  const n = sel.size, hidden = n - mine, armed = arming?.id === 'bulk';
+  const say = n ? `${plural(n, 'container selecionado', 'containers selecionados')}${hidden ? `, ${hidden} fora do filtro` : ''}`
+                : 'Nenhum container selecionado';
+  if (say !== lastSel) $('#sel-live').textContent = lastSel = say;  // só anuncia quando a contagem muda
+  const btn = ([a, text]: [Action, string]) => {
+    const k = armed && a === 'remove' ? armedIds.length : bulkList(a).length;
+    if (!k) return '';  // como no Parar tudo: só aparece o que faz sentido para a seleção
+    const cls = armed && a === 'remove' ? 'bg-danger text-white ring-danger hover:bg-danger-hover'
+              : a === 'start' ? 'text-ok-fg hover:bg-ok/10' : a === 'remove' ? 'text-bad-fg hover:bg-bad/10' : 'text-fg hover:bg-hover';
+    const aria = armed && a === 'remove' ? `Confirmar remoção de ${plural(k, 'container', 'containers')}` : `${text.replace('…', '')} ${plural(k, 'selecionado', 'selecionados')}`;
+    return `<button data-id="bulk" data-a="${a}" ${bulkBusy ? 'aria-disabled="true"' : ''} aria-label="${aria}" title="${esc(bulkList(a, armed && a === 'remove' ? armedIds : undefined).map(c => c.Names).join(', '))}"
+      onclick="bulkAct('${a}')" class="${BTN} ${cls}">${bulkBusy === a ? VERB[a] : armed && a === 'remove' ? 'Confirmar remoção' : text} (${k})</button>`;
+  };
+  const html = !n ? '' : `<p class="mr-auto text-sm font-medium text-fg-strong">${plural(n, 'selecionado', 'selecionados')}${
+      hidden ? `<span class="font-normal text-muted"> · ${hidden} fora do filtro</span>` : ''}</p>
+    <div class="flex flex-wrap gap-1.5">${BULK.map(btn).join('')}
+      <button data-id="bulk" data-a="clear" onclick="clearSel()" class="${BTN} text-muted hover:bg-hover">Limpar seleção</button></div>
+    ${armed ? `<p aria-hidden="true" class="w-full text-xs text-bad-soft lg:text-right">Apagar ${plural(armedIds.length, 'container', 'containers')} de vez? Os volumes ficam. ${TOUCH ? 'Cancela sozinho em 8 s.' : 'Esc cancela.'}</p>` : ''}`;
+  $('#bulk').classList.toggle('hidden', !n);
+  if (html !== bulkHtml) $('#bulk').innerHTML = bulkHtml = html;  // o render roda a cada poll: só troca se mudou
+}
+
+// no máximo n chamadas por vez: o servidor atende em paralelo, mas 30 `docker stop` juntos sobrecarregam o daemon
+async function pool<T>(xs: T[], n: number, fn: (x: T) => Promise<boolean>): Promise<boolean[]> {
+  const out: boolean[] = [];
+  let next = 0;
+  await Promise.all(Array.from({length: Math.min(n, xs.length)}, async () => {
+    while (next < xs.length) { const i = next++; out[i] = await fn(xs[i]); }
+  }));
+  return out;
+}
+
+// ação nos selecionados (ou em ids, usado pelo "Iniciar de novo"), pela mesma rota POST /api/<ação>/<id> da linha
+async function bulkAct(a: Action, ids?: string[]) {
+  if (bulkBusy) return;
+  if (a === 'remove' && !ids) {
+    if (arming?.id !== 'bulk') armedIds = bulkList('remove').map(c => c.ID);
+    const k = armedIds.length, name = k === 1 ? data.find(c => c.ID === armedIds[0])?.Names ?? '1 container' : `${k} containers`;
+    if (!k || !confirmed('bulk', name, 'remove', 'Os volumes não são afetados.')) return;
+    ids = armedIds;
+  }
+  const list = bulkList(a, ids).filter(c => !busy.has(c.ID));
+  if (!list.length) return;
+  // a fila inteira já aparece ocupada: ninguém dispara a mesma ação na linha enquanto espera a vez
+  bulkBusy = a; list.forEach(c => busy.set(c.ID, a)); render();
+  $('#shown').textContent = `${VERB[a]} ${plural(list.length, 'container', 'containers')}`;
+  const res = await pool(list, 4, c => run(a, c));
+  bulkBusy = '';
+  const okIds = list.filter((c, i) => res[i] && c.State !== 'paused').map(c => c.ID);
+  const fails = list.filter((_, i) => !res[i]).map((c): [string, string] => [c.Names, errors.get(c.ID)?.msg || '']);
+  const msg = bulkSummary(DONE[a], res.filter(Boolean).length, fails);
+  if (!fails.length && UP.includes(a)) {
+    toast(`${msg.slice(0, -1)}, conferindo se ficaram de pé…`, true);
+    return confirmUp(okIds);
+  }
+  // o aviso só depois de reler a lista: o desfazer filtra pelo estado atual e, com os dados de antes, não acharia nada
+  await load();
+  // pausado que parou fica de fora do desfazer, como no Parar tudo: iniciar não devolveria a pausa
+  toast(msg, !fails.length, a === 'stop' && okIds.length ? ['Iniciar de novo', () => bulkAct('start', okIds)] : null);
+  if (a === 'remove' && (!document.activeElement || document.activeElement === document.body)) $('#q').focus();
 }
 
 // 1º clique só arma (e desarma o que estiver armado); o 2º confirma. Devolve true quando é para executar
@@ -550,9 +647,14 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') closeMenus();
   if (e.key === 'Escape' && arming) return disarm();
   if ($<HTMLDialogElement>('#dlg').open || $<HTMLDialogElement>('#shell').open || e.ctrlKey || e.metaKey || e.altKey) return;
-  const el = document.activeElement as HTMLElement, typing = /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName);
+  // checkbox da seleção não é digitação: com o foco nela os atalhos continuam valendo
+  const el = document.activeElement as HTMLElement, typing = /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) && (el as HTMLInputElement).type !== 'checkbox';
   if (e.key === '/' && !typing) { e.preventDefault(); return $('#q').focus(); }
   if ((e.key === 'z' || e.key === 'Z') && !typing && toastFn) return runToastAction();
+  // x marca a linha em foco (junto com ↑↓ dá para selecionar sem mouse); a marca ou desmarca todos os visíveis
+  const curId = el.closest?.<HTMLElement>('tr[data-row]')?.dataset.key?.slice(2);
+  if ((e.key === 'x' || e.key === 'X') && !typing && curId) return toggleSel(curId);
+  if ((e.key === 'a' || e.key === 'A') && !typing && visible.length) return selectAll(!visible.every(id => sel.has(id)));
   // ↑↓ movem o foco para o Logs da linha de cima/baixo: é seguro (Enter não muda estado) e existe em toda linha
   if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
   if (typing && !(el === $('#q') && e.key === 'ArrowDown')) return;
@@ -782,8 +884,9 @@ async function prune(k: DiskKind) {
 // o HTML gerado chama estas funções pelo nome (onclick="act(...)"); com módulos nada é global, então
 // esta lista é a interface completa entre o HTML e o código
 Object.assign(window, {
-  act, afterClose, askNotify, clearFilters, composeAct, copyAddr, copyExec, copyLogs, downloadLogs, filterBy, loadDisk,
-  loadHealth, loadInspect, menuPick, openShell, placeMenu, prune, refreshLogs, runToastAction, stackAct, toggleFollow,
+  act, afterClose, askNotify, bulkAct, clearFilters, clearSel, composeAct, copyAddr, copyExec, copyLogs, downloadLogs,
+  filterBy, loadDisk, loadHealth, loadInspect, menuPick, openShell, placeMenu, prune, refreshLogs, runToastAction,
+  selectAll, stackAct, toggleFollow, toggleSel,
 });
 
 $('#dlg').addEventListener('close', afterClose);

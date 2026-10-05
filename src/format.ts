@@ -118,3 +118,12 @@ export interface Stats {
 // [texto curto, title com o limite de memória]
 export const usage = (s: Stats): StatusText =>
   [`CPU ${s.CPUPerc} · RAM ${s.MemUsage.split(' / ')[0]}`, `Memória: ${s.MemUsage} (${s.MemPerc})`];
+
+// resumo de uma ação em lote para o aviso: "3 parados, 1 falhou: web: permission denied."
+// done é o particípio no singular (DONE do app.ts); só as 2 primeiras falhas vão por extenso, o resto fica nas linhas
+export function bulkSummary(done: string, ok: number, fails: [name: string, msg: string][]): string {
+  const why = (m: string) => m.trim().split('\n')[0].replace(/\.$/, '') || 'erro sem mensagem';
+  const f = fails.length, list = fails.slice(0, 2).map(([n, m]) => `${n}: ${why(m)}`).join('; ');
+  return [ok && `${ok} ${ok === 1 ? done : done + 's'}`,
+          f && `${f} ${f === 1 ? 'falhou' : 'falharam'}: ${list}${f > 2 ? `; e mais ${f - 2}` : ''}`].filter(Boolean).join(', ') + '.';
+}

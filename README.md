@@ -30,13 +30,14 @@ A saída do `podman ps` tem outro formato (`Names` em lista, portas como objetos
 - **Agrupamento por projeto do compose** (`com.docker.compose.project`), com **Iniciar / Reiniciar / Parar tudo** e "Iniciar de novo" para desfazer.
 - **`compose up` / `pull` / `down` por projeto**, com a pasta e os arquivos do compose lidos dos labels dos containers (o servidor nunca confia num caminho vindo da página). O `down` pede confirmação em 2 passos: os volumes ficam, mas o projeto some da lista e só volta com `up` pelo terminal.
 - **Ações por container:** iniciar, parar, reiniciar, pausar, retomar e remover (com confirmação em 2 passos). Depois de iniciar, a ferramenta confere se o container ficou de pé. Depois de pausar, o aviso oferece "Retomar" (atalho `Z`).
+- **Ações em lote:** marque containers pela caixa de cada linha (ou "Selecionar todos os visíveis", que respeita os filtros e a busca) e use a barra que aparece: Iniciar, Parar, Reiniciar e Remover, cada um contando só os selecionados em que a ação faz sentido. Remover pede confirmação em 2 passos e mostra quantos vão ser apagados. As ações rodam no máximo 4 por vez e o aviso junta o resultado ("3 parados, 1 falhou: web: …"), com o erro de cada falha na linha. Depois de parar, o aviso oferece "Iniciar de novo" (atalho `Z`). A seleção atravessa o redesenho e perde sozinha os containers que somem.
 - **Logs** com timestamps, acompanhamento ao vivo, botões de copiar e de baixar (.log) e ações no próprio modal. Mostra também a saída do último healthcheck.
 - **Configuração** no modal de logs: restart policy, redes, mounts e env, do `docker inspect`. Os valores do env chegam mascarados e só saem do servidor quando você clica em Revelar.
 - **Portas:** as HTTP abrem no navegador; as outras (Postgres, Redis…) copiam `localhost:porta`.
 - **Terminal no navegador** pelo menu "⋯" ("Abrir terminal"): um `docker exec -it` com bash (ou sh, se a imagem não tiver bash) num terminal [xterm.js](https://xtermjs.org) embutido. Redimensiona junto com a janela, e o `Esc` vai para o programa (vim, less), não fecha o modal. Só em Linux e macOS.
 - **Copiar `docker exec -it <nome> sh`** pelo menu "⋯".
 - **Uso de disco** (`docker system df`) de imagens, volumes e build cache, com **limpeza** (`prune`) de cada categoria, confirmada em 2 passos como a remoção. Imagens e build cache saem com `-a` (tudo que está sem uso); volumes sem `-a`, então no Docker 23+ os nomeados ficam.
-- **Teclado:** `/` vai para a busca, `↑` `↓` andam entre os botões Logs e `Z` aciona o "desfazer". Os filtros ficam na URL.
+- **Teclado:** `/` vai para a busca, `↑` `↓` andam entre os botões Logs, `X` marca ou desmarca a linha em foco, `A` marca ou desmarca todos os visíveis e `Z` aciona o "desfazer". Os filtros ficam na URL.
 - Tema **claro e escuro** automático, layout de **cards no celular** e acessibilidade AA (contraste, foco, leitores de tela, `prefers-reduced-motion`).
 
 ## Requisitos
@@ -109,7 +110,7 @@ As funções de `src/format.ts` têm testes próprios. O Node (22.18+) importa o
 node --test tests/format.test.js
 ```
 
-Os testes de UI usam o [Playwright](https://playwright.dev) e cobrem o que a página faz na tela: agrupamento e faixa de atenção, filtros e atalhos, ações (incluindo a remoção em 2 passos e o "conferindo se ficou de pé"), modal de logs, terminal, healthcheck, estados de erro e o que o redesenho a cada 2 s preserva (foco, seleção de texto, menus abertos). Cada teste sobe o próprio `docker_gui.py` contra um `docker` falso (`tests/e2e/fake-docker/docker`), que lê os containers de um JSON. Assim dá para montar cenários exatos (healthcheck falhando, loop de reinício, ação que falha ou demora) sem precisar de daemon:
+Os testes de UI usam o [Playwright](https://playwright.dev) e cobrem o que a página faz na tela: agrupamento e faixa de atenção, filtros e atalhos, ações (incluindo a remoção em 2 passos e o "conferindo se ficou de pé"), seleção e ações em lote (falha parcial, limite de 4 por vez), modal de logs, terminal, healthcheck, estados de erro e o que o redesenho a cada 2 s preserva (foco, seleção de texto, menus abertos). Cada teste sobe o próprio `docker_gui.py` contra um `docker` falso (`tests/e2e/fake-docker/docker`), que lê os containers de um JSON. Assim dá para montar cenários exatos (healthcheck falhando, loop de reinício, ação que falha ou demora) sem precisar de daemon:
 
 ```bash
 npx playwright install chromium   # uma vez
