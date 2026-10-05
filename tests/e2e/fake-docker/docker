@@ -3,18 +3,25 @@
 
 Cenários que o Docker de verdade não reproduz sob demanda (healthcheck falhando, loop de reinício,
 ação que falha ou demora) viram dados. Campos extras por container, fora do formato do `docker ps`:
-  logs    texto do `docker logs`; com -f, o que for acrescentado depois sai na hora
+  logs    texto do `docker logs` (respeita o --tail); com -f, o que for acrescentado depois sai na hora
   health  objeto do `inspect --format {{json .State.Health}}`
   inspect objeto do `inspect --format {{json .}}` (HostConfig, NetworkSettings, Mounts, Config...)
   fail    {ação: stderr}: a ação falha com essa mensagem
   delay   {ação: segundos}: a ação demora (para ver o estado "ocupado" na tela)
   after   {ação: {State, Status}}: estado depois da ação, no lugar do padrão (ex.: start que cai)
-  stats   {CPUPerc, MemUsage, MemPerc}: linha do `docker stats`; sem ele, o container não aparece lá
+  stats   {CPUPerc, MemUsage, MemPerc, NetIO, BlockIO}: linha do `docker stats`; sem ele, o container não
+          aparece lá. Numa lista, cada `docker stats` usa o item seguinte (o último se repete), para a
+          página ver os números mudando; "stats_calls", no topo do JSON, conta as leituras
 No topo do JSON, "ps_error" faz o `docker ps` falhar (daemon fora do ar), "df" é a saída do
 `docker system df` (lista de linhas) e "pruned" registra os prunes que rodaram. O prune zera o
 "Reclaimable" da categoria e diz que liberou o que estava lá. "compose_fail" faz todo
 `docker compose` falhar com esse stderr, e cada `docker compose` grava o argv em "compose_calls".
-`compose up` deixa os containers do projeto rodando, `down` os remove e `pull` não muda nada.
+`compose up` (com ou sem --build) deixa os containers do projeto rodando, `down` os remove, `pull` não
+muda nada, `restart <serviço>` deixa os containers do serviço rodando e `logs` junta os logs do projeto
+com o prefixo do serviço ("api-1  | "), como o compose; com --follow, acompanha como o `logs -f`.
+"images", "volumes" e "networks" são as linhas do `image ls`/`volume ls`/`network ls` (uma por tag, no caso
+das imagens). Quem usa cada uma sai do "inspect" dos containers (Image, Mounts, NetworkSettings.Networks): o rm
+recusa o que está em uso, com a mensagem do docker, e cada rm que deu certo fica em "removed".
 `run -d` grava o argv em "run_calls" e cria o container rodando, com nome, imagem e portas do argv; "run_fail"
 faz o run falhar com esse stderr, "run_delay" o faz demorar (segundos) e "run_after" ({State, Status}) é o estado
 do container criado (ex.: um que sobe e cai).
@@ -65,17 +72,26 @@ def save(f, state):
     json.dump(state, f)
 
 
-def follow(path, ref):
-    """logs -f: manda o que já tem, depois só o que for acrescentado; termina quando o container para, como o docker."""
-    sent = 0
+def tail(logs, args):
+    """--tail N: só as últimas N linhas; sem ele, tudo (como o docker)."""
+    if "--tail" not in args:
+        return logs
+    return "".join(logs.splitlines(keepends=True)[-int(args[args.index("--tail") + 1]):])
+
+
+def follow(path, pick, fmt=lambda c, text: text, args=()):
+    """logs -f: manda o que já tem (respeitando o --tail), depois só o que for acrescentado; termina quando
+    nenhum dos containers acompanhados (pick: um no docker logs, o projeto no compose logs) está rodando, como o docker."""
+    sent = {}
     while True:
         with locked(path, exclusive=False) as (_, state):
-            c = find(state, ref)
-        logs = c.get("logs", "")
-        sys.stdout.write(logs[sent:])
+            cs = pick(state)
+        for c in cs:
+            logs = c.get("logs", "")
+            sys.stdout.write(fmt(c, tail(logs, args) if c["ID"] not in sent else logs[sent[c["ID"]]:]))
+            sent[c["ID"]] = len(logs)
         sys.stdout.flush()
-        sent = len(logs)
-        if c["State"] not in ("running", "paused"):
+        if not any(c["State"] in ("running", "paused") for c in cs):
             return
         time.sleep(0.2)  # dorme fora do lock
 
@@ -85,17 +101,93 @@ def labels(c):
     return dict(re.findall(r"(?:^|,)([\w.-]+)=((?:[^,]|,(?![\w.-]+=))*)", c.get("Labels", "")))
 
 
+def project(state, args):
+    p = args[args.index("-p") + 1]
+    return [c for c in state["containers"] if labels(c).get("com.docker.compose.project") == p]
+
+
+def prefixed(c, text):
+    # o compose prefixa cada linha com o nome do container sem o projeto ("api-1")
+    svc = labels(c).get("com.docker.compose.service", "")
+    return "".join(f"{svc}-1  | {line}" for line in text.splitlines(keepends=True))
+
+
+def subcommand(args):
+    """compose -p X --project-directory D -f F... <sub> <resto>: pula as flags globais."""
+    i = 0
+    while args[i] in ("-p", "--project-directory", "-f"):
+        i += 2
+    return args[i], args[i + 1:]
+
+
+def using(state, kind, key):
+    """Containers que usam a imagem (ID), o volume ou a rede (nome), pelo inspect, como o servidor lê."""
+    out = []
+    for c in state["containers"]:
+        i = c.get("inspect", {})
+        refs = {"image": [i.get("Image", "").split(":")[-1]],
+                "volume": [m.get("Name") for m in i.get("Mounts", []) if m.get("Type") == "volume"],
+                "network": list(i.get("NetworkSettings", {}).get("Networks", {}))}[kind]
+        if key in refs:
+            out.append(c)
+    return out
+
+
+def objects(state, args):
+    """image/volume/network ls e rm, e o `network inspect --format {{.Name}}`. Devolve True se mudou o estado."""
+    kind, sub, ref = args[0], args[1], args[-1]
+    items = state.get(kind + "s", [])
+    if sub == "ls":
+        for row in items:
+            print(json.dumps(row))
+        return False
+    match = [r for r in items if (r["Name"] == ref if kind == "volume" else r["ID"].split(":")[-1].startswith(ref))]
+    if not match:
+        fail({"image": f"Error response from daemon: No such image: {ref}:latest",
+              "volume": f"Error response from daemon: get {ref}: no such volume",
+              "network": f"Error response from daemon: network {ref} not found"}[kind])
+    if sub == "inspect":
+        print(match[0]["Name"])
+        return False
+    users = using(state, kind, match[0]["Name"] if kind == "volume" else match[0]["ID"].split(":")[-1])
+    if kind == "image" and len(match) > 1:
+        fail(f"Error response from daemon: conflict: unable to delete {ref} (must be forced) - image is referenced in multiple repositories")
+    if kind == "image" and users:
+        u = users[0]
+        running = u["State"] == "running"
+        fail(f"Error response from daemon: conflict: unable to delete {ref} ({'cannot' if running else 'must'} be forced) - "
+             f"image is being used by {'running' if running else 'stopped'} container {u['ID']}")
+    if kind == "volume" and users:
+        fail(f"Error response from daemon: remove {ref}: volume is in use - [{', '.join(u['ID'] for u in users)}]")
+    if kind == "network" and match[0]["Name"] in ("bridge", "host", "none"):
+        fail(f"Error response from daemon: {match[0]['Name']} is a pre-defined network and cannot be removed")
+    if kind == "network" and users:
+        fail(f"Error response from daemon: error while removing network: network {match[0]['Name']} has active endpoints "
+             f'(name:"{users[0]["Names"]}" id:"{users[0]["ID"]}")')
+    for r in match:
+        items.remove(r)
+    state.setdefault("removed", []).append(" ".join(args))
+    print(ref)
+    return True
+
+
 def compose(state, args):
     state.setdefault("compose_calls", []).append(["compose", *args])
     if state.get("compose_fail"):
         return state["compose_fail"]
-    p = args[args.index("-p") + 1]
-    mine = [c for c in state["containers"] if labels(c).get("com.docker.compose.project") == p]
+    sub, rest = subcommand(args)
+    mine = project(state, args)
+    if sub == "restart":
+        mine = [c for c in mine if labels(c).get("com.docker.compose.service") == rest[-1]]
+        if not mine:
+            return f"no such service: {rest[-1]}"
     for c in mine:
-        if "down" in args:
+        if sub == "down":
             state["containers"].remove(c)
-        elif "up" in args:
+        elif sub in ("up", "restart"):
             c.update(RUNNING)
+        elif sub == "logs" and "--follow" not in rest:
+            sys.stdout.write(prefixed(c, tail(c.get("logs", ""), rest)))
     return None
 
 
@@ -123,7 +215,7 @@ def main(args):
     cmd, ref = args[0], args[-1]
     action = "remove" if cmd == "rm" else cmd
     if cmd == "logs" and "-f" in args:
-        return follow(path, ref)
+        return follow(path, lambda state: [find(state, ref)], args=args)
 
     if cmd == "exec":
         # terminal: confere o argv que o servidor monta e roda um sh local no lugar do container
@@ -150,12 +242,15 @@ def main(args):
         if cmd == "ps":
             if state.get("ps_error"):
                 fail(state["ps_error"])
+            if "-q" in args:  # ps -a -q --no-trunc: quem usa imagens, volumes e redes
+                print("\n".join(c["ID"] for c in state["containers"]))
+                return
             for c in state["containers"]:
                 if "--filter" not in args:
                     print(json.dumps({k: c.get(k, "") for k in PS_FIELDS}))
                 elif "com.docker.compose.project" in labels(c):  # o COMPOSE_FORMAT do servidor
-                    print(json.dumps([labels(c).get("com.docker.compose.project" + k, "")
-                                      for k in ("", ".working_dir", ".config_files")]))
+                    print(json.dumps([labels(c).get("com.docker.compose." + k, "")
+                                      for k in ("project", "project.working_dir", "project.config_files", "service")]))
         elif cmd == "run":
             cid, err = run(state, args)
             save(f, state)
@@ -168,12 +263,22 @@ def main(args):
             if err:
                 fail(err)
         elif cmd == "stats":
+            n = state["stats_calls"] = state.get("stats_calls", 0) + 1
+            save(f, state)
             for c in state["containers"]:
                 if "stats" in c:
-                    print(json.dumps({"ID": c["ID"], "Name": c["Names"], **c["stats"]}))
+                    s = c["stats"]
+                    s = s[min(n, len(s)) - 1] if isinstance(s, list) else s
+                    print(json.dumps({"ID": c["ID"], "Name": c["Names"], **s}))
         elif cmd == "system":
             for row in state.get("df", []):
                 print(json.dumps(row))
+        elif cmd in ("image", "volume", "network") and args[1] != "prune":
+            if objects(state, args):
+                save(f, state)
+        elif cmd == "container":  # container inspect <ids...>: um array, como o docker
+            print(json.dumps([{"Name": "/" + c["Names"], **c.get("inspect", {})}
+                              for c in state["containers"] if c["ID"] in args[2:]]))
         elif cmd in PRUNE_TYPE:
             row = next(r for r in state["df"] if r["Type"] == PRUNE_TYPE[cmd])
             freed, row["Reclaimable"] = row["Reclaimable"].split()[0], "0B"
@@ -182,7 +287,7 @@ def main(args):
             # o builder prune resume diferente dos outros
             print(f"Total:\t{freed}" if cmd == "builder" else f"Total reclaimed space: {freed}")
         elif cmd == "logs":
-            sys.stdout.write(find(state, ref).get("logs", ""))
+            sys.stdout.write(tail(find(state, ref).get("logs", ""), args))
         elif cmd == "inspect":
             c = find(state, ref)
             print(json.dumps(c.get("health") if ".State.Health" in args[-2] else c.get("inspect", {})))
@@ -195,6 +300,10 @@ def main(args):
             else:
                 c.update(c.get("after", {}).get(action) or AFTER[action])
             save(f, state)
+
+    # compose logs --follow: a chamada já ficou registrada; acompanha fora do lock, que o follow pega a cada volta
+    if cmd == "compose" and subcommand(args[1:])[0] == "logs" and "--follow" in args:
+        follow(path, lambda state: project(state, args[1:]), prefixed, args)
 
 
 if __name__ == "__main__":

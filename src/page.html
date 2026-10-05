@@ -45,10 +45,24 @@
     </table>
   </div>
 
-  <!-- o docker system df é caro (soma os volumes): só roda ao abrir, nunca no poll -->
+  <!-- o docker system df é caro (soma os volumes): só roda ao abrir, nunca no poll; cada lista, só ao abrir a lista -->
   <details id="disk" ontoggle="this.open && loadDisk()" class="mt-4 rounded-xl ring-1 ring-line bg-raised/40">
-    <summary class="cursor-pointer px-4 py-3 max-lg:py-4 rounded-xl text-sm font-medium text-fg-strong focus-visible:outline-2 focus-visible:outline-accent">Uso de disco</summary>
+    <summary class="cursor-pointer px-4 py-3 max-lg:py-4 rounded-xl text-sm font-medium text-fg-strong focus-visible:outline-2 focus-visible:outline-accent">Uso de disco, imagens, volumes e redes</summary>
     <div id="df" class="px-4 pb-1 text-sm"></div>
+    <div class="px-4 pb-4 space-y-2 text-sm">
+      <details id="obj-images" ontoggle="this.open && loadObjects('images')" class="rounded-lg ring-1 ring-line">
+        <summary class="cursor-pointer px-3 py-2 max-lg:py-3.5 rounded-lg font-medium text-fg-strong focus-visible:outline-2 focus-visible:outline-accent">Imagens, uma a uma<span id="obj-images-n" class="font-normal text-muted"></span></summary>
+        <div id="obj-images-list" class="px-3"></div>
+      </details>
+      <details id="obj-volumes" ontoggle="this.open && loadObjects('volumes')" class="rounded-lg ring-1 ring-line">
+        <summary class="cursor-pointer px-3 py-2 max-lg:py-3.5 rounded-lg font-medium text-fg-strong focus-visible:outline-2 focus-visible:outline-accent">Volumes, um a um<span id="obj-volumes-n" class="font-normal text-muted"></span></summary>
+        <div id="obj-volumes-list" class="px-3"></div>
+      </details>
+      <details id="obj-networks" ontoggle="this.open && loadObjects('networks')" class="rounded-lg ring-1 ring-line">
+        <summary class="cursor-pointer px-3 py-2 max-lg:py-3.5 rounded-lg font-medium text-fg-strong focus-visible:outline-2 focus-visible:outline-accent">Redes<span id="obj-networks-n" class="font-normal text-muted"></span></summary>
+        <div id="obj-networks-list" class="px-3"></div>
+      </details>
+    </div>
   </details>
 </main>
 
@@ -69,7 +83,15 @@
       <button id="follow" aria-pressed="false" onclick="toggleFollow()" class="group px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover aria-pressed:bg-accent/15 aria-pressed:text-accent-soft aria-pressed:ring-accent/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"><span aria-hidden="true" class="hidden group-aria-pressed:inline-block size-1.5 mr-1.5 align-middle rounded-full bg-accent animate-pulse motion-reduce:animate-none"></span>Acompanhar ao vivo</button>
       <button onclick="copyLogs()" class="px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Copiar</button>
       <button onclick="downloadLogs()" class="px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Baixar .log</button>
+    </div>
+    <!-- filtro só na página (o docker não vê o texto); / foca o campo, como a busca da lista -->
+    <div class="flex flex-wrap items-center gap-2">
+      <label for="lf" class="sr-only">Filtrar linhas dos logs</label>
+      <input id="lf" type="search" placeholder="Filtrar linhas… (atalho /)" aria-keyshortcuts="/" aria-describedby="lcount" autocomplete="off" spellcheck="false"
+        class="w-full sm:w-72 rounded-md bg-canvas ring-1 ring-line-strong/80 px-2.5 py-1 max-lg:py-3 text-xs max-lg:text-sm text-fg-strong placeholder:text-muted focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+      <span id="lcount" aria-live="polite" aria-atomic="true" class="text-xs text-muted"></span>
       <span id="lmeta" class="ml-auto text-xs text-muted">Últimas 500 linhas</span>
+      <button id="more" onclick="loadMore()" class="px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover aria-disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Carregar 2.000 linhas</button>
     </div>
     <details id="insp" ontoggle="this.open && loadInspect()" class="text-xs">
       <summary class="cursor-pointer w-fit py-1 max-lg:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent text-muted hover:text-fg">Configuração: restart, redes, mounts e env</summary>
