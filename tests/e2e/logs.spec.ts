@@ -62,6 +62,9 @@ test('ao vivo guarda no máximo 5000 linhas', async ({ page, gui }) => {
   await gui.open({ containers: [ctr('web', { logs: 'linha 0\n' })] });
   await page.getByRole('button', { name: 'Logs web' }).click();
   await page.locator('#follow').click();
+  // o snapshot já mostrava a linha 0; só depois do onopen (que limpa a caixa) ela vem do docker logs -f. Sem esperar
+  // por ele, as 6000 linhas podem chegar antes do stream, que então manda só as últimas 500 (o --tail)
+  await expect(page.locator('#lmeta')).toContainText('e as novas');
   await expect(page.locator('#lb')).toHaveText('linha 0\n');
   gui.update(s => { s.containers[0].logs = Array.from({ length: 6000 }, (_, i) => `linha ${i}\n`).join(''); });
   await expect(page.locator('#lb')).toContainText('linha 5999');
