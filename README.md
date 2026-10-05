@@ -24,9 +24,11 @@ A saída do `podman ps` tem outro formato (`Names` em lista, portas como objetos
 
 ## O que faz
 
-- **Lista ao vivo** de todos os containers, atualizada a cada 2s. Só as linhas que mudaram são redesenhadas, e o poll pausa quando a aba fica escondida.
+- **Lista ao vivo** de todos os containers, atualizada a cada 2s. Só as linhas que mudaram são redesenhadas, e o poll pausa quando a aba fica escondida (a não ser com as notificações ligadas).
 - **CPU e memória** de cada container rodando, do `docker stats`, atualizadas a cada 5s (num poll à parte, porque o stats leva uns 2s para medir).
 - **Faixa "Precisa de atenção"** com o que está quebrado: healthcheck falhando, loop de reinício e saída com código diferente de zero. O status vem traduzido, por exemplo "Saiu com código 137 · morto à força ou sem memória (OOM)".
+- **Favicon com a contagem** da faixa de atenção (`9+` acima de 9) e `!` quando a lista não consegue atualizar.
+- **Notificação do sistema** quando um container entra na faixa de atenção, só se você pedir pelo botão "Notificar quando algo der problema", abaixo da busca. O botão aparece em contexto seguro (`localhost` é) enquanto a permissão não foi decidida. A notificação só sai com a página em segundo plano (aba escondida ou janela sem foco): `<nome> precisa de atenção`, com o status no corpo, ou `N containers precisam de atenção`, com os nomes, quando entram vários juntos. Quem já estava na faixa ao abrir a página não notifica e quem continua nela não repete; sair e voltar conta como entrada nova. Clicar na notificação traz a página para a frente. No Chrome do Android ela não aparece, e fica só o favicon.
 - **Agrupamento por projeto do compose** (`com.docker.compose.project`), com **Iniciar / Reiniciar / Parar tudo** e "Iniciar de novo" para desfazer.
 - **`compose up` / `pull` / `down` por projeto**, com a pasta e os arquivos do compose lidos dos labels dos containers (o servidor nunca confia num caminho vindo da página). O `down` pede confirmação em 2 passos: os volumes ficam, mas o projeto some da lista e só volta com `up` pelo terminal.
 - **Ações por container:** iniciar, parar, reiniciar, pausar, retomar e remover (com confirmação em 2 passos). Depois de iniciar, a ferramenta confere se o container ficou de pé. Depois de pausar, o aviso oferece "Retomar" (atalho `Z`).
