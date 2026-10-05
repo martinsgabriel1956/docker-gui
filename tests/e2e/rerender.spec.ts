@@ -60,6 +60,19 @@ test('menu "⋯" aberto não fecha sozinho com o poll', async ({ page, gui }) =>
   await expect(menu).not.toHaveAttribute('open', '');
 });
 
+test('leitura nova do stats redesenha a linha sem fechar o menu nem tirar o foco', async ({ page, gui }) => {
+  const reading = (CPUPerc: string) => ({ CPUPerc, MemUsage: '20MiB / 1.944GiB', MemPerc: '1.00%' });
+  await gui.open({ containers: [ctr('a', { stats: [reading('1.00%'), reading('9.00%')] })] });
+  const menu = row(page, 'a').locator('details[data-keep="menu"]');
+  await menu.locator('summary').click();
+  await page.getByRole('button', { name: 'Pausar' }).focus();
+  await row(page, 'a').evaluate(tr => { (tr as any).marca = 1; });
+  await expect(page.locator(`#us-${id('a')} [data-spark="cpu"]`)).toHaveCount(1, { timeout: 15_000 });
+  expect(await row(page, 'a').evaluate(tr => (tr as any).marca)).toBeUndefined();  // a linha foi mesmo trocada
+  await expect(menu).toHaveAttribute('open', '');
+  await expect(page.getByRole('button', { name: 'Pausar' })).toBeFocused();
+});
+
 test('aba escondida não consulta o docker', async ({ page, gui }) => {
   await gui.open({ containers: [ctr('a')] });
   await page.evaluate(() => {
