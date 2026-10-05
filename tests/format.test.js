@@ -337,3 +337,13 @@ test('runSpec confere nome, portas, env, restart e volume', () => {
     assert.ok(errs({volume}).volume, volume);
   assert.deepEqual(errs({volume: 'pg.data_1:/var/lib/postgresql/data'}), {});
 });
+
+test('bulkSummary junta sucessos e falhas num aviso só', () => {
+  assert.equal(f.bulkSummary('parado', 3, []), '3 parados.');
+  assert.equal(f.bulkSummary('removido', 1, []), '1 removido.');
+  assert.equal(f.bulkSummary('parado', 3, [['web', 'Error response from daemon: permission denied\n']]),
+               '3 parados, 1 falhou: web: Error response from daemon: permission denied.');
+  // só a primeira linha do erro, sem ponto duplicado; mensagem vazia não some
+  assert.equal(f.bulkSummary('iniciado', 0, [['a', 'deu ruim.\ndetalhe'], ['b', '']]), '2 falharam: a: deu ruim; b: erro sem mensagem.');
+  assert.equal(f.bulkSummary('parado', 1, [['a', 'x'], ['b', 'y'], ['c', 'z'], ['d', 'w']]), '1 parado, 4 falharam: a: x; b: y; e mais 2.');
+});

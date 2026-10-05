@@ -134,7 +134,9 @@ test('no celular vira cards, sem rolagem horizontal', async ({ page, gui }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await gui.open({ containers: [...shop, ...loose] });
   await expect(row(page, 'api')).toBeVisible();
-  await expect(page.locator('thead')).toBeHidden();
+  // do cabeçalho da tabela só fica o "selecionar todos"; os nomes das colunas somem
+  await expect(page.locator('thead th').filter({ visible: true })).toHaveCount(1);
+  await expect(page.getByRole('checkbox', { name: 'Selecionar todos os visíveis' })).toBeVisible();
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBe(0);
 });

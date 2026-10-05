@@ -30,7 +30,7 @@ class BuildTest(unittest.TestCase):
         # Object.assign(window, {...}) do app.ts, senão o botão quebra só em tempo de execução
         app = (build.SRC / "app.ts").read_text()
         html = app + (build.SRC / "page.html").read_text()
-        handlers = re.findall(r'\bon(?:click|toggle|input)="([^"]*)"', html)
+        handlers = re.findall(r'\bon(?:click|toggle|input|change)="([^"]*)"', html)
         called = {name for h in handlers for name in re.findall(r"(?<![\w.])([A-Za-z_]\w*)\(", h)}
         exposed = set(re.findall(r"\w+", re.search(r"Object\.assign\(window, \{(.*?)\}\)", app, re.DOTALL)[1]))
         self.assertTrue(called, "nenhum handler encontrado: a regex quebrou?")

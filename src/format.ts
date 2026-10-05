@@ -284,3 +284,12 @@ export function runSpec(f: RunForm): {spec: RunSpec; errors: RunErrors} {
     errors.volume = 'Use nome:/caminho/no/container, ex.: dados:/var/lib/postgresql/data. Pasta do host (bind mount) não é aceita.';
   return {spec: {image, name, ports, all_interfaces: f.all_interfaces, env, restart: restart || 'no', volume}, errors};
 }
+
+// resumo de uma ação em lote para o aviso: "3 parados, 1 falhou: web: permission denied."
+// done é o particípio no singular (DONE do app.ts); só as 2 primeiras falhas vão por extenso, o resto fica nas linhas
+export function bulkSummary(done: string, ok: number, fails: [name: string, msg: string][]): string {
+  const why = (m: string) => m.trim().split('\n')[0].replace(/\.$/, '') || 'erro sem mensagem';
+  const f = fails.length, list = fails.slice(0, 2).map(([n, m]) => `${n}: ${why(m)}`).join('; ');
+  return [ok && `${ok} ${ok === 1 ? done : done + 's'}`,
+          f && `${f} ${f === 1 ? 'falhou' : 'falharam'}: ${list}${f > 2 ? `; e mais ${f - 2}` : ''}`].filter(Boolean).join(', ') + '.';
+}
