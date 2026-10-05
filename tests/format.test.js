@@ -143,6 +143,16 @@ test('workingDir lê a pasta do projeto compose', () => {
   assert.equal(f.workingDir({}), '');
 });
 
+test('service lê o serviço do compose sem confundir com outros labels', () => {
+  const labels = 'com.docker.compose.depends_on=db:service_started:false,redis:service_started:false,'
+               + 'com.docker.compose.project=shop,com.docker.compose.service=api,com.docker.compose.service.extra=x';
+  assert.equal(f.service({Labels: labels}), 'api');
+  assert.equal(f.service({Labels: 'com.docker.compose.service=db'}), 'db');
+  assert.equal(f.service({Labels: 'xcom.docker.compose.service=falso'}), '');
+  assert.equal(f.service({Labels: 'com.docker.compose.project=shop'}), '');
+  assert.equal(f.service({}), '');
+});
+
 test('shortImage tira o host do registry e mantém a tag', () => {
   assert.equal(f.shortImage('ghcr.io/acme/api:1.4'), 'acme/api:1.4');
   assert.equal(f.shortImage('localhost:5000/app:dev'), 'app:dev');
@@ -241,4 +251,45 @@ test('trend descreve o sparkline em palavras', () => {
   assert.equal(f.trend('CPU', [1, 2], 200, pct), 'CPU nos últimos 1 s: mín 1.00%, máx 2.00%, agora 2.00%');
   assert.equal(f.trend('Memória', [2 ** 20, 2 ** 21], 295_000, f.fmtBytes),
                'Memória nos últimos 5 min: mín 1.0 MiB, máx 2.0 MiB, agora 2.0 MiB');
+});
+
+test('age escreve a idade a partir do epoch', () => {
+  const now = 1_800_000_000, ago = s => now - s;
+  assert.equal(f.age(ago(10), now), '<1 min');
+  assert.equal(f.age(ago(5 * 60), now), '5 min');
+  assert.equal(f.age(ago(3 * 3600), now), '3 h');
+  assert.equal(f.age(ago(47 * 3600), now), '47 h');
+  assert.equal(f.age(ago(3 * 86400), now), '3 d');
+  assert.equal(f.age(ago(20 * 86400), now), '2 sem');
+  assert.equal(f.age(ago(100 * 86400), now), '3 meses');
+  assert.equal(f.age(ago(800 * 86400), now), '2 anos');
+});
+
+// mensagens reais do docker 29 e do podman
+test('rmHint explica por que a remoção falhou', () => {
+  const inUse = 'Em uso: remova o container que usa (ou tire ele da rede) antes.';
+  for (const msg of [
+    'Error response from daemon: conflict: unable to delete fd7dc98638c8 (cannot be forced) - image is being used by running container e0a85417a665',
+    'Error response from daemon: conflict: unable to delete fd7dc98638c8 (must be forced) - image is being used by stopped container e0a85417a665',
+    'Error response from daemon: remove pgdata: volume is in use - [8341cdc825766a6d]',
+    'Error response from daemon: error while removing network: network loja_default has active endpoints (name:"web" id:"55e1ed46acab")',
+    'Error: image used by 3f1c2b9a8e7d: image is in use by a container: consider listing external containers and force-removing image',
+    'Error: volume pgdata is being used by the following container(s): 3f1c2b9a8e7d: volume is being used',
+    'Error: "loja_default" has associated containers with it. Use -f to forcibly delete containers and pods: network is being used',
+  ]) assert.equal(f.rmHint(msg), inUse, msg);
+  assert.match(f.rmHint('Error response from daemon: conflict: unable to delete 3e58ae0f7a49 (must be forced) - image is referenced in multiple repositories'), /mais de uma tag/);
+  assert.match(f.rmHint('Error response from daemon: conflict: unable to delete 3e58ae0f7a49 (cannot be forced) - image has dependent child images'), /construídas sobre esta/);
+  assert.equal(f.rmHint('Error response from daemon: get pgdata: no such volume'), '');
+});
+
+test('logFilter busca o texto literal, sem diferenciar maiúsculas', () => {
+  assert.equal(f.logFilter(''), null);
+  const re = f.logFilter('erro');
+  assert.deepEqual('Erro: deu ERRO e erro'.split(re), ['', 'Erro', ': deu ', 'ERRO', ' e ', 'erro', '']);
+  assert.deepEqual('tudo certo'.split(re), ['tudo certo']);  // não casou: a linha inteira, sozinha
+  // caractere especial de regex vale como texto
+  assert.deepEqual('GET /a?b=1 (x) [y] a.b*c'.split(f.logFilter('?b=1 (x) [y]')), ['GET /a', '?b=1 (x) [y]', ' a.b*c']);
+  assert.deepEqual('a.b axb'.split(f.logFilter('a.b')), ['', 'a.b', ' axb']);
+  assert.deepEqual('C:\\tmp\\x $HOME ^|'.split(f.logFilter('\\tmp\\')), ['C:', '\\tmp\\', 'x $HOME ^|']);
+  assert.deepEqual('${x} ^|'.split(f.logFilter('${x} ^|')), ['', '${x} ^|', '']);
 });

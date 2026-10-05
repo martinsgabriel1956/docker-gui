@@ -64,6 +64,9 @@ export const project = (c: Pick<Container, 'Labels'>): string =>
 // pasta do projeto compose (vai para o compose up/down/pull; o servidor confere contra os labels)
 export const workingDir = (c: Pick<Container, 'Labels'>): string =>
   (c.Labels || '').match(/(?:^|,)com\.docker\.compose\.project\.working_dir=([^,]*)/)?.[1] || '';
+// serviço do compose (vai para o compose restart; o servidor confere contra os serviços do projeto)
+export const service = (c: Pick<Container, 'Labels'>): string =>
+  (c.Labels || '').match(/(?:^|,)com\.docker\.compose\.service=([^,]*)/)?.[1] || '';
 
 // "About an hour" -> "~1 h", "23 minutes" -> "23 min", "Less than a second" -> "<1 s"
 export function dur(s: string): string {
@@ -176,4 +179,36 @@ export function sparkPoints(vs: number[], w: number, h: number, max = HISTORY, f
 export function trend(label: string, vs: number[], span: number, fmt: (n: number) => string): string {
   const when = span < 60_000 ? `${Math.max(1, Math.round(span / 1000))} s` : `${Math.round(span / 60_000)} min`;
   return `${label} nos últimos ${when}: mín ${fmt(Math.min(...vs))}, máx ${fmt(Math.max(...vs))}, agora ${fmt(vs.at(-1)!)}`;
+}
+
+// filtro do modal de logs: texto literal (nada de regex do usuário), sem diferenciar maiúsculas; '' = sem filtro.
+// O grupo faz o split devolver os trechos que casaram: "erro e Erro".split(re) -> ['', 'erro', ' e ', 'Erro', '']
+export const logFilter = (q: string): RegExp | null =>
+  q ? new RegExp(`(${q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'i') : null;
+
+// /api/images, /api/volumes e /api/networks: o servidor já põe docker e podman num formato só.
+// Containers = nomes dos containers que usam (parados também)
+export interface Image {
+  ID: string;          // inteiro (64 hex)
+  Tags: string[];      // vazio = dangling
+  Size: string;        // "187MB"
+  Created: number | null;  // epoch em segundos
+  Containers: string[];
+}
+export interface Volume { Name: string; Driver: string; Containers: string[] }
+export interface Network { ID: string; Name: string; Driver: string; Scope: string; Builtin: boolean; Containers: string[] }
+
+// idade a partir do epoch (segundos), no estilo do dur(): "<1 min", "5 h", "3 sem", "4 meses"
+export function age(t: number, now = Date.now() / 1000): string {
+  const s = now - t, d = s / 86400, n = (x: number) => Math.floor(x);
+  return s < 60 ? '<1 min' : s < 3600 ? `${n(s / 60)} min` : s < 172800 ? `${n(s / 3600)} h` : d < 14 ? `${n(d)} d`
+    : d < 60 ? `${n(d / 7)} sem` : d < 730 ? `${n(d / 30)} meses` : `${n(d / 365)} anos`;
+}
+
+// erro do docker (ou do podman) ao remover imagem, volume ou rede -> explicação curta; '' quando não reconhece
+export function rmHint(msg: string): string {
+  if (/referenced in multiple repositories/.test(msg)) return 'A imagem tem mais de uma tag: remova as tags pelo terminal, uma a uma.';
+  if (/dependent child images/.test(msg)) return 'Outras imagens foram construídas sobre esta.';
+  if (/in use|being used|active endpoints|associated containers/i.test(msg)) return 'Em uso: remova o container que usa (ou tire ele da rede) antes.';
+  return '';
 }

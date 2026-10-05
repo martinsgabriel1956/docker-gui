@@ -26,9 +26,14 @@ export type Container = {
   stats?: Stats | Stats[];  // lista: uma leitura por `docker stats`, a última se repete
 };
 export type DiskUsage = { Type: string; TotalCount: string; Active: string; Size: string; Reclaimable: string };
+// linhas reais do `docker image ls --no-trunc` (uma por tag), `volume ls` e `network ls --no-trunc`, em '{{json .}}'
+export type ImageRow = { ID: string; Repository: string; Tag: string; Size: string; CreatedAt: string };
+export type VolumeRow = { Name: string; Driver: string };
+export type NetworkRow = { ID: string; Name: string; Driver: string; Scope: string };
 export type DockerState = {
   containers: Container[]; ps_error?: string; df?: DiskUsage[]; pruned?: string[];
   compose_fail?: string; compose_calls?: string[][];
+  images?: ImageRow[]; volumes?: VolumeRow[]; networks?: NetworkRow[]; removed?: string[];
 };
 
 // ID estável por nome: o mesmo container tem o mesmo ID em todo teste
