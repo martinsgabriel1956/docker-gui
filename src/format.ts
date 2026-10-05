@@ -118,3 +118,30 @@ export interface Stats {
 // [texto curto, title com o limite de memória]
 export const usage = (s: Stats): StatusText =>
   [`CPU ${s.CPUPerc} · RAM ${s.MemUsage.split(' / ')[0]}`, `Memória: ${s.MemUsage} (${s.MemPerc})`];
+
+// /api/images, /api/volumes e /api/networks: o servidor já põe docker e podman num formato só.
+// Containers = nomes dos containers que usam (parados também)
+export interface Image {
+  ID: string;          // inteiro (64 hex)
+  Tags: string[];      // vazio = dangling
+  Size: string;        // "187MB"
+  Created: number | null;  // epoch em segundos
+  Containers: string[];
+}
+export interface Volume { Name: string; Driver: string; Containers: string[] }
+export interface Network { ID: string; Name: string; Driver: string; Scope: string; Builtin: boolean; Containers: string[] }
+
+// idade a partir do epoch (segundos), no estilo do dur(): "<1 min", "5 h", "3 sem", "4 meses"
+export function age(t: number, now = Date.now() / 1000): string {
+  const s = now - t, d = s / 86400, n = (x: number) => Math.floor(x);
+  return s < 60 ? '<1 min' : s < 3600 ? `${n(s / 60)} min` : s < 172800 ? `${n(s / 3600)} h` : d < 14 ? `${n(d)} d`
+    : d < 60 ? `${n(d / 7)} sem` : d < 730 ? `${n(d / 30)} meses` : `${n(d / 365)} anos`;
+}
+
+// erro do docker (ou do podman) ao remover imagem, volume ou rede -> explicação curta; '' quando não reconhece
+export function rmHint(msg: string): string {
+  if (/referenced in multiple repositories/.test(msg)) return 'A imagem tem mais de uma tag: remova as tags pelo terminal, uma a uma.';
+  if (/dependent child images/.test(msg)) return 'Outras imagens foram construídas sobre esta.';
+  if (/in use|being used|active endpoints|associated containers/i.test(msg)) return 'Em uso: remova o container que usa (ou tire ele da rede) antes.';
+  return '';
+}

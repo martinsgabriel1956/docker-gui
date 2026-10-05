@@ -1,6 +1,7 @@
 import {
-  type Bucket, type Container, type ContainerState, type DiskUsage, type Port, type Stats, type Tone,
-  bucket, esc, hasHealth, isProblem, newProblems, ports, project, shortImage, status, tone, usage, workingDir,
+  type Bucket, type Container, type ContainerState, type DiskUsage, type Image, type Network, type Port, type Stats, type Tone,
+  type Volume, age, bucket, esc, hasHealth, isProblem, newProblems, ports, project, rmHint, shortImage, status, tone, usage,
+  workingDir,
 } from './format';
 import {Terminal} from '@xterm/xterm';
 import {FitAddon} from '@xterm/addon-fit';
@@ -28,9 +29,9 @@ type Problem = [title: string, hint: string, detail: unknown, kind: ProblemKind]
 type ToastAction = [label: string, fn: () => unknown];
 type RowError = {msg: string; state: ContainerState; what: string};
 type ComposeAction = 'up' | 'down' | 'pull';
-// confirmação em 2 passos pendente: remover um container, derrubar um projeto (id = "stack-<projeto>") ou limpar
-// uma categoria do disco; a é o data-a do botão e note vai para o leitor de tela
-type Arming = {id: string; name: string; a: 'remove' | 'down' | 'prune'; note: string; at: number; timer: number};
+// confirmação em 2 passos pendente: remover um container, derrubar um projeto (id = "stack-<projeto>"), limpar
+// uma categoria do disco ou remover uma imagem, volume ou rede; a é o data-a do botão e note vai para o leitor de tela
+type Arming = {id: string; name: string; a: 'remove' | 'down' | 'prune' | 'rm'; note: string; at: number; timer: number};
 type Health = {Log?: {ExitCode: number; Output: string}[]} | null;
 // resumo do /api/inspect; o valor do env vem null (mascarado) até o usuário pedir para revelar
 type Inspect = {Restart: string; Networks: Record<string, string>; Env: [key: string, value: string | null][];
@@ -373,6 +374,7 @@ function render() {
   renderCount();
   renderDlg();
   renderDisk();
+  renderObjects();
   if (f?.id) refocus(f.id, f.a);
   saveHash();
   // só escreve na região viva quando a mensagem muda, para não apagar o anúncio de uma ação em andamento
@@ -736,7 +738,12 @@ const DISK: [string, DiskKind, string, string, string][] = [
   ['Build Cache', 'buildcache', 'Build cache', 'o cache de build', 'O próximo build fica mais lento.']];
 let disk: DiskUsage[] | string | null = null, diskBusy: DiskKind | '' = '', diskHtml = '';  // string = erro
 
+// abrir a seção (e depois de uma limpeza ou remoção) relê o df e as listas que estiverem abertas
 async function loadDisk() {
+  await Promise.all([loadDf(), ...KINDS.filter(k => $<HTMLDetailsElement>(`#obj-${k}`).open).map(loadObjects)]);
+}
+
+async function loadDf() {
   try {
     const r = await api('/api/df'), j: unknown = await r.json();
     disk = r.ok ? j as DiskUsage[] : `Não consegui ler o uso de disco: ${j}`;
@@ -779,11 +786,111 @@ async function prune(k: DiskKind) {
   await loadDisk();
 }
 
+// imagens, volumes e redes um a um: cada lista só vai ao docker quando é aberta (e depois de uma remoção)
+type ObjKind = 'images' | 'volumes' | 'networks';
+type Obj = Image | Volume | Network;
+const KINDS: ObjKind[] = ['images', 'volumes', 'networks'];
+// [rota de /api/rm, com artigo, rótulo, plural, particípio, aviso da confirmação, lista vazia]
+const OBJ: Record<ObjKind, [rm: string, one: string, label: string, many: string, done: string, note: string, none: string]> = {
+  images: ['image', 'a imagem', 'Imagem', 'Imagens', 'removida', 'Dá para baixar de novo.', 'Nenhuma imagem.'],
+  volumes: ['volume', 'o volume', 'Volume', 'Volumes', 'removido', 'Os dados dele se perdem.', 'Nenhum volume.'],
+  networks: ['network', 'a rede', 'Rede', 'Redes', 'removida', '', 'Nenhuma rede.']};
+const objs: Record<ObjKind, Obj[] | string | null> = {images: null, volumes: null, networks: null};  // string = erro
+const objHtml: Partial<Record<ObjKind, string>> = {}, objErr = new Map<string, string>();  // data-id -> erro da remoção
+let objBusy = '';
+
+// o que vai para a API (ID para imagem e rede, nome para volume) e o que aparece na tela
+const objRef = (k: ObjKind, o: Obj) => k === 'volumes' ? (o as Volume).Name : (o as Image | Network).ID;
+const anon = (name: string) => /^[0-9a-f]{64}$/.test(name);  // volume anônimo: o nome é um hash
+const objName = (k: ObjKind, o: Obj) => k === 'images' ? (o as Image).Tags.join(', ') || `sem tag ${(o as Image).ID.slice(0, 12)}`
+  : anon((o as Volume | Network).Name) ? (o as Volume).Name.slice(0, 12) : (o as Volume | Network).Name;
+
+async function loadObjects(k: ObjKind) {
+  try {
+    const r = await api('/api/' + k), j: unknown = await r.json();
+    objs[k] = r.ok ? j as Obj[] : `Não consegui ler a lista: ${j}`;
+  } catch { objs[k] = 'Não consegui ler a lista. O servidor do Docker GUI está rodando?'; }
+  render();
+}
+
+function objItem(k: ObjKind, o: Obj) {
+  const r = objRef(k, o), id = `rm-${k}-${r}`, armed = arming?.id === id, what = `${OBJ[k][1]} ${objName(k, o)}`;
+  const err = objErr.get(id), hint = err && rmHint(err), badge = (t: string, title: string) =>
+    `<span title="${title}" class="ml-1.5 px-1.5 py-0.5 rounded text-xs font-normal ring-1 ring-line-strong text-muted">${t}</span>`;
+  // meta: HTML já escapado
+  let title = esc(objName(k, o)), meta: string[];
+  if (k === 'images') {
+    const i = o as Image;
+    if (!i.Tags.length) title = `sem tag${badge('dangling', 'nenhuma tag aponta para ela')}`;  // o ID vem logo abaixo
+    meta = [`<span class="font-mono">${esc(i.ID.slice(0, 12))}</span>`, esc(i.Size), ...(i.Created ? [`criada há ${age(i.Created)}`] : [])];
+  } else if (k === 'volumes') {
+    const v = o as Volume;
+    if (anon(v.Name)) title = `<span title="${esc(v.Name)}" class="font-mono">${title}…</span>${badge('anônimo', 'criado sem nome, por um container')}`;
+    meta = [esc(v.Driver)];
+  } else {
+    const n = o as Network;
+    if (n.Builtin) title += badge('padrão', 'vem com o daemon e não pode ser removida');
+    meta = [esc(n.Driver), esc(n.Scope)];
+  }
+  // rede padrão não remove; rede sem ID (formato antigo do podman) não tem como
+  const canRm = k !== 'networks' || (!(o as Network).Builtin && !!(o as Network).ID);
+  const cls = armed ? 'bg-danger text-white ring-danger hover:bg-danger-hover' : 'text-fg hover:bg-hover';
+  return `<li class="flex flex-wrap items-center gap-x-3 gap-y-2 py-3">
+    <div class="mr-auto min-w-0 [overflow-wrap:anywhere]"><div class="font-medium text-fg-strong">${title}</div>
+      <div class="text-xs text-muted">${meta.join(' · ')} · ${o.Containers.length
+        ? `<span class="text-fg-soft">em uso por ${esc(o.Containers.join(', '))}</span>` : 'sem uso'}</div></div>
+    ${canRm ? `<button data-id="${esc(id)}" data-a="rm" data-k="${k}" data-r="${esc(r)}" ${objBusy ? 'aria-disabled="true"' : ''}
+      onclick="rmObj(this.dataset.k, this.dataset.r)" aria-label="${armed ? `Confirmar remoção de ${esc(what)}` : `Remover ${esc(what)}`}"
+      class="${BTN} ${cls}">${objBusy === id ? 'Removendo…' : armed ? 'Confirmar' : 'Remover…'}</button>` : ''}
+    ${armed ? `<p aria-hidden="true" class="w-full text-xs text-bad-soft lg:text-right">Apagar ${esc(what)}? ${OBJ[k][5]} ${TOUCH ? 'Cancela sozinho em 8 s.' : 'Esc cancela.'}</p>` : ''}
+    ${err ? `<div class="w-full text-xs text-bad-fg">${hint ? `<p>${hint}</p>` : ''}
+      <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-bad-soft">${esc(err)}</pre></div>` : ''}</li>`;
+}
+
+function renderObjects() {
+  for (const k of KINDS) {
+    const v = objs[k];
+    const html = v === null ? '<p class="py-3 text-muted">Carregando…</p>'
+      : typeof v === 'string' ? `<p class="py-3 text-bad-fg">${esc(v)}</p>`
+      : !v.length ? `<p class="py-3 text-muted">${OBJ[k][6]}</p>`
+      : `<ul aria-label="${OBJ[k][3]}" class="divide-y divide-line/70">${v.map(o => objItem(k, o)).join('')}</ul>`;
+    if (html !== objHtml[k]) $(`#obj-${k}-list`).innerHTML = objHtml[k] = html;  // o render roda a cada poll
+    $(`#obj-${k}-n`).textContent = Array.isArray(v) ? ` · ${v.length}` : '';
+  }
+}
+
+// docker image/volume/network rm, com a confirmação em 2 passos. Em uso, o docker recusa e o erro fica no item
+async function rmObj(k: ObjKind, r: string) {
+  const list = objs[k], o = Array.isArray(list) ? list.find(o => objRef(k, o) === r) : undefined;
+  if (!o || objBusy) return;
+  const id = `rm-${k}-${r}`, [rm, one, label, , done, note] = OBJ[k], name = objName(k, o);
+  if (!confirmed(id, `${one} ${name}`, 'rm', note)) return;
+  const btns = [...document.querySelectorAll<HTMLElement>(`#obj-${k}-list [data-a="rm"]`)], i = btns.findIndex(b => b.dataset.id === id);
+  const near = (btns[i + 1] || btns[i - 1])?.dataset.id;
+  objErr.delete(id); objBusy = id; render();
+  $('#shown').textContent = `Removendo ${one} ${name}…`;
+  let ok = false;
+  try {
+    const res = await api(`/api/rm/${rm}/${encodeURIComponent(r)}`, {method: 'POST'}), msg: string = await res.json();
+    ok = res.ok;
+    if (ok) toast(`${label} ${name} ${done}.`, true);
+    else {
+      objErr.set(id, msg || 'erro sem mensagem');
+      toast(`Não deu para remover ${one} ${name}. ${rmHint(msg) || 'O erro ficou na lista.'}`);
+    }
+  } catch { toast('Sem resposta do servidor do Docker GUI.'); }
+  objBusy = '';
+  // rede não ocupa disco; imagem e volume mudam o df também
+  await (k === 'networks' ? loadObjects(k) : loadDisk());
+  if (ok) (document.querySelector<HTMLElement>(`[data-id="${near}"][data-a="rm"]`) || $(`#obj-${k} > summary`)).focus();
+}
+
 // o HTML gerado chama estas funções pelo nome (onclick="act(...)"); com módulos nada é global, então
 // esta lista é a interface completa entre o HTML e o código
 Object.assign(window, {
   act, afterClose, askNotify, clearFilters, composeAct, copyAddr, copyExec, copyLogs, downloadLogs, filterBy, loadDisk,
-  loadHealth, loadInspect, menuPick, openShell, placeMenu, prune, refreshLogs, runToastAction, stackAct, toggleFollow,
+  loadHealth, loadInspect, loadObjects, menuPick, openShell, placeMenu, prune, refreshLogs, rmObj, runToastAction, stackAct,
+  toggleFollow,
 });
 
 $('#dlg').addEventListener('close', afterClose);

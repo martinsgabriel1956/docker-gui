@@ -103,7 +103,9 @@ class TokenTest(ServerTest):
             for method, path in (("GET", "/api/containers"), ("GET", "/api/stats"), ("GET", f"/api/logs/{HEX_ID}"),
                                  ("GET", f"/api/health/{HEX_ID}"), ("GET", f"/api/inspect/{HEX_ID}"),
                                  ("GET", f"/api/inspect/{HEX_ID}/env"), ("POST", f"/api/stop/{HEX_ID}"),
-                                 ("GET", "/api/df"), ("POST", "/api/prune/images")):
+                                 ("GET", "/api/df"), ("POST", "/api/prune/images"), ("GET", "/api/images"),
+                                 ("GET", "/api/volumes"), ("GET", "/api/networks"), ("POST", f"/api/rm/image/{HEX_ID}"),
+                                 ("POST", "/api/rm/volume/pgdata"), ("POST", f"/api/rm/network/{HEX_ID}")):
                 status, _ = self.request(method, path, token=token)
                 self.assertEqual(status, 401, (token, method, path))
         self.docker.assert_not_called()
@@ -450,6 +452,214 @@ class DiskTest(ServerTest):
     def test_get_does_not_prune(self):
         status, _ = self.request("GET", "/api/prune/images")
         self.assertEqual(status, 404)
+        self.docker.assert_not_called()
+
+
+IMG, IMG2, NET = "a" * 64, "b" * 64, "c" * 64
+# saídas reais do docker 29 (--format '{{json .}}', uma linha por item), sem os campos que o servidor não lê
+DOCKER_IMAGES = [
+    {"Containers": "2", "CreatedAt": "2026-09-18 00:00:00 +0000 UTC", "ID": f"sha256:{IMG}", "Repository": "app",
+     "Size": "116MB", "Tag": "latest"},
+    {"Containers": "2", "CreatedAt": "2026-09-18 00:00:00 +0000 UTC", "ID": f"sha256:{IMG}", "Repository": "app",
+     "Size": "116MB", "Tag": "1.0"},
+    {"Containers": "N/A", "CreatedAt": "2026-05-13 02:21:49 -0300 -03", "ID": f"sha256:{IMG2}", "Repository": "<none>",
+     "Size": "6.81MB", "Tag": "<none>"},
+]
+DOCKER_VOLUMES = [{"Driver": "local", "Links": "N/A", "Mountpoint": "/var/lib/docker/volumes/pgdata/_data",
+                   "Name": "pgdata", "Scope": "local"},
+                  {"Driver": "local", "Name": "cache", "Scope": "local"}]
+DOCKER_NETWORKS = [{"Driver": "bridge", "ID": "d" * 64, "Name": "bridge", "Scope": "local"},
+                   {"Driver": "bridge", "ID": NET, "Name": "loja_default", "Scope": "local"},
+                   {"Driver": "null", "ID": "e" * 64, "Name": "none", "Scope": "local"}]
+# `container inspect` dos dois containers: só o que o usage() lê
+INSPECT = [
+    {"Name": "/db", "Image": f"sha256:{IMG}", "Mounts": [{"Type": "volume", "Name": "pgdata"}, {"Type": "bind", "Source": "/x"}],
+     "NetworkSettings": {"Networks": {"loja_default": {}}}},
+    {"Name": "/web", "Image": f"sha256:{IMG}", "Mounts": [],
+     "NetworkSettings": {"Networks": {"bridge": {}, "loja_default": {}}}},
+]
+
+
+def fake_docker(out, ps="1111\n2222\n", inspect=None):
+    """docker falso por subcomando: o ls devolve `out`; ps -q e container inspect, os dois containers acima."""
+    def run(*args, **kw):
+        if args[0] == "ps":
+            return ok(ps) if isinstance(ps, str) else ps
+        if args[:2] == ("container", "inspect"):
+            return inspect or ok(json.dumps(INSPECT))
+        return out if isinstance(out, subprocess.CompletedProcess) else ok(out)
+    return run
+
+
+def lines(items):
+    return "".join(json.dumps(i) + "\n" for i in items)
+
+
+class ObjectsTest(ServerTest):
+    """Listas de imagens, volumes e redes, com quem usa cada uma."""
+
+    def test_images_one_entry_per_id_with_usage(self):
+        self.docker.side_effect = fake_docker(lines(DOCKER_IMAGES))
+        self.assertEqual(self.request("GET", "/api/images"), (200, [
+            {"ID": IMG, "Tags": ["app:latest", "app:1.0"], "Size": "116MB", "Created": 1789689600,
+             "Containers": ["db", "web"]},
+            {"ID": IMG2, "Tags": [], "Size": "6.81MB", "Created": 1778649709, "Containers": []},  # dangling
+        ]))
+        self.assertEqual(self.docker.call_args_list, [
+            mock.call("image", "ls", "--no-trunc", "--format", "{{json .}}"), mock.call("ps", "-a", "-q", "--no-trunc"),
+            mock.call("container", "inspect", "1111", "2222")])
+
+    def test_volumes_with_usage(self):
+        self.docker.side_effect = fake_docker(lines(DOCKER_VOLUMES))
+        self.assertEqual(self.request("GET", "/api/volumes"), (200, [
+            {"Name": "pgdata", "Driver": "local", "Containers": ["db"]},  # o bind mount não conta
+            {"Name": "cache", "Driver": "local", "Containers": []}]))
+        self.assertEqual(self.docker.call_args_list[0], mock.call("volume", "ls", "--format", "{{json .}}"))
+
+    def test_networks_mark_builtins(self):
+        self.docker.side_effect = fake_docker(lines(DOCKER_NETWORKS))
+        self.assertEqual(self.request("GET", "/api/networks"), (200, [
+            {"ID": "d" * 64, "Name": "bridge", "Driver": "bridge", "Scope": "local", "Builtin": True, "Containers": ["web"]},
+            {"ID": NET, "Name": "loja_default", "Driver": "bridge", "Scope": "local", "Builtin": False,
+             "Containers": ["db", "web"]},
+            {"ID": "e" * 64, "Name": "none", "Driver": "null", "Scope": "local", "Builtin": True, "Containers": []}]))
+        self.assertEqual(self.docker.call_args_list[0], mock.call("network", "ls", "--no-trunc", "--format", "{{json .}}"))
+
+    def test_no_containers_skips_inspect(self):
+        self.docker.side_effect = fake_docker(lines(DOCKER_VOLUMES[1:]), ps="")
+        self.assertEqual(self.request("GET", "/api/volumes"), (200, [{"Name": "cache", "Driver": "local", "Containers": []}]))
+        self.assertEqual(self.docker.call_count, 2)
+
+    def test_container_gone_between_ps_and_inspect(self):
+        # o docker sai com 1, mas o stdout tem os que ainda existem
+        gone = subprocess.CompletedProcess([], 1, json.dumps(INSPECT[:1]), "Error: No such object: 2222\n")
+        self.docker.side_effect = fake_docker(lines(DOCKER_VOLUMES), inspect=gone)
+        _, body = self.request("GET", "/api/volumes")
+        self.assertEqual(body[0]["Containers"], ["db"])
+
+    def test_errors_are_500_with_stderr(self):
+        self.docker.side_effect = fake_docker(fail("Cannot connect to the Docker daemon\n"))
+        self.assertEqual(self.request("GET", "/api/images"), (500, "Cannot connect to the Docker daemon"))
+        self.docker.side_effect = fake_docker(lines(DOCKER_IMAGES), ps=fail("permission denied\n"))
+        self.assertEqual(self.request("GET", "/api/images"), (500, "permission denied"))
+        self.docker.side_effect = fake_docker(lines(DOCKER_IMAGES), inspect=fail("daemon travado\n"))
+        self.assertEqual(self.request("GET", "/api/images"), (500, "daemon travado"))
+
+    def test_unexpected_format_is_500_not_a_crash(self):
+        self.docker.side_effect = fake_docker('{"Nome": "x"}\n')
+        status, body = self.request("GET", "/api/volumes")
+        self.assertEqual(status, 500)
+        self.assertIn("formato inesperado", body)
+        self.docker.side_effect = fake_docker("isto não é json\n")
+        self.assertEqual(self.request("GET", "/api/images")[0], 500)
+
+    def test_podman_formats_are_normalized(self):
+        # podman 5 (--format json): arrays, Id sem "sha256:", tags em Names, tamanho em bytes, criação em epoch;
+        # redes em minúsculas e sem escopo. O inspect do container traz Image sem prefixo e Name sem "/"
+        images = [{"Id": IMG, "RepoTags": None, "Names": ["localhost/app:latest"], "Size": 115_800_000,
+                   "Created": 1789689600, "Containers": 1},
+                  {"Id": IMG2, "RepoTags": None, "Names": None, "Size": 999, "Created": 1778649709, "Dangling": True}]
+        volumes = [{"Name": "pgdata", "Driver": "local", "Mountpoint": "/x", "CreatedAt": "2026-09-18T00:00:00Z",
+                    "Labels": {}, "Scope": "local", "Options": {}}]
+        nets = [{"name": "podman", "id": "f" * 64, "driver": "bridge", "network_interface": "podman0", "subnets": []},
+                {"name": "loja_default", "id": NET, "driver": "bridge"}]
+        inspect = ok(json.dumps([{"Name": "db", "Image": IMG, "Mounts": [{"Type": "volume", "Name": "pgdata"}],
+                                  "NetworkSettings": {"Networks": {"loja_default": {}}}}]))
+        with mock.patch.object(docker_gui, "CLI", ["podman"]):
+            self.docker.side_effect = fake_docker(json.dumps(images, indent=2), inspect=inspect)
+            self.assertEqual(self.request("GET", "/api/images"), (200, [
+                {"ID": IMG, "Tags": ["localhost/app:latest"], "Size": "116MB", "Created": 1789689600, "Containers": ["db"]},
+                {"ID": IMG2, "Tags": [], "Size": "999B", "Created": 1778649709, "Containers": []}]))
+            self.assertEqual(self.docker.call_args_list[0], mock.call("image", "ls", "--no-trunc", "--format", "json"))
+            self.docker.side_effect = fake_docker(json.dumps(volumes), inspect=inspect)
+            self.assertEqual(self.request("GET", "/api/volumes"),
+                             (200, [{"Name": "pgdata", "Driver": "local", "Containers": ["db"]}]))
+            self.docker.side_effect = fake_docker(json.dumps(nets), inspect=inspect)
+            self.assertEqual(self.request("GET", "/api/networks"), (200, [
+                {"ID": "f" * 64, "Name": "podman", "Driver": "bridge", "Scope": "local", "Builtin": True, "Containers": []},
+                {"ID": NET, "Name": "loja_default", "Driver": "bridge", "Scope": "local", "Builtin": False,
+                 "Containers": ["db"]}]))
+            self.docker.side_effect = fake_docker("[]\n", ps="")
+            self.assertEqual(self.request("GET", "/api/images"), (200, []))
+
+    def test_unknown_list(self):
+        for path in ("/api/image", "/api/objects", "/api/images/", "/api/images?all=1"):
+            self.assertEqual(self.request("GET", path)[0], 404, path)
+        self.docker.assert_not_called()
+
+
+class HelpersTest(unittest.TestCase):
+
+    def test_epoch(self):
+        self.assertEqual(docker_gui.epoch("2026-09-18 00:00:00 +0000 UTC"), 1789689600)
+        self.assertEqual(docker_gui.epoch("2026-09-17 21:00:00 -0300 -03"), 1789689600)
+        for bad in (None, "", "N/A", "ontem"):
+            self.assertIsNone(docker_gui.epoch(bad), bad)
+
+    def test_human_like_docker(self):
+        for n, txt in ((0, "0B"), (999, "999B"), (1000, "1kB"), (16380, "16.4kB"), (6_810_000, "6.81MB"),
+                       (115_800_000, "116MB"), (4_010_000_000, "4.01GB")):
+            self.assertEqual(docker_gui.human(n), txt, n)
+
+
+class RemoveTest(ServerTest):
+    """docker image/volume/network rm, um a um."""
+
+    def test_each_kind_runs_rm_without_force(self):
+        self.docker.return_value = ok("Deleted: sha256:aaa\n")
+        for path, args in ((f"/api/rm/image/{HEX_ID}", ("image", "rm", HEX_ID)),
+                           (f"/api/rm/image/{IMG}", ("image", "rm", IMG)),
+                           ("/api/rm/volume/pgdata", ("volume", "rm", "pgdata")),
+                           ("/api/rm/volume/loja_db-data.1", ("volume", "rm", "loja_db-data.1")),
+                           (f"/api/rm/volume/{IMG}", ("volume", "rm", IMG))):  # volume anônimo: o nome é um hash
+            self.docker.reset_mock()
+            self.assertEqual(self.request("POST", path), (200, "Deleted: sha256:aaa"), path)
+            self.docker.assert_called_once_with(*args, timeout=docker_gui.ACTION_TIMEOUT)
+
+    def test_network_name_comes_from_docker_before_rm(self):
+        self.docker.side_effect = [ok("loja_default\n"), ok(f"{NET}\n")]
+        self.assertEqual(self.request("POST", f"/api/rm/network/{NET}"), (200, NET))
+        self.assertEqual(self.docker.call_args_list, [
+            mock.call("network", "inspect", "--format", "{{.Name}}", NET),
+            mock.call("network", "rm", NET, timeout=docker_gui.ACTION_TIMEOUT)])
+
+    def test_builtin_networks_are_refused(self):
+        self.assertEqual(docker_gui.BUILTIN_NETWORKS, {"bridge", "host", "none", "podman"})
+        for name in sorted(docker_gui.BUILTIN_NETWORKS):
+            self.docker.reset_mock()
+            self.docker.side_effect = [ok(name + "\n")]
+            status, body = self.request("POST", f"/api/rm/network/{HEX_ID}")
+            self.assertEqual(status, 403, name)
+            self.assertIn("rede padrão", body)
+            self.docker.assert_called_once_with("network", "inspect", "--format", "{{.Name}}", HEX_ID)  # nunca o rm
+
+    def test_network_inspect_error(self):
+        self.docker.return_value = fail(f"Error response from daemon: network {HEX_ID} not found\n")
+        self.assertEqual(self.request("POST", f"/api/rm/network/{HEX_ID}"),
+                         (500, f"Error response from daemon: network {HEX_ID} not found"))
+        self.assertEqual(self.docker.call_count, 1)
+
+    def test_in_use_error_is_500_with_stderr(self):
+        msg = "Error response from daemon: remove pgdata: volume is in use - [8341cdc82576]"
+        self.docker.return_value = fail(msg + "\n")
+        self.assertEqual(self.request("POST", "/api/rm/volume/pgdata"), (500, msg))
+
+    def test_bad_refs_never_reach_docker(self):
+        bad = {"image": ("nginx:latest", "nginx", "0123456789AB", "0123456789a", "0" * 65, "-f", "--force",
+                         f"{HEX_ID};rm", f"{HEX_ID}%20-f", f"sha256:{IMG}"),
+               "network": ("bridge", "host", "loja_default", "0123456789a", f"{HEX_ID}?x=1", "-f"),
+               "volume": ("-f", "--help", ".hidden", "_x", "../pgdata", "a%20b", "a;b", "a:b", "pg$data", "a,b",
+                          "pgdata?x=1", "%2e%2e"),
+               "container": (HEX_ID,), "builder": ("x",), "Image": (HEX_ID,)}
+        for kind, refs in bad.items():
+            for ref in refs:
+                self.assertEqual(self.request("POST", f"/api/rm/{kind}/{ref}")[0], 404, (kind, ref))
+        for path in ("/api/rm/volume/", "/api/rm/volume", f"/api/rm/image/{HEX_ID}/x", "/api/rm/volume/a/b"):
+            self.assertEqual(self.request("POST", path)[0], 404, path)
+        self.docker.assert_not_called()
+
+    def test_get_does_not_remove(self):
+        self.assertEqual(self.request("GET", f"/api/rm/image/{HEX_ID}")[0], 404)
         self.docker.assert_not_called()
 
 
@@ -852,6 +1062,33 @@ class RealDockerTest(ServerTest):
         self.assertTrue({"Images", "Local Volumes", "Build Cache"} <= {r["Type"] for r in rows})
         for field in ("TotalCount", "Active", "Size", "Reclaimable"):
             self.assertIn(field, rows[0])  # campos que a página lê
+
+    def test_objects(self):
+        # lê as listas; só remove o que o próprio teste cria (um volume e um container parado que o usa)
+        vol = name = f"docker-gui-test-{os.getpid()}"
+        subprocess.run(["docker", "volume", "create", vol], capture_output=True, check=True)
+        subprocess.run(["docker", "create", "--name", name, "-v", f"{vol}:/data", self.IMAGE], capture_output=True, check=True)
+        try:
+            _, imgs = self.request("GET", "/api/images")
+            busybox = next(i for i in imgs if self.IMAGE in i["Tags"])
+            self.assertIn(name, busybox["Containers"])
+            self.assertIsInstance(busybox["Created"], int)
+            _, vols = self.request("GET", "/api/volumes")
+            self.assertIn({"Name": vol, "Driver": "local", "Containers": [name]}, vols)
+            status, err = self.request("POST", f"/api/rm/volume/{vol}")
+            self.assertEqual(status, 500)
+            self.assertIn("volume is in use", err)
+
+            _, nets = self.request("GET", "/api/networks")
+            bridge = next(n for n in nets if n["Name"] == "bridge")
+            self.assertTrue(bridge["Builtin"])
+            self.assertEqual(self.request("POST", f"/api/rm/network/{bridge['ID']}")[0], 403)
+
+            subprocess.run(["docker", "rm", name], capture_output=True, check=True)
+            self.assertEqual(self.request("POST", f"/api/rm/volume/{vol}"), (200, vol))
+        finally:
+            subprocess.run(["docker", "rm", "-f", name], capture_output=True, check=False)
+            subprocess.run(["docker", "volume", "rm", vol], capture_output=True, check=False)
 
     def test_action_on_missing_container(self):
         status, err = self.request("POST", f"/api/stop/{'0' * 64}")

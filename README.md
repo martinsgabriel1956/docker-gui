@@ -20,7 +20,7 @@ DOCKER_GUI_CLI=podman python3 docker_gui.py
 python3 docker_gui.py --context producao
 ```
 
-A saída do `podman ps` tem outro formato (`Names` em lista, portas como objetos, labels como dicionário…). O servidor converte tudo para o formato do `docker ps`, então a página funciona igual. O "Copiar `docker exec`" usa o mesmo binário e contexto.
+A saída do `podman ps` tem outro formato (`Names` em lista, portas como objetos, labels como dicionário…). O servidor converte tudo para o formato do `docker ps`, então a página funciona igual. O mesmo vale para as listas de imagens (tamanho em bytes, data em epoch), volumes e redes (chaves em minúsculas no Podman 4+). Uma rede que venha sem ID (formatos antigos do Podman) aparece na lista, mas sem o botão de remover. O "Copiar `docker exec`" usa o mesmo binário e contexto.
 
 ## O que faz
 
@@ -36,6 +36,7 @@ A saída do `podman ps` tem outro formato (`Names` em lista, portas como objetos
 - **Terminal no navegador** pelo menu "⋯" ("Abrir terminal"): um `docker exec -it` com bash (ou sh, se a imagem não tiver bash) num terminal [xterm.js](https://xtermjs.org) embutido. Redimensiona junto com a janela, e o `Esc` vai para o programa (vim, less), não fecha o modal. Só em Linux e macOS.
 - **Copiar `docker exec -it <nome> sh`** pelo menu "⋯".
 - **Uso de disco** (`docker system df`) de imagens, volumes e build cache, com **limpeza** (`prune`) de cada categoria, confirmada em 2 passos como a remoção. Imagens e build cache saem com `-a` (tudo que está sem uso); volumes sem `-a`, então no Docker 23+ os nomeados ficam.
+- **Imagens, volumes e redes um a um**, na mesma seção: imagens com tags, ID, tamanho, idade e "sem tag" (dangling); volumes com driver; redes com driver e escopo, com as padrão (`bridge`, `host`, `none`) marcadas. Cada item diz quais containers o usam (parados também). Cada lista só consulta o docker quando é aberta. **Remover** usa a mesma confirmação em 2 passos, sem `-f`: o que está em uso o docker recusa, e o erro aparece no item com uma explicação ("Em uso: remova o container que usa antes"). As redes padrão não têm o botão, e o servidor recusa removê-las. Uma imagem com mais de uma tag o docker só remove com `-f`, que a página não usa: remova as tags pelo terminal.
 - **Teclado:** `/` vai para a busca, `↑` `↓` andam entre os botões Logs e `Z` aciona o "desfazer". Os filtros ficam na URL.
 - Tema **claro e escuro** automático, layout de **cards no celular** e acessibilidade AA (contraste, foco, leitores de tela, `prefers-reduced-motion`).
 
@@ -56,7 +57,8 @@ O servidor só escuta em `127.0.0.1` e foi pensado para uso local em máquina de
 | Token aleatório por execução, exigido no cabeçalho `X-Docker-GUI-Token` | Containers com `network_mode: host`, outros usuários e outros processos na máquina |
 | Cabeçalho próprio, sem CORS | Sites maliciosos chamando a API pelo seu navegador (CSRF) |
 | Validação do cabeçalho `Host` | DNS rebinding |
-| IDs só em hex, lista fixa de ações e nenhum shell no host | Injeção de comando |
+| IDs só em hex (nome de volume só com `[a-zA-Z0-9][a-zA-Z0-9_.-]*`), lista fixa de ações e nenhum shell no host | Injeção de comando |
+| Remoção de rede confere o nome pelo próprio docker e recusa `bridge`, `host`, `none` (e a `podman`) | Derrubar a rede padrão do daemon |
 | Terminal: `Origin` conferido (só a própria página) e token na query do WebSocket | Sites maliciosos abrindo um shell no container pelo seu navegador (cross-site WebSocket hijacking) |
 | Timeout em toda chamada ao `docker` (15 s para leitura, 120 s para ações) | Daemon travado acumulando threads presas |
 
