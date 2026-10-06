@@ -70,6 +70,18 @@ export const workingDir = (c: Pick<Container, 'Labels'>): string =>
 // serviço do compose (vai para o compose restart; o servidor confere contra os serviços do projeto)
 export const service = (c: Pick<Container, 'Labels'>): string =>
   (c.Labels || '').match(/(?:^|,)com\.docker\.compose\.service=([^,]*)/)?.[1] || '';
+// prefixo do `docker compose logs` -> serviço, para os containers do projeto p. O compose escreve o nome do container
+// sem o projeto quando é o nome padrão ("shop-api-2" -> "api-2"), e o nome inteiro com container_name ("postgres-17"):
+// só o nome e o label dizem qual dos dois é, o "-<número>" no fim do prefixo não
+export function logServices(p: string, cs: Pick<Container, 'Names' | 'Labels'>[]): Map<string, string> {
+  const m = new Map<string, string>();
+  for (const c of cs) {
+    const s = service(c), replica = c.Names.slice(p.length + s.length + 2);
+    if (project(c) !== p || !s) continue;
+    m.set(c.Names.startsWith(`${p}-${s}-`) && /^\d+$/.test(replica) ? `${s}-${replica}` : c.Names, s);
+  }
+  return m;
+}
 
 // "About an hour" -> "~1 h", "23 minutes" -> "23 min", "Less than a second" -> "<1 s"
 export function dur(s: string): string {

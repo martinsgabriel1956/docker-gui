@@ -91,6 +91,18 @@ class HostTest(ServerTest):
                 self.assertEqual(status, 403, (host, method, path))
         self.docker.assert_not_called()
 
+    def test_page_cannot_be_framed(self):
+        # regressão: sem estes cabeçalhos, outro site embutia a página num iframe (clickjacking)
+        for path, token in (("/", None), ("/api/containers", docker_gui.TOKEN), ("/api/nada", docker_gui.TOKEN)):
+            conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
+            headers = {"Host": f"localhost:{self.port}", **({"X-Docker-GUI-Token": token} if token else {})}
+            conn.request("GET", path, headers=headers)
+            r = conn.getresponse()
+            r.read()
+            conn.close()
+            self.assertEqual(r.getheader("Content-Security-Policy"), "frame-ancestors 'none'", path)
+            self.assertEqual(r.getheader("X-Frame-Options"), "DENY", path)
+
     def test_host_uses_real_port_not_default(self):
         # regressão: com fallback de porta, comparar com a constante PORT recusaria tudo
         self.assertNotEqual(self.port, docker_gui.PORT)
@@ -501,6 +513,63 @@ class LogsStreamTest(StreamTest):
         r.close()  # a resposta segura o socket aberto: sem fechar as duas, a conexão não cai
         conn.close()
         self.wait_dead("docker logs -f")
+
+
+@unittest.skipUnless(os.name == "posix", "SIGTERM de verdade só em Unix")
+class ShutdownTest(unittest.TestCase):
+    """O servidor de verdade, num processo à parte, encerrado por SIGTERM."""
+
+    def test_sigterm_kills_the_stream_processes(self):
+        # regressão: o SIGTERM só chega ao servidor (o Ctrl+C vai para o grupo todo), e os docker logs -f e docker events
+        # dos streams abertos ficavam órfãos, presos ao daemon
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        fake = os.path.join(d.name, "docker")
+        with open(fake, "w") as f:  # só os streams ficam vivos; o resto (context inspect) falha na hora
+            f.write(f'#!/bin/sh\ncase "$1" in logs|events) echo $$ >> {d.name}/pids; echo oi; exec sleep 30;; esac\nexit 1\n')
+        os.chmod(fake, 0o755)
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        server = subprocess.Popen([sys.executable, docker_gui.__file__, "--no-browser", "--port", str(port), "--cli", fake],
+                                  stdout=subprocess.PIPE, text=True, env={**os.environ, "PYTHONUNBUFFERED": "1"})
+        self.addCleanup(server.kill)
+        self.addCleanup(server.stdout.close)
+        token = server.stdout.readline().strip().partition("#t=")[2].split()[0]
+        streams = []  # a resposta segura o socket: sem guardá-la, o cliente "fecha" e o servidor mata o docker antes
+        for path in (f"/api/logs/{HEX_ID}/stream?t={token}", f"/api/events/stream?t={token}"):
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+            conn.request("GET", path, headers={"Host": f"localhost:{port}"})
+            streams.append(conn.getresponse())
+            self.assertEqual(streams[-1].status, 200, path)
+            self.addCleanup(streams[-1].close)
+        pids = []
+        for _ in range(50):
+            if os.path.exists(f"{d.name}/pids"):
+                with open(f"{d.name}/pids") as f:
+                    pids = [int(p) for p in f.read().split()]
+            if len(pids) == 2:
+                break
+            time.sleep(0.1)
+        self.assertEqual(len(pids), 2)
+        for pid in pids:
+            self.addCleanup(lambda pid=pid: os.kill(pid, signal.SIGKILL) if alive(pid) else None)
+
+        server.send_signal(signal.SIGTERM)
+        self.assertEqual(server.wait(timeout=10), 128 + signal.SIGTERM)
+        for _ in range(50):
+            if not any(map(alive, pids)):
+                break
+            time.sleep(0.1)
+        self.assertEqual([p for p in pids if alive(p)], [], "docker dos streams órfão depois do SIGTERM")
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
 
 
 class RelevantEventTest(unittest.TestCase):
@@ -1807,7 +1876,7 @@ class MainTest(unittest.TestCase):
                     mock.patch.object(docker_gui, "LANG", docker_gui.LANG), mock.patch.object(sys, "argv", argv), \
                     mock.patch.object(docker_gui, "where", return_value=("docker", "", False)), \
                     mock.patch.object(docker_gui, "serve") as serve, mock.patch.object(docker_gui.webbrowser, "open") as browser, \
-                    mock.patch("builtins.print") as out:
+                    mock.patch.object(docker_gui.signal, "signal"), mock.patch("builtins.print") as out:
                 serve.return_value.server_address = ("127.0.0.1", 8765)
                 serve.return_value.serve_forever.side_effect = KeyboardInterrupt
                 docker_gui.main()
