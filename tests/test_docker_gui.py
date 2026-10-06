@@ -1684,15 +1684,20 @@ class MainTest(unittest.TestCase):
 
     def test_cli_from_env_and_context_flag(self):
         # patch com o próprio valor: o main() troca os globais e o mock os devolve no fim
+        # o LANG também: o main() o tira do locale, e o do CI (C.UTF-8) deixaria o resto da suíte em inglês
         with mock.patch.object(docker_gui, "CLI", docker_gui.CLI), mock.patch.object(docker_gui, "PAGE", docker_gui.PAGE), \
+                mock.patch.object(docker_gui, "LANG", docker_gui.LANG), \
                 mock.patch.dict(os.environ, {"DOCKER_GUI_CLI": "podman"}), \
-                mock.patch.object(sys, "argv", ["docker_gui.py", "--context", "a b"]), \
+                mock.patch.object(sys, "argv", ["docker_gui.py", "--context", "a b", "--lang", "en"]), \
                 mock.patch.object(docker_gui, "serve", side_effect=SystemExit):
             self.assertRaises(SystemExit, docker_gui.main)  # para antes de abrir porta e navegador
             self.assertEqual(docker_gui.CLI, ["podman", "--context", "a b"])
             # o "Copiar docker exec" da página usa o mesmo comando, com aspas de shell e escapado no HTML
             self.assertIn('data-cli="podman --context &#x27;a b&#x27;"', docker_gui.PAGE)
             self.assertIn('data-where="podman · a b" data-host=""', docker_gui.PAGE)
+            self.assertEqual(docker_gui.LANG, "en")  # o --lang vence o locale
+            self.assertIn('data-lang="en"', docker_gui.PAGE)
+        self.assertEqual(docker_gui.LANG, "pt")
 
     def test_where_asks_docker_for_the_current_context(self):
         ok = lambda out: subprocess.CompletedProcess([], 0, out, "")
