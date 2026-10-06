@@ -1,8 +1,8 @@
 import {
   type Bucket, type Container, type ContainerState, type DiskUsage, type Image, type Network, type Port, type RunErrors,
-  type RunField, type Sample, type Stats, type Tone, type Volume, HISTORY, age, bucket, bulkSummary, bytes, esc, fmtBytes,
-  hasHealth, io, isProblem, logFilter, newProblems, percent, ports, project, pushSample, rmHint, runSpec, service, shortImage,
-  sparkPoints, status, tone, trend, usage, workingDir,
+  type RunField, type Sample, type Stats, type Tone, type Volume, HISTORY, age, anonVolume, bucket, bulkSummary, bytes, esc,
+  fmtBytes, hasHealth, io, isProblem, logFilter, logLevel, newProblems, percent, ports, project, prunedVolumes, pushSample,
+  reclaimShare, rmHint, runSpec, service, shortImage, sparkPoints, status, tone, trend, usage, workingDir,
 } from './format';
 import {Terminal} from '@xterm/xterm';
 import {FitAddon} from '@xterm/addon-fit';
@@ -23,7 +23,7 @@ const api = (path: string, opts: RequestInit = {}) =>
 
 type Action = 'start' | 'stop' | 'restart' | 'pause' | 'unpause' | 'remove';
 type RowAction = Action | 'logs';
-type MenuAction = Action | 'exec' | 'shell' | 'srestart';
+type MenuAction = Action | 'exec' | 'shell' | 'srestart' | 'noremove';
 type ProblemKind = 'docker' | 'perm' | 'server' | 'auth';
 // [título, dica (HTML confiável), detalhe técnico, tipo]
 type Problem = [title: string, hint: string, detail: unknown, kind: ProblemKind];
@@ -68,7 +68,7 @@ const TOUCH = matchMedia('(pointer: coarse)').matches;
 const PROBLEM_TXT: Record<ProblemKind, string> = {docker: 'Docker fora do ar', perm: 'sem acesso ao Docker', server: 'sem conexão', auth: 'sem token'};
 // Logs é a ação mais usada e a mais inofensiva: sem contorno, para a principal (Parar, Iniciar) ser a que salta aos olhos
 const ghost = () => BTN.replace(' ring-1 ring-line-strong/80', '');
-const BTN = 'px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 transition motion-reduce:transition-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent aria-disabled:opacity-40 aria-disabled:cursor-wait';
+const BTN = 'px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded text-xs font-medium ring-1 ring-line-strong/80 transition motion-reduce:transition-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent aria-disabled:opacity-40 aria-disabled:cursor-wait';
 let data: Container[] = [], busy = new Map<string, Action>(), composing = new Map<string, ComposeAction>(), errors = new Map<string, RowError>(), lastOk: Date | null = null,
     problem = '', problemKind: ProblemKind | '' = '', only: Bucket | '' = '',
     toastTimer: number | undefined, logId: string | null = null, stream: EventSource | null = null, pending: string[] = [],
@@ -165,7 +165,7 @@ function connectEvents() {
   if (events || !watching()) return;
   // EventSource não manda header: o token vai na query, como no ao vivo dos logs
   const es = events = new EventSource(`/api/events/stream?t=${encodeURIComponent(TOKEN)}`);
-  es.onopen = () => { live = true; refresh(); };  // o que mudou antes de o docker events começar a ouvir
+  es.onopen = () => { live = true; showLive(); refresh(); };  // o que mudou antes de o docker events começar a ouvir
   // uma rajada (compose up: create, start... de cada serviço) vira uma consulta só, no máximo COALESCE ms depois
   es.onmessage = () => {
     if (watching() && evTimer === undefined) evTimer = setTimeout(() => { evTimer = undefined; refresh(); }, COALESCE);
@@ -175,9 +175,15 @@ function connectEvents() {
   const drop = () => { closeEvents(); evRetry = setTimeout(connectEvents, POLL_LIVE); };
   es.addEventListener('end', drop);
   // queda: o EventSource reconecta sozinho, com o poll de 2 s enquanto isso; CLOSED é recusa (token, limite, erro)
-  es.onerror = () => { live = false; if (es.readyState === EventSource.CLOSED) drop(); };
+  es.onerror = () => { live = false; showLive(); if (es.readyState === EventSource.CLOSED) drop(); };
 }
-function closeEvents() { events?.close(); events = null; live = false; }
+function closeEvents() { events?.close(); events = null; live = false; showLive(); }
+// no cabeçalho: a lista vem dos eventos do docker (muda na hora) ou do poll de 2 s (o docker events caiu ou não existe)
+function showLive() {
+  $('#live').innerHTML = live ? '<span aria-hidden="true" class="inline-block size-1.5 mr-1.5 align-middle rounded-full bg-ok"></span>ao vivo'
+    : '<span aria-hidden="true" class="inline-block size-1.5 mr-1.5 align-middle rounded-full ring-1 ring-dim"></span>a cada 2 s';
+  $('#live').title = live ? 'A lista muda assim que o docker avisa (docker events)' : 'Sem o docker events: a lista é relida a cada 2 s';
+}
 
 // notificação do sistema só por pedido explícito (botão no cabeçalho) e só para quem acabou de entrar na faixa
 // de atenção; com a página em foco ela não aparece, a lista e o favicon já mostram
@@ -198,10 +204,10 @@ function notify(cs: Container[]) {
   } catch { /* Chrome no Android só notifica via service worker; o favicon continua avisando */ }
 }
 
-// favicon: o cubo do cabeçalho com a contagem da faixa de atenção por cima ("!" quando os dados estão velhos)
+// favicon: o prompt (>_) no ciano do acento, com a contagem da faixa de atenção por cima ("!" quando os dados estão velhos)
 const icon = document.head.appendChild(Object.assign(document.createElement('link'), {rel: 'icon'}));
 function setIcon(badge: string) {
-  const href = 'data:image/svg+xml,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="1.8" stroke-linejoin="round"><path d="M12 2.5 3.5 7v10l8.5 4.5 8.5-4.5V7z"/><path d="M3.5 7 12 11.5 20.5 7M12 11.5v10"/>${badge
+  const href = 'data:image/svg+xml,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"><rect x="1" y="2.5" width="22" height="19" rx="3" fill="#141a22"/><path d="M5.5 8.5 9.5 12l-4 3.5M11.5 16h6" stroke="#3fd0dc" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>${badge
     ? `<circle cx="16.5" cy="16.5" r="7.5" fill="#dc2626" stroke="none"/><text x="16.5" y="20" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="700" fill="#fff" stroke="none">${badge}</text>` : ''}</svg>`);
   if (icon.getAttribute('href') !== href) icon.href = href;  // trocar o href a cada poll faz a aba piscar
 }
@@ -240,7 +246,7 @@ function spark(h: Sample[], k: 'cpu' | 'mem', w = 48, ht = 14) {
   const vs = h.map(s => s[k]), label = esc(trend(k === 'cpu' ? 'CPU' : 'Memória', vs, h.at(-1)!.t - h[0].t, k === 'cpu' ? CPU_FMT : fmtBytes));
   return `<span role="img" data-spark="${k}" aria-label="${label}" title="${label}" class="inline-block align-middle -mt-0.5 mr-0.5"><svg aria-hidden="true"
     viewBox="0 0 ${w} ${ht}" width="${w}" height="${ht}" fill="none" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M0 ${ht - 0.5}H${w}" class="stroke-line-strong"/><polyline points="${sparkPoints(vs, w, ht, HISTORY, k === 'cpu' ? 1 : 0)}" stroke-width="1.5" class="stroke-accent"/></svg></span>`;
+    <polyline points="${sparkPoints(vs, w, ht, HISTORY, k === 'cpu' ? 1 : 0)}" stroke-width="1.5" class="stroke-accent"/></svg></span>`;
 }
 
 // onde a página age (docker_gui.py, where()): "docker · producao". Remoto fica em âmbar, com o endereço para o leitor de
@@ -273,12 +279,12 @@ function renderCount() {
     $('#count').textContent = lastOk ? `Desatualizado · dados de ${t}` : problemTxt[0].toUpperCase() + problemTxt.slice(1);
     return;
   }
-  const pill = 'rounded-md px-2 py-0.5 max-lg:py-3 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent';
-  // no desktop, um controle segmentado (é um filtro, não um selo); no celular, pílulas que quebram linha
+  const pill = 'shrink-0 whitespace-nowrap rounded px-2 py-0.5 max-lg:py-3 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent';
+  // um controle segmentado (é um filtro, não um selo); no celular ele rola de lado em vez de quebrar em duas linhas
   const segs = BUCKETS.filter(([k]) => n(k) || only === k).map(([k, one, many, color]) =>
     `<button data-id="count-${k}" data-a="filter" aria-pressed="${only === k}" onclick="filterBy('${k}')"
-      class="${pill} lg:rounded-none max-lg:ring-1 max-lg:ring-line hover:bg-hover aria-pressed:bg-fg-strong aria-pressed:text-canvas ${color}"><span class="font-semibold tabular-nums">${n(k)}</span> ${n(k) === 1 ? one : many}</button>`).join('');
-  $('#count').innerHTML = (segs ? `<span class="flex flex-wrap max-lg:gap-1 lg:rounded-md lg:ring-1 lg:ring-line lg:overflow-hidden lg:divide-x lg:divide-line">${segs}</span>`
+      class="${pill} rounded-none font-mono text-data hover:bg-hover aria-pressed:bg-fg-strong aria-pressed:text-canvas ${color}"><span class="font-semibold tabular-nums">${n(k)}</span> ${n(k) === 1 ? one : many}</button>`).join('');
+  $('#count').innerHTML = (segs ? `<span class="flex max-lg:max-w-full max-lg:overflow-x-auto rounded ring-1 ring-line divide-x divide-line">${segs}</span>`
     : '<span>0 containers</span>') + (only || $<HTMLInputElement>('#q').value.trim()
     ? `<button data-id="count-clear" data-a="filter" onclick="clearFilters()" class="${pill} text-accent-fg underline underline-offset-4 hover:text-accent-soft">Limpar filtros</button>` : '');
 }
@@ -348,17 +354,18 @@ const reachable = (c: Container, h: string) => !REMOTE || c.Ports.split(', ').so
 
 function portChip(c: Container, [h, p, proto]: Port) {
   const label = `${h}<span class="font-sans">→</span>${p}${proto === 'tcp' ? '' : '/' + proto}`, svg = 'aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" class="inline size-3 ml-1 -mt-0.5"';
-  const base = 'whitespace-nowrap font-mono text-xs px-1.5 py-0.5 max-lg:text-xs max-lg:px-3 max-lg:py-3.5 rounded ring-1 focus-visible:outline-2 focus-visible:outline-accent';
+  // texto mono, como o PORTS do docker ps: o link sublinha no hover, e o padding vira alvo de toque no celular
+  const base = 'whitespace-nowrap font-mono text-xs px-1 py-0.5 max-lg:px-2 max-lg:py-3.5 rounded underline-offset-4 focus-visible:outline-2 focus-visible:outline-accent';
   // faixa longa: não há um endereço para abrir ou copiar, então o chip só informa
   if (!reachable(c, h)) return `<span title="Só no loopback do daemon remoto ${esc(CTX)}: não abre daqui"
-    class="${base} bg-hover/60 text-fg-soft ring-line-strong">${label}</span>`;
+    class="${base} text-muted">${label}</span>`;
   if (h.includes('-')) return `<span title="Faixa de portas: ${h} do host → ${p} do container"
-    class="${base} bg-hover/60 text-fg-soft ring-line-strong">${label}</span>`;
+    class="${base} text-muted">${label}</span>`;
   return c.State === 'running' && proto === 'tcp' && !NOT_HTTP.has(+p)
     ? `<a href="http://${PORT_HOST}:${h}" target="_blank" rel="noopener" aria-label="Abrir ${PORT_HOST}:${h} em nova aba (porta ${p} do container)"
-        title="Abrir no navegador" class="${base} bg-accent/10 text-accent-fg ring-accent/20 hover:bg-accent/20">${label}<svg ${svg}><path d="M6 3h7v7M13 3 4 12"/></svg></a>`
+        title="Abrir no navegador" class="${base} text-accent-fg hover:underline hover:bg-accent/10">${label}<svg ${svg}><path d="M6 3h7v7M13 3 4 12"/></svg></a>`
     : `<button onclick="copyAddr('${h}')" aria-label="Copiar ${PORT_HOST}:${h} (porta ${p}/${proto} do container)" title="Copiar ${PORT_HOST}:${h}"
-        class="${base} bg-hover/60 text-fg-soft ring-line-strong hover:bg-hover">${label}<svg ${svg}><rect x="5.5" y="5.5" width="7.5" height="7.5" rx="1.5"/><path d="M3 10.5V4a1 1 0 0 1 1-1h6.5"/></svg></button>`;
+        class="${base} text-fg-soft hover:text-fg-strong hover:underline hover:bg-hover">${label}<svg ${svg}><rect x="5.5" y="5.5" width="7.5" height="7.5" rx="1.5"/><path d="M3 10.5V4a1 1 0 0 1 1-1h6.5"/></svg></button>`;
 }
 
 // erro da última ação fica na linha até a próxima ação ou até o estado do container mudar
@@ -422,7 +429,7 @@ const X_ICON = '<svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="
 // que começa pelo contexto quando o daemon é remoto: a confirmação diz onde vai apagar
 const cancelBtn = (id: string, what: string) => `<button data-id="${id}" data-a="cancel" aria-label="Cancelar ${what}" title="Cancelar (Esc)"
   onclick="disarm()" class="grid place-items-center shrink-0 lg:w-9 max-lg:w-11 ${BTN} text-fg hover:bg-hover">${X_ICON}</button>`;
-const armNote = (text: string, cls = 'w-full') => `<p aria-hidden="true" class="${cls} text-xs text-bad-soft lg:text-right text-balance">${
+const armNote = (text: string, cls = 'w-full [contain:inline-size] lg:text-right text-balance') => `<p aria-hidden="true" class="${cls} text-xs text-bad-soft">${
   REMOTE ? `<span class="font-semibold text-warn-fg">${esc(CTX)}</span> · ` : ''}${text} ${TOUCH ? 'Cancela sozinho em 8 s.' : 'Esc cancela.'}</p>`;
 function rowHtml(c: Container, withProject: boolean) {
   const b = busy.get(c.ID), t = TONE[b ? 'busy' : tone(c)], st = status(c), pp = ports(c.Ports), p = project(c);
@@ -440,9 +447,10 @@ function rowHtml(c: Container, withProject: boolean) {
       class="grid place-items-center shrink-0 lg:w-9 max-lg:w-11 ${BTN} text-fg hover:bg-hover">${RESTART_ICON}</button>` : slot('lg:w-9');
   const more = [sec && sec !== 'restart' && [sec, LABEL[sec]], svc && ['srestart', `Reiniciar serviço ${esc(svc)}`], c.State === 'running' && ['pause', 'Pausar'],
                 c.State === 'running' && ['shell', 'Abrir terminal'], c.State === 'running' && ['exec', 'Copiar docker exec'],
-                removable(c) && ['remove', 'Remover…']].filter((x): x is [MenuAction, string] => !!x);
+                removable(c) ? ['remove', 'Remover…'] : ['noremove', 'Pare antes de remover']].filter((x): x is [MenuAction, string] => !!x);
   const menu = !more.length ? slot('lg:w-9') : menuBox(c.ID, `Mais ações para ${esc(c.Names)}`, !!b,
-    more.map(([a, text]) => `<button data-id="${c.ID}" data-a="m-${a}" ${b || (a === 'srestart' && composing.has(p)) ? 'aria-disabled="true"' : ''} onclick="menuPick(this); ${a === 'exec' ? `copyExec('${c.ID}')` : a === 'shell' ? `openShell('${c.ID}')`
+    more.map(([a, text]) => a === 'noremove' ? `<button data-id="${c.ID}" data-a="m-noremove" aria-disabled="true" title="O docker só remove container parado (sem -f)"
+      class="${MENU_ITEM} text-muted cursor-not-allowed hover:bg-transparent">${text}</button>` : `<button data-id="${c.ID}" data-a="m-${a}" ${b || (a === 'srestart' && composing.has(p)) ? 'aria-disabled="true"' : ''} onclick="menuPick(this); ${a === 'exec' ? `copyExec('${c.ID}')` : a === 'shell' ? `openShell('${c.ID}')`
       : a === 'srestart' ? `restartService('${c.ID}')` : `act('${a}','${c.ID}')`}"
       class="${MENU_ITEM} ${a === 'remove' ? 'text-bad-fg' : 'text-fg'}">${text}</button>`).join(''));
   const healthBox = hasHealth(c) && !b ? `<details data-keep="health" class="mt-1 text-xs" ontoggle="this.open && loadHealth('${c.ID}')">
@@ -454,26 +462,26 @@ function rowHtml(c: Container, withProject: boolean) {
     <th role="rowheader" scope="row" class="py-3 pl-4 pr-6 max-lg:block max-lg:p-0 text-left font-normal"><div class="flex items-center gap-3">
       <input type="checkbox" data-id="${c.ID}" data-a="sel" ${on ? 'checked' : ''} aria-label="Selecionar ${esc(c.Names)}" onchange="toggleSel('${c.ID}')" class="${CHECK}">
       <span aria-hidden="true" class="size-2 shrink-0 rounded-full ${t[0]}"></span>
-      <div class="min-w-0"><div class="font-medium text-fg-strong lg:truncate lg:max-w-[24ch]" title="${esc(c.Names)}">${esc(c.Names)}</div>
-           <div class="text-xs font-mono text-muted">${c.ID.slice(0, 12)}${withProject && p ? `<span class="font-sans"> · ${esc(p)}</span>` : ''}</div></div></div></th>
+      <div class="min-w-0"><div class="font-mono text-data font-semibold text-fg-strong lg:truncate lg:max-w-[28ch]" title="${esc(c.Names)} · ${c.ID.slice(0, 12)}">${esc(c.Names)}</div>${
+           withProject && p ? `<div class="font-mono text-xs text-muted">${esc(p)}</div>` : ''}</div></div></th>
     <td role="cell" class="font-mono text-xs text-muted pr-4 max-lg:block max-lg:p-0 max-lg:pl-14 [overflow-wrap:anywhere]">
       <span class="sr-only lg:hidden">Imagem: </span><div class="lg:truncate lg:max-w-[24ch] lg:[direction:rtl] lg:text-left" title="${esc(c.Image)}"><bdi dir="ltr">${esc(shortImage(c.Image))}</bdi></div></td>
-    <td role="cell" class="text-sm pr-4 lg:min-w-[24ch] max-lg:block max-lg:p-0 max-lg:pl-14" title="${esc(c.Status)}">
+    <td role="cell" class="font-mono text-data pr-4 lg:min-w-[24ch] max-lg:block max-lg:p-0 max-lg:pl-14" title="${esc(c.Status)}">
       <span id="st-${c.ID}" class="${t[1]}">${b ? VERB[b] : esc(st[0])}${st[1] && !b ? `<span class="block text-xs text-muted">${st[1]}</span>` : ''}</span>${
       // [contain:inline-size]: a linha do log ocupa a largura que a coluna já tem, sem alargá-la (a tabela estourava)
       fell(c) && !b && tails[tailKey(c)] ? `<span class="block [contain:inline-size] mt-1 font-mono text-xs text-fg-soft lg:truncate [overflow-wrap:anywhere]" title="${esc(tails[tailKey(c)])}"><span aria-hidden="true" class="text-dim">› </span><span class="sr-only">Última linha do log: </span>${esc(tails[tailKey(c)])}</span>` : ''}${
-      u ? `<span id="us-${c.ID}" class="block text-xs font-mono text-muted" title="${esc(u[2])}">${esc(u[0])} ${spark(h, 'cpu')} · ${esc(u[1])} ${spark(h, 'mem')}</span>` : ''}${b ? '' : errHtml(c) + healthBox}</td>
-    <td role="cell" class="pr-4 max-lg:hidden max-lg:has-[div]:block max-lg:p-0 max-lg:pl-14 max-lg:pt-1">${pp.length
-      ? `<div class="flex flex-wrap gap-1 max-lg:gap-2">${pp.map(x => portChip(c, x)).join('')}</div>` : ''}</td>
+      u ? `<span id="us-${c.ID}" class="block text-xs font-mono text-muted" title="${esc(u[2])}"><span class="whitespace-nowrap">${esc(u[0])} ${spark(h, 'cpu')}</span> <span class="whitespace-nowrap">· ${esc(u[1])} ${spark(h, 'mem')}</span></span>` : ''}${b ? '' : errHtml(c) + healthBox}</td>
+    <td role="cell" class="pr-4 max-lg:hidden max-lg:has-[div]:block max-lg:p-0 max-lg:pl-14">${pp.length
+      ? `<div class="flex flex-wrap gap-1 max-lg:gap-x-2 max-lg:-ml-2 max-lg:-my-3">${pp.map(x => portChip(c, x)).join('')}</div>` : ''}</td>
     <td role="cell" class="pr-4 max-lg:block max-lg:p-0 max-lg:pt-2"><div class="flex justify-end max-lg:justify-start items-center gap-1.5 max-lg:gap-2">
-      ${armed ? btn('remove', 'bg-danger text-white ring-danger hover:bg-danger-hover', 'Confirmar', `Confirmar remoção de ${esc(c.Names)}`)
+      ${armed ? btn('remove', 'bg-danger text-white ring-danger hover:bg-danger-hover', 'Apagar', `Confirmar remoção de ${esc(c.Names)}`)
         : prim ? btn(prim, prim === 'start' ? 'text-ok-fg hover:bg-ok/10' : undefined) : slot()}${restart}${btn('logs', 'text-fg-soft hover:text-fg-strong hover:bg-hover', undefined, undefined, ghost())}
       ${armed ? cancelBtn(c.ID, `remoção de ${esc(c.Names)}`) : menu}
-    </div>${armed ? armNote(`Apagar ${esc(c.Names)} de vez? Os volumes ficam.`, 'mt-1.5 [contain:inline-size]') : ''}</td></tr>`;
+    </div>${armed ? armNote(`Apagar ${esc(c.Names)} de vez? Os volumes ficam.`, 'mt-1.5 [contain:inline-size] lg:text-right text-balance') : ''}</td></tr>`;
 }
 
 // "⋯" das ações raras, de um container ou de um projeto: o id e o aria-label dizem de quem é
-const MENU_ITEM = 'block w-full text-left px-3 py-2 max-lg:py-3 rounded-md text-sm hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent';
+const MENU_ITEM = 'block w-full text-left px-3 py-2 max-lg:py-3 rounded text-sm hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent';
 const menuBox = (id: string, label: string, off: boolean, items: string) => `<details data-keep="menu" class="shrink-0" ontoggle="placeMenu(this)">
     <summary data-id="${id}" data-a="menu" aria-label="${label}" ${off ? 'aria-disabled="true"' : ''}
       class="list-none [&::-webkit-details-marker]:hidden cursor-pointer grid place-items-center lg:w-9 max-lg:w-11 ${BTN} text-fg hover:bg-hover">
@@ -510,7 +518,7 @@ function closeMenus(except?: Element | null) {
 document.addEventListener('click', e => closeMenus(e.target instanceof Element ? e.target.closest('details[data-keep="menu"]') : null));
 
 const bandHead = (text: string, cls: string) => `<tr data-key="h:attn" role="row" class="max-lg:block"><th role="columnheader" colspan="5" scope="colgroup"
-  class="max-lg:block px-4 pt-4 pb-2 text-left text-xs font-medium uppercase tracking-wider border-t border-line/70 ${cls}">${text}</th></tr>`;
+  class="max-lg:block px-4 pt-4 pb-2 text-left font-mono text-xs font-semibold uppercase border-t border-line ${cls}">${text}<span class="ml-3 font-sans font-normal normal-case text-bad-soft/80">healthcheck falhando, loop de reinício ou saída com erro</span></th></tr>`;
 
 // cabeçalho do projeto compose: contagem e ações para o stack inteiro (sempre sobre todos os containers do projeto).
 // Como na linha: uma ação principal (Iniciar tudo se algo está parado, senão Parar tudo), Logs e o resto no "⋯"
@@ -519,10 +527,11 @@ function groupHead(k: string, label: string) {
   const anyBusy = composing.has(k) || all.some(c => busy.has(c.ID)), dir = k && workingDir(all[0]), armed = arming?.id === `stack-${k}`;
   const inBand = all.filter(isProblem).length, ek = esc(k), off = anyBusy ? 'aria-disabled="true"' : '';
   const prim: Action = stackList('start', k).length ? 'start' : 'stop';
+  // com um container só, o botão diz qual: "Iniciar worker" em vez de "Iniciar tudo (1)"
   const sbtn = (a: Action, text: string, cls: string) => {
-    const n = stackList(a, k).length;
-    return k && n ? `<button data-id="stack-${ek}" data-a="${a === prim ? a : `m-${a}`}" data-p="${ek}" ${off} aria-label="${text} do projeto ${ek} (${n})"
-      title="${esc(stackList(a, k).map(c => c.Names).join(', '))}" onclick="${a === prim ? '' : 'menuPick(this); '}stackAct('${a}', this.dataset.p)" class="${cls}">${text} (${n})</button>` : '';
+    const list = stackList(a, k), n = list.length, one = n === 1 ? `${LABEL[a]} ${esc(list[0].Names)}` : '', label = one || `${text} (${n})`;
+    return k && n ? `<button data-id="stack-${ek}" data-a="${a === prim ? a : `m-${a}`}" data-p="${ek}" ${off} aria-label="${one ? `${one} do projeto ${ek}` : `${text} do projeto ${ek} (${n})`}"
+      title="${esc(list.map(c => c.Names).join(', '))}" onclick="${a === prim ? '' : 'menuPick(this); '}stackAct('${a}', this.dataset.p)" class="${cls}">${label}</button>` : '';
   };
   // compose up/pull/down e logs do projeto: só com o working_dir no label (o servidor precisa dele para achar o projeto)
   const cbtn = (a: ComposeAction, text: string, cls = MENU_ITEM + ' text-fg') =>
@@ -533,19 +542,22 @@ function groupHead(k: string, label: string) {
                   dir ? cbtn('up', 'compose up') + cbtn('rebuild', 'compose up --build') + cbtn('pull', 'compose pull') : '',
                   dir ? cbtn('down', 'compose down…', MENU_ITEM + ' text-bad-fg') : ''].filter(Boolean);
   const verb = composing.get(k);
-  return `<tr data-key="g:${ek}" role="row" class="max-lg:block"><th role="columnheader" colspan="5" scope="colgroup" class="max-lg:block px-4 pt-5 pb-2 text-left font-normal border-t border-line/70">
+  // a faixa de estado: um bloco por container do projeto, na cor do estado, como uma calha de processos
+  const strip = k ? `<span aria-hidden="true" data-strip class="flex items-center gap-0.5">${[...all].sort((a, b) => a.Names.localeCompare(b.Names)).map(c =>
+    `<span title="${esc(c.Names)}: ${esc(status(c)[0])}" class="h-3 w-1.5 rounded-[1px] ${TONE[busy.has(c.ID) ? 'busy' : tone(c)][0]}"></span>`).join('')}</span>` : '';
+  return `<tr data-key="g:${ek}" role="row" class="max-lg:block"><th role="columnheader" colspan="5" scope="colgroup" class="max-lg:block px-4 pt-3 pb-2.5 text-left font-normal border-t border-line-strong bg-raised">
     <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
-      <span class="text-xs font-medium uppercase tracking-wider text-fg">${label}</span>
-      ${k ? `<span class="text-xs ${verb ? 'text-fg-strong' : 'text-muted'}">compose · ${verb ? COMPOSE_VERB[verb] : `${on} de ${all.length} rodando`}</span>` : ''}
-      ${k && inBand ? `<span class="text-xs text-bad-fg">${inBand} na faixa de atenção ↑</span>` : ''}
+      <span class="font-mono text-data font-semibold ${k ? 'text-fg-strong' : 'text-muted'}">${label}</span>${strip}
+      ${k ? `<span class="font-mono text-xs ${verb ? 'text-fg-strong' : 'text-muted'}">compose · ${verb ? COMPOSE_VERB[verb] : `${on} de ${all.length} rodando`}</span>` : ''}
+      ${k && inBand ? `<span class="text-xs text-bad-fg">${inBand} na faixa de atenção, acima</span>` : ''}
       <span class="lg:ml-auto max-lg:w-full flex flex-wrap items-center gap-1.5 max-lg:gap-2">${sbtn(prim, prim === 'start' ? 'Iniciar tudo' : 'Parar tudo',
         `${BTN} ${prim === 'start' ? 'text-ok-fg hover:bg-ok/10' : 'text-fg hover:bg-hover'}`)}${dir
         ? `<button data-id="stack-${ek}" data-a="plogs" data-p="${ek}" aria-label="Logs do projeto ${ek}" onclick="projectLogs(this.dataset.p)"
             class="lg:w-20 ${ghost()} text-fg-soft hover:text-fg-strong hover:bg-hover">Logs</button>` : ''}${armed
         ? `<button data-id="stack-${ek}" data-a="down" data-p="${ek}" aria-label="Confirmar compose down do projeto ${ek}" onclick="composeAct('down', this.dataset.p)"
-            class="${BTN} bg-danger text-white ring-danger hover:bg-danger-hover">Confirmar down</button>${cancelBtn(`stack-${ek}`, `compose down do projeto ${ek}`)}`
+            class="${BTN} bg-danger text-white ring-danger hover:bg-danger-hover">Derrubar ${ek}</button>${cancelBtn(`stack-${ek}`, `compose down do projeto ${ek}`)}`
         : groups.length ? menuBox(`stack-${ek}`, `Mais ações do projeto ${ek}`, anyBusy, groups.join('<hr class="my-1 border-line">')) : ''}</span>
-      ${armed ? armNote(`Derrubar ${ek}? ${esc(downNote(k))}`) : ''}
+      
     </div></th></tr>`;
 }
 
@@ -565,7 +577,7 @@ function render() {
   const label = only ? BUCKETS.find(([k]) => k === only)![1] + ' ' : '';
   const f = (document.activeElement as HTMLElement | null)?.dataset;  // re-render não pode roubar o foco do teclado
   patchRows(rows.length
-    ? [...(attn.length ? [bandHead(`Precisa de atenção · ${attn.length}`, 'text-bad-fg bg-bad/5'), ...attn.map(c => row(c, true))] : []),
+    ? [...(attn.length ? [bandHead(`Precisa de atenção · ${attn.length}`, 'text-bad-fg bg-bad/10'), ...attn.map(c => row(c, true))] : []),
        ...keys.flatMap(k => [...(heads ? [groupHead(k, k ? esc(k) : keys.length > 1 ? 'Sem projeto compose' : 'Demais containers')] : []),
                              ...groups.get(k)!.map(c => row(c))])]
     : [`<tr data-key="empty" role="row" class="max-lg:block"><td role="cell" colspan="5" class="max-lg:block py-16 px-4 text-center text-muted">${
@@ -573,6 +585,11 @@ function render() {
       : !data.length ? 'Nenhum container ainda. Crie um em “Novo container” ou com <code class="font-mono">docker run</code>.'
       : `Nenhum container ${label}${q ? `corresponde a “${esc(q)}”` : 'agora'}.`}</td></tr>`]);
   dirty = false;
+  // o aviso do compose down fica preso no pé da tela: dentro da tabela, ou empurrava as linhas ou cobria uma delas
+  const dk = arming?.a === 'down' ? arming.name : '';
+  const dock = dk ? armNote(`Derrubar ${esc(dk)}? ${esc(downNote(dk))}`, 'max-w-[80ch]') : '';
+  if ($('#armdock').innerHTML !== dock) $('#armdock').innerHTML = dock;
+  $('#armdock').classList.toggle('hidden', !dock);
   renderCount();
   renderBulk();
   renderDlg();
@@ -581,8 +598,8 @@ function render() {
   if (f?.id) refocus(f.id, f.a);
   saveHash();
   // só escreve na região viva quando a mensagem muda, para não apagar o anúncio de uma ação em andamento
-  const say = arming ? `${REMOTE ? `No daemon remoto ${CTX}: ` : ''}${arming.a === 'down' ? `Clique em Confirmar down para derrubar o projeto ${arming.name}.`
-    : `Clique em Confirmar para apagar ${arming.name} de vez.`} ${arming.note} ${TOUCH ? 'Cancela sozinho em 8 segundos.' : 'Esc cancela.'}`
+  const say = arming ? `${REMOTE ? `No daemon remoto ${CTX}: ` : ''}${arming.a === 'down' ? `Clique em Derrubar ${arming.name} para derrubar o projeto.`
+    : arming.a === 'prune' ? `Clique em Limpar para apagar ${arming.name}.` : `Clique em Apagar para apagar ${arming.name} de vez.`} ${arming.note} ${TOUCH ? 'Cancela sozinho em 8 segundos.' : 'Esc cancela.'}`
             : q || only ? `${rows.length} de ${data.length} containers` : '';
   if (say !== lastSay) $('#shown').textContent = lastSay = say;
 }
@@ -656,7 +673,7 @@ async function act(a: RowAction, id: string) {
   if (!c || busy.has(id)) return;
   if (a === 'remove' && !confirmed(id, c.Names, 'remove', 'Os volumes não são afetados.')) return;
   const trs = [...document.querySelectorAll<HTMLElement>('#rows tr[data-row]')], i = trs.findIndex(tr => tr.dataset.key === 'c:' + id);
-  const near = (trs[i + 1] || trs[i - 1])?.dataset.key?.slice(2);
+  const near = (trs[i + 1] || trs[i - 1])?.dataset.key?.slice(2), since = new Date().toISOString();
   const done = run(a, c);
   $('#shown').textContent = `${VERB[a]} ${c.Names}`;
   if (!(await done)) { toast(`Não deu para ${LABEL[a].toLowerCase()} ${c.Names}. O erro ficou na linha.`); return load(); }
@@ -670,6 +687,8 @@ async function act(a: RowAction, id: string) {
     return;
   }
   toast(`${c.Names} ${DONE[a]}, conferindo se ficou de pé…`, true);
+  // com os logs dele abertos: liga o ao vivo (o anterior caiu quando o container parou) e marca onde o novo log começa
+  if ($<HTMLDialogElement>('#dlg').open && logId === id) { mark = {at: since, label: `${DONE[a]} às ${new Date().toLocaleTimeString('pt-BR')}`}; toggleFollow(true); }
   confirmUp([c.ID]);
 }
 
@@ -716,7 +735,7 @@ const BULK: [Action, string][] = [['start', 'Iniciar'], ['stop', 'Parar'], ['res
 const bulkList = (a: Action, ids: string[] = [...sel]) => data.filter(c => ids.includes(c.ID) && fits(a, c));
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 // "cron e velho", "a, b e c" ou "a, b, c e mais 4": a confirmação diz o que vai apagar, não só quantos
-const names = (cs: Container[]) => cs.length > 3 ? `${cs.slice(0, 3).map(c => c.Names).join(', ')} e mais ${cs.length - 3}`
+const names = (cs: Container[], max = 3) => cs.length > max ? `${cs.slice(0, max).map(c => c.Names).join(', ')} e mais ${cs.length - max}`
   : cs.map(c => c.Names).join(', ').replace(/, ([^,]*)$/, ' e $1');
 
 // mudar a seleção desarma o Remover em lote: o número no Confirmar tem que ser o que vai ser apagado
@@ -746,13 +765,13 @@ function renderBulk() {
               : a === 'start' ? 'text-ok-fg hover:bg-ok/10' : a === 'remove' ? 'text-bad-fg hover:bg-bad/10' : 'text-fg hover:bg-hover';
     const aria = armed && a === 'remove' ? `Confirmar remoção de ${plural(k, 'container', 'containers')}` : `${text.replace('…', '')} ${plural(k, 'selecionado', 'selecionados')}`;
     return `<button data-id="bulk" data-a="${a}" ${bulkBusy ? 'aria-disabled="true"' : ''} aria-label="${aria}" title="${esc(bulkList(a, armed && a === 'remove' ? armedIds : undefined).map(c => c.Names).join(', '))}"
-      onclick="bulkAct('${a}')" class="${BTN} ${cls}">${bulkBusy === a ? VERB[a] : armed && a === 'remove' ? 'Confirmar remoção' : text} (${k})</button>`;
+      onclick="bulkAct('${a}')" class="${BTN} ${cls}">${bulkBusy === a ? `${VERB[a]} (${k})` : armed && a === 'remove' ? `Apagar ${plural(k, 'container', 'containers')}` : `${text} (${k})`}</button>`;
   };
   const html = !n ? '' : `<p class="mr-auto text-sm font-medium text-fg-strong">${plural(n, 'selecionado', 'selecionados')}${
       hidden ? `<span class="font-normal text-muted"> · ${hidden} fora do filtro</span>` : ''}</p>
     <div class="flex flex-wrap gap-1.5">${BULK.map(btn).join('')}${armed ? cancelBtn('bulk', 'remoção em lote') : ''}
       ${armed ? '' : `<button data-id="bulk" data-a="clear" onclick="clearSel()" class="${BTN} text-muted hover:bg-hover">Limpar seleção</button>`}</div>
-    ${armed ? armNote(`Apagar ${esc(names(data.filter(c => armedIds.includes(c.ID))))} de vez? Os volumes ficam.`) : ''}`;
+    ${armed ? armNote(`Apagar ${esc(names(data.filter(c => armedIds.includes(c.ID)), 10))} de vez? Os volumes ficam.`) : ''}`;
   $('#bulk').classList.toggle('hidden', !n);  // a altura dela vira --dock (ResizeObserver lá embaixo)
   if (html !== bulkHtml) $('#bulk').innerHTML = bulkHtml = html;  // o render roda a cada poll: só troca se mudou
 }
@@ -841,7 +860,7 @@ async function composeAct(a: ComposeAction, p: string, svc = '') {
 // o que o compose down leva, pelo nome (primeiro os da faixa de atenção: são os que você mais quer saber se vão junto). Depois dele o projeto some da lista (a pasta vinha dos labels dos containers),
 // então o up para voltar é pelo terminal
 const downNote = (p: string) =>
-  `Remove ${names(data.filter(c => project(c) === p).sort((a, b) => +isProblem(b) - +isProblem(a)))} e as redes do projeto. Os volumes ficam; para subir de novo, use compose up no terminal.`;
+  `Remove ${names(data.filter(c => project(c) === p).sort((a, b) => +isProblem(b) - +isProblem(a)), 10)} e as redes do projeto. Os volumes ficam; para subir de novo, use compose up no terminal.`;
 
 // "Reiniciar serviço" do menu "⋯": compose restart do serviço do container (o servidor confere o nome nos labels)
 function restartService(id: string) {
@@ -855,7 +874,7 @@ function armTick() {
   if (!arming) return;
   const els = [...document.querySelectorAll(`[data-id="${arming.id}"]:is([data-a="${arming.a}"], [data-a="cancel"])`)];
   if (!TOUCH && els.some(el => el.matches(':hover') || el === document.activeElement)) arming.timer = setTimeout(armTick, 1000);
-  else disarm();
+  else { disarm(); toast('Confirmação cancelada: passaram 8 s sem o segundo clique. Nada foi apagado.', true); }
 }
 
 function disarm(redraw = true) {
@@ -877,6 +896,8 @@ document.addEventListener('keydown', e => {
   // a busca dele já acha texto na caixa, e quem aperta Ctrl+F espera ela
   if ($<HTMLDialogElement>('#dlg').open) {
     if (e.key === '/' && !typing) { e.preventDefault(); $('#lf').focus(); }
+    // r reinicia o container dos logs: o ciclo inteiro (reiniciar, ver o log novo) sem sair do modal
+    if ((e.key === 'r' || e.key === 'R') && !typing && logId && data.find(c => c.ID === logId)?.State === 'running') act('restart', logId);
     return;
   }
   if (e.key === '/' && !typing) { e.preventDefault(); pickTab('containers'); return $('#q').focus(); }
@@ -922,13 +943,15 @@ function renderDlg() {
   const s = c.State === 'running' && !b ? stats[sid(c.ID)] : undefined, u = s && usage(s), hs = series.get(sid(c.ID)) ?? [];
   // uma linha para cada coisa: status, último healthcheck (inteiro no title) e uso, com rede e disco no fim (fora do celular)
   $('#dlg-status').innerHTML = `<span class="${t[1]}">${b ? VERB[b] : esc(st[0])}</span>${st[1] && !b ? `<span class="text-muted"> · ${st[1]}</span>` : ''}${b ? '' : errHtml(c)}${
-    h ? `<div class="mt-1 text-xs text-muted lg:truncate" title="${esc(h)}">Último healthcheck: <span class="font-mono text-fg-soft">${esc(h)}</span></div>` : ''}${
-    s && u ? `<div id="dlg-usage" class="mt-1 text-xs text-muted"><span class="font-mono text-fg-soft">${esc(u[0])}</span> ${spark(hs, 'cpu', 96, 20)} · <span class="font-mono text-fg-soft">${esc(u[1])}</span> ${spark(hs, 'mem', 96, 20)}${
-      io(s).length ? `<span class="max-lg:hidden" title="Totais desde que o container subiu"> · ${io(s).map(esc).join(' · ')}</span>` : ''}</div>` : ''}`;
-  // como na linha: a ação principal à vista e o resto no "⋯" (remover fica na lista, onde a confirmação aparece)
+    h ? `<div class="mt-1 text-xs text-muted lg:truncate" title="${esc(h)}"><span class="font-sans">Último healthcheck:</span> <span class="text-fg-soft">${esc(h)}</span></div>` : ''}${
+    s && u ? `<div id="dlg-usage" class="mt-1 text-xs text-muted"><span class="whitespace-nowrap"><span class="text-fg-soft">${esc(u[0])}</span> ${spark(hs, 'cpu', 96, 20)}</span> <span class="whitespace-nowrap">· <span class="text-fg-soft">${esc(u[1])}</span> ${spark(hs, 'mem', 96, 20)}</span>${
+      io(s).length ? `<span class="max-lg:hidden text-fg-soft" title="Totais desde que o container subiu">${io(s).map(x => ` <span class="whitespace-nowrap">· ${esc(x)}</span>`).join('')}</span>` : ''}</div>` : ''}`;
+  // Reiniciar à vista e primeiro (é o ciclo: reiniciar e ver o log novo), depois a ação principal; o resto no "⋯"
+  // (remover fica na lista, onde a confirmação aparece)
   const prim = PRIMARY[c.State], sec = SECONDARY[c.State];
-  const more = [sec && [sec, LABEL[sec]], c.State === 'running' && ['exec', 'Copiar docker exec']].filter((x): x is [string, string] => !!x);
-  $('#dlg-acts').innerHTML = (prim ? `<button data-id="dlg" data-a="${prim}" ${b ? 'aria-disabled="true"' : ''} aria-label="${LABEL[prim]} ${esc(c.Names)}" onclick="act('${prim}', '${c.ID}')"
+  const more = [sec && sec !== 'restart' && [sec, LABEL[sec]], c.State === 'running' && ['exec', 'Copiar docker exec']].filter((x): x is [string, string] => !!x);
+  $('#dlg-acts').innerHTML = (sec === 'restart' ? `<button data-id="dlg" data-a="restart" ${b ? 'aria-disabled="true"' : ''} aria-label="Reiniciar ${esc(c.Names)}" title="Reiniciar (r)"
+      onclick="act('restart', '${c.ID}')" class="inline-flex items-center gap-1.5 ${BTN} text-fg hover:bg-hover">${RESTART_ICON}Reiniciar</button>` : '') + (prim ? `<button data-id="dlg" data-a="${prim}" ${b ? 'aria-disabled="true"' : ''} aria-label="${LABEL[prim]} ${esc(c.Names)}" onclick="act('${prim}', '${c.ID}')"
       class="${BTN} ${prim === 'start' ? 'text-ok-fg hover:bg-ok/10' : 'text-fg hover:bg-hover'}">${LABEL[prim]}</button>` : '')
     + (more.length ? menuBox('dlg', `Mais ações para ${esc(c.Names)} nos logs`, !!b, more.map(([a, text]) =>
       `<button data-id="dlg" data-a="m-${a}" ${b ? 'aria-disabled="true"' : ''} onclick="menuPick(this); ${a === 'exec' ? `copyExec('${c.ID}')` : `act('${a}', '${c.ID}')`}"
@@ -973,22 +996,55 @@ const svcTone = (prefix: string) => {
   return svcSeen.get(svc)!;
 };
 
-// a linha (com os trechos marcados e o prefixo do serviço colorido), ou null se o filtro não casou (aí nem entra na caixa).
-// ponytail: um trecho que casa atravessando o prefixo ("1  | 20") não conta; dividir o prefixo é o que dá a cor
+// cor da linha pelo nível (ERROR, WARN, DEBUG...); o resto fica na cor da caixa
+const LEVEL_TONE = {bad: 'text-bad-fg', warn: 'text-warn-fg', dim: 'text-muted', '': ''};
+const TS = /^\d{4}-\d\d-\d\dT\S+\s/;  // o --timestamps do docker logs
+
+// a linha (com os trechos marcados, o prefixo do serviço colorido, o timestamp apagado e a cor do nível), ou null se o
+// filtro não casou (aí nem entra na caixa). ponytail: um trecho que casa atravessando o prefixo ou o timestamp não conta
 function hitNode(line: string, re: RegExp | null) {
   const pre = logProject ? line.match(SVC_PREFIX)?.[0] ?? '' : '', span = document.createElement('span');
+  const rest = line.slice(pre.length), ts = rest.match(TS)?.[0] ?? '';
   let n = 0;
-  if (pre) {
+  const part = (text: string, cls: string) => {
     const p = document.createElement('span');
-    p.className = svcTone(pre); n += markInto(p, pre, re); span.append(p);
-  }
-  n += markInto(span, line.slice(pre.length), re);
+    if (!text) return p;
+    p.className = cls; n += markInto(p, text, re); span.append(p);
+    return p;
+  };
+  if (pre) part(pre, svcTone(pre));
+  // o timestamp aparece como HH:MM:SS na hora local (a mesma da marca do reinício), desenhado pelo CSS (data-t); o texto
+  // continua o do docker, para Copiar e Baixar levarem a linha inteira, e o valor UTC vai no title.
+  // ponytail: o filtro conta o que casar no timestamp escondido
+  const t = ts && new Date(ts.trim().replace(/(\.\d{3})\d+/, '$1'));
+  if (t && !isNaN(+t)) {
+    const el = part(ts.trimEnd(), 'text-[0px] text-muted before:content-[attr(data-t)] before:text-xs');
+    el.dataset.t = t.toLocaleTimeString('pt-BR'); el.title = ts.trim();
+    part(ts.slice(ts.trimEnd().length), '');
+  } else part(ts, 'text-muted');
+  const lv = LEVEL_TONE[logLevel(rest)];
+  if (lv) part(rest.slice(ts.length), lv); else n += markInto(span, rest.slice(ts.length), re);
   if (re && !n) return null;
   if (re) { hits += n; hitLines++; }
   return span;
 }
-// logs do projeto até o teto do ao vivo ganham um nó por linha (para a cor); acima disso, texto cru, que pesa menos
-const colored = () => !!logProject && buf.length <= 10000;
+// até o teto do ao vivo, um nó por linha (para as cores); acima disso, texto cru, que pesa menos
+const colored = () => buf.length <= 10000;
+
+// marca "reiniciado às 18:31" antes da primeira linha depois do reinício (pelo timestamp do docker). O texto vem do CSS
+// (data-mark): Copiar e Baixar levam só o log. marked = já foi posta nesta pintura (ou nesta conexão do ao vivo)
+let mark: {at: string; label: string} | null = null, marked = false;
+function markNode(line: string) {
+  if (!mark || marked) return null;
+  const ts = (logProject ? line.replace(SVC_PREFIX, '') : line).match(TS)?.[0].trim();
+  if (!ts || ts < mark.at) return null;
+  marked = true;
+  const m = document.createElement('span');
+  m.dataset.mark = `— ${mark.label} —`;
+  m.setAttribute('role', 'separator'); m.setAttribute('aria-label', mark.label.replace(/^./, c => c.toUpperCase()));
+  m.className = 'block my-1 border-t border-accent/50 font-sans text-[11px] text-accent-fg before:content-[attr(data-mark)]';
+  return m;
+}
 
 function renderHits() {
   const txt = !filterRe() ? '' : hits
@@ -1001,11 +1057,15 @@ function renderHits() {
 // Ao vivo, um nó por linha (o teto tira do começo); parado, um texto só, que pesa menos com o log inteiro
 function paint() {
   const lb = $('#lb'), re = filterRe(), atEnd = lb.scrollHeight - lb.scrollTop - lb.clientHeight < 40;
-  hits = hitLines = 0;
+  hits = hitLines = 0; marked = false;
   if (buf.length && (re || stream || colored())) {  // sem linhas, a caixa tem um aviso ("(sem logs)", erro): fica
     // num fragment, um a um: espalhar o log inteiro em argumentos (replaceChildren(...)) estoura a pilha
     const frag = document.createDocumentFragment();
-    for (const l of buf) { const n = re || colored() ? hitNode(l, re) : l; if (n) frag.append(n); }
+    for (const l of buf) {
+      const m = markNode(l), n = re || colored() ? hitNode(l, re) : l;
+      if (m) frag.append(m);
+      if (n) frag.append(n);
+    }
     lb.replaceChildren(frag);
   } else if (buf.length) lb.textContent = buf.join('');
   renderHits();
@@ -1042,19 +1102,21 @@ async function fetchLogs(more = false) {
   else if (atEnd) lb.scrollTop = lb.scrollHeight;
 }
 
-function openLogs(title: string) {
-  tailAt = 0; buf = []; complete = false; svcSeen.clear();
+function openLogs(title: string, running: boolean) {
+  tailAt = 0; buf = []; complete = false; svcSeen.clear(); mark = null;
   $('#lt').textContent = title;
   $<HTMLInputElement>('#lf').value = '';  // cada container (ou projeto) começa sem filtro
   $('#lb').textContent = 'Carregando…'; $('#lmeta').textContent = hist().replace(/^./, c => c.toUpperCase()); $('#dlg-msg').innerHTML = '';
   $('#insp').hidden = !!logProject;  // a configuração (inspect) é de um container só
   renderHits(); renderMore();
   $<HTMLDialogElement>('#dlg').showModal(); renderDlg(); fetchLogs();
+  if (running && wantsFollow()) toggleFollow(true);  // quem deixou o ao vivo ligado da última vez
 }
 
 function logs(id: string) {
   logId = id; logProject = null;
-  openLogs(data.find(c => c.ID === id)!.Names);
+  const c = data.find(c => c.ID === id)!;
+  openLogs(c.Names, c.State === 'running');
 }
 
 // logs de todos os serviços do projeto no mesmo modal, com o prefixo do compose ("api-1  | ") em cada linha
@@ -1062,7 +1124,7 @@ function projectLogs(p: string) {
   const c = data.find(c => project(c) === p);
   if (!c) return;
   logId = null; logProject = {project: p, dir: workingDir(c)};
-  openLogs(p);
+  openLogs(p, data.some(c => project(c) === p && c.State === 'running'));
 }
 
 // mais histórico: 500 -> 2000 -> 10000 -> tudo. Ao vivo, reconecta pedindo mais (até 10000)
@@ -1086,11 +1148,12 @@ function flushLogs() {
   const add = pending.splice(0);
   buf.push(...add);
   // anexar (em vez de trocar o texto) não apaga a seleção de quem está copiando
-  lb.append(...(re || logProject ? add.map(l => hitNode(l, re)).filter(n => !!n) : add));
-  // o teto vale para as linhas carregadas; na tela, com filtro, só as que casaram têm nó
+  lb.append(...add.flatMap(l => [markNode(l), hitNode(l, re)]).filter(n => !!n));
+  // o teto vale para as linhas carregadas; na tela, com filtro, só as que casaram têm nó (a marca do reinício sai junto)
   for (const l of buf.splice(0, Math.max(0, buf.length - Math.max(MAX_LINES, +TAILS[tailAt])))) {
     const n = re ? (l.split(re).length - 1) / 2 : 1;
     if (!n) continue;
+    while ((lb.firstChild as HTMLElement | null)?.dataset?.mark) lb.firstChild!.remove();
     lb.firstChild!.remove();
     if (re) { hits -= n; hitLines--; }
   }
@@ -1110,7 +1173,7 @@ function toggleFollow(on = !stream, why = '') {
     const es = stream = new EventSource(logProject ? `/api/compose/logs/stream?${q}` : `/api/logs/${logId}/stream?${q}`);
     // cada conexão (inclusive a reconexão automática) recomeça do histórico pedido: limpa para não duplicar
     es.onopen = () => {
-      pending = []; buf = []; hits = hitLines = 0; $('#lb').textContent = ''; renderHits();
+      pending = []; buf = []; hits = hitLines = 0; marked = false; $('#lb').textContent = ''; renderHits();
       $('#lmeta').textContent = `Ao vivo · ${hist()} e as novas`;
     };
     es.onmessage = e => { if (pending.push(JSON.parse(e.data)) === 1) setTimeout(flushLogs, 50); };
@@ -1122,6 +1185,13 @@ function toggleFollow(on = !stream, why = '') {
   $('#refresh').setAttribute('aria-disabled', String(on));  // com o ao vivo ligado, Atualizar é redundante (mas continua no Tab)
   renderMore();
 }
+
+// botão Ao vivo: a escolha fica para os próximos logs (deste navegador); o ao vivo que cai sozinho não muda a escolha
+function followClick() {
+  toggleFollow();
+  try { localStorage.setItem('docker-gui-follow', stream ? '1' : ''); } catch { /* aba privada: vale só agora */ }
+}
+const wantsFollow = () => { try { return localStorage.getItem('docker-gui-follow') === '1'; } catch { return false; } };
 
 // botão Atualizar: com o ao vivo ligado não faz nada (já atualiza sozinho)
 function refreshLogs() {
@@ -1298,18 +1368,27 @@ async function createContainer(e: SubmitEvent) {
 
 type DiskKind = 'images' | 'volumes' | 'buildcache';
 // [Type do docker system df, categoria da API de prune, rótulo, o que o prune apaga, aviso]; Containers fica de fora:
-// parado se remove na lista. Volumes sem -a no servidor: no Docker 23+ só os anônimos saem
+// parado se remove na lista. Volumes sem -a no servidor: o aviso deles sai da lista de volumes (volumeNote)
 const DISK: [string, DiskKind, string, string, string][] = [
   ['Images', 'images', 'Imagens', 'as imagens que nenhum container usa', 'Dá para baixar de novo.'],
-  // sem -a: no Docker 23+ o volume prune só leva os anônimos; o Podman e o Docker anterior levam os nomeados também
-  ['Local Volumes', 'volumes', 'Volumes', 'os volumes que nenhum container usa',
-   'No Docker 23+ só saem os sem nome; no Podman e em Docker mais antigo, os nomeados também. Os dados deles se perdem.'],
+  ['Local Volumes', 'volumes', 'Volumes', 'os volumes que nenhum container usa', 'Os dados deles se perdem.'],
   ['Build Cache', 'buildcache', 'Build cache', 'o cache de build', 'O próximo build fica mais lento.']];
 let disk: DiskUsage[] | string | null = null, diskBusy: DiskKind | '' = '';  // string = erro
 const diskHtml: Record<string, string> = {};
+const PODMAN = /^podman\b/.test(document.documentElement.dataset.cli ?? '');
+// o volume prune diz exatamente o que leva, pela lista de volumes (no Docker só os anônimos, no Podman os nomeados também)
+function volumeNote(): string {
+  const vs = objs.volumes;
+  if (!Array.isArray(vs)) return vs === null ? 'Conferindo quais volumes saem…' : 'Não consegui ler a lista de volumes; o prune leva os sem uso.';
+  const out = prunedVolumes(vs as Volume[], PODMAN), shown = out.slice(0, 10).map(v => anonVolume(v.Name) ? v.Name.slice(0, 12) + '…' : v.Name);
+  return !out.length ? 'Nenhum volume sem uso para apagar.'
+    : `Vai apagar ${plural(out.length, PODMAN ? 'volume sem uso' : 'volume anônimo sem uso', PODMAN ? 'volumes sem uso' : 'volumes anônimos sem uso')}: ${
+      shown.join(', ')}${out.length > 10 ? ` e mais ${out.length - 10}` : ''}. Os dados deles se perdem.${PODMAN ? '' : ' Os nomeados ficam.'}`;
+}
 // quanto o prune libera e de quantos itens (do df), antes do que ele não desfaz
 const pruneNote = (d: DiskUsage | undefined, note: string) => {
   const idle = d ? +d.TotalCount - +d.Active : 0;
+  if (d?.Type === 'Local Volumes') return volumeNote();
   return d ? `Libera até ${d.Reclaimable.split(' ')[0]}${idle > 0 ? `, de ${plural(idle, 'item sem uso', 'itens sem uso')}` : ''}. ${note}` : note;
 };
 
@@ -1335,13 +1414,16 @@ function renderDisk() {
       : DISK.filter(([, k]) => (k === 'volumes') === (panel === 'volumes')).map(([type, k, label, what, note]) => {
         const d = (disk as DiskUsage[]).find(d => d.Type === type), id = 'df-' + k, armed = arming?.id === id;
         if (!d) return '';
-        const cls = armed ? 'bg-danger text-white ring-danger hover:bg-danger-hover' : 'text-fg hover:bg-hover';
+        const cls = armed ? 'bg-danger text-white ring-danger hover:bg-danger-hover' : 'text-fg hover:bg-hover', share = reclaimShare(d);
+        // a barra é o total; a parte em ciano, na ponta, é o que a limpeza libera
+        const bar = share === null ? '' : `<div aria-hidden="true" class="mt-1.5 h-1.5 w-full max-w-80 rounded-sm bg-line-strong overflow-hidden flex justify-end">
+            <span class="h-full bg-accent" style="width:${Math.round(share * 100)}%"></span></div>`;
         return `<div class="flex flex-wrap items-center gap-x-3 gap-y-2 py-3">
-          <div class="mr-auto min-w-0"><div class="font-medium text-fg-strong">${label}</div>
-            <div class="text-xs text-muted">${esc(d.Size)} no total · ${esc(d.Reclaimable)} liberável · ${esc(d.TotalCount)} ${d.TotalCount === '1' ? 'item' : 'itens'}, ${esc(d.Active)} em uso</div></div>
+          <div class="mr-auto min-w-0 flex-1"><div class="font-medium text-fg-strong">${label}</div>
+            <div class="font-mono text-xs text-muted">${esc(d.Size)} no total · ${esc(d.Reclaimable)} liberável · ${esc(d.TotalCount)} ${d.TotalCount === '1' ? 'item' : 'itens'}, ${esc(d.Active)} em uso</div>${bar}</div>
           <button data-id="${id}" data-a="prune" ${diskBusy ? 'aria-disabled="true"' : ''} onclick="prune('${k}')"
             aria-label="${armed ? `Confirmar limpeza de ${label.toLowerCase()}` : `Limpar ${label.toLowerCase()}`}" class="${BTN} ${cls}">${
-            diskBusy === k ? 'Limpando…' : armed ? 'Confirmar' : 'Limpar…'}</button>${armed ? cancelBtn(id, `limpeza de ${label.toLowerCase()}`) : ''}
+            diskBusy === k ? 'Limpando…' : armed ? `Limpar ${label.toLowerCase()}` : 'Limpar…'}</button>${armed ? cancelBtn(id, `limpeza de ${label.toLowerCase()}`) : ''}
           ${armed ? armNote(`Apagar ${what}? ${esc(pruneNote(d, note))}`) : ''}
         </div>`;
       }).join('');
@@ -1351,6 +1433,7 @@ function renderDisk() {
 
 async function prune(k: DiskKind) {
   const [type, , label, what, note] = DISK.find(d => d[1] === k)!, d = Array.isArray(disk) ? disk.find(d => d.Type === type) : undefined;
+  if (k === 'volumes' && !Array.isArray(objs.volumes)) loadObjects('volumes');  // o aviso diz quais saem
   if (diskBusy || !confirmed('df-' + k, what, 'prune', pruneNote(d, note))) return;
   diskBusy = k; render();
   $('#shown').textContent = `Limpando ${label.toLowerCase()}…`;
@@ -1380,7 +1463,7 @@ let objBusy = '';
 
 // o que vai para a API (ID para imagem e rede, nome para volume) e o que aparece na tela
 const objRef = (k: ObjKind, o: Obj) => k === 'volumes' ? (o as Volume).Name : (o as Image | Network).ID;
-const anon = (name: string) => /^[0-9a-f]{64}$/.test(name);  // volume anônimo: o nome é um hash
+const anon = anonVolume;
 const objName = (k: ObjKind, o: Obj) => k === 'images' ? (o as Image).Tags.join(', ') || `sem tag ${(o as Image).ID.slice(0, 12)}`
   : anon((o as Volume | Network).Name) ? (o as Volume).Name.slice(0, 12) : (o as Volume | Network).Name;
 
@@ -1420,18 +1503,21 @@ function objItem(k: ObjKind, o: Obj) {
         ? `<span class="text-fg-soft">em uso por ${esc(o.Containers.join(', '))}</span>` : 'sem uso'}</div></div>
     ${canRm ? `<button data-id="${esc(id)}" data-a="rm" data-k="${k}" data-r="${esc(r)}" ${objBusy ? 'aria-disabled="true"' : ''}
       onclick="rmObj(this.dataset.k, this.dataset.r)" aria-label="${armed ? `Confirmar remoção de ${esc(what)}` : `Remover ${esc(what)}`}"
-      class="${BTN} ${cls}">${objBusy === id ? 'Removendo…' : armed ? 'Confirmar' : 'Remover…'}</button>${armed ? cancelBtn(id, `remoção de ${esc(what)}`) : ''}` : ''}
+      class="${BTN} ${cls}">${objBusy === id ? 'Removendo…' : armed ? 'Apagar' : 'Remover…'}</button>${armed ? cancelBtn(id, `remoção de ${esc(what)}`) : ''}` : ''}
     ${armed ? armNote(`Apagar ${esc(what)}? ${OBJ[k][5]}`) : ''}
     ${err ? `<div class="w-full text-xs text-bad-fg">${hint ? `<p>${hint}</p>` : ''}
       <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-bad-soft">${esc(err)}</pre></div>` : ''}</li>`;
 }
+
+// quantos o docker system df conta na categoria (redes não entram no df)
+const dfCount = (k: ObjKind) => Array.isArray(disk) ? +(disk.find(d => d.Type === {images: 'Images', volumes: 'Local Volumes', networks: ''}[k])?.TotalCount ?? 0) : 0;
 
 function renderObjects() {
   for (const k of KINDS) {
     const v = objs[k];
     const html = v === null ? '<p class="py-3 text-muted">Carregando…</p>'
       : typeof v === 'string' ? `<p class="py-3 text-bad-fg">${esc(v)}</p>`
-      : !v.length ? `<p class="py-3 text-muted">${OBJ[k][6]}</p>`
+      : !v.length ? `<p class="py-3 text-muted">${OBJ[k][6]}${dfCount(k) ? ` O uso de disco conta ${dfCount(k)}: feche e abra a lista para ler de novo.` : ''}</p>`
       : `<ul aria-label="${OBJ[k][3]}" class="divide-y divide-line/70">${v.map(o => objItem(k, o)).join('')}</ul>`;
     if (html !== objHtml[k]) $(`#obj-${k}-list`).innerHTML = objHtml[k] = html;  // o render roda a cada poll
     $(`#obj-${k}-n`).textContent = Array.isArray(v) ? ` · ${v.length}` : '';
@@ -1467,8 +1553,8 @@ async function rmObj(k: ObjKind, r: string) {
 // esta lista é a interface completa entre o HTML e o código
 Object.assign(window, {
   act, afterClose, askNotify, bulkAct, clearFilters, clearSel, composeAct, copyAddr, copyExec, copyLogs, disarm, downloadLogs,
-  filterBy, loadHealth, loadInspect, loadMore, menuPick, openCreate, openShell, pickTab, placeMenu, projectLogs,
-  prune, refreshLogs, restartService, rmObj, runToastAction, selectAll, stackAct, toggleFollow, toggleSel,
+  filterBy, followClick, loadHealth, loadInspect, loadMore, menuPick, openCreate, openShell, pickTab, placeMenu, projectLogs,
+  prune, refreshLogs, restartService, rmObj, runToastAction, selectAll, stackAct, toggleSel,
 });
 
 $('#dlg').addEventListener('close', afterClose);

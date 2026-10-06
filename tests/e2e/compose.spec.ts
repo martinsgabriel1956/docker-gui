@@ -17,12 +17,12 @@ const projectMenu = (page: import('@playwright/test').Page) => page.locator('sum
 test('cabeçalho do projeto mostra só a ação principal, Logs e o ⋯', async ({ page, gui }) => {
   await gui.open({ containers: containers() });
   const head = page.locator('#rows [data-key="g:shop"]');
-  // api parado: a principal é Iniciar tudo; Reiniciar, Parar e os comandos do compose ficam no menu
-  await expect(head.getByRole('button').filter({ visible: true })).toHaveText(['Iniciar tudo (1)', 'Logs']);
+  // api parado: a principal é Iniciar (com um só, diz qual); Reiniciar, Parar e os comandos do compose ficam no menu
+  await expect(head.getByRole('button').filter({ visible: true })).toHaveText(['Iniciar api', 'Logs']);
   await expect(page.getByRole('button', { name: 'compose up do projeto shop', exact: true })).toBeHidden();
   await projectMenu(page).click();
   await expect(head.getByRole('button').filter({ visible: true }))
-    .toHaveText(['Iniciar tudo (1)', 'Logs', 'Reiniciar tudo (1)', 'Parar tudo (1)', 'compose up', 'compose up --build', 'compose pull', 'compose down…']);
+    .toHaveText(['Iniciar api', 'Logs', 'Reiniciar db', 'Parar db', 'compose up', 'compose up --build', 'compose pull', 'compose down…']);
   await page.keyboard.press('Escape');
 
   // tudo rodando: a principal vira Parar tudo
@@ -48,7 +48,7 @@ test('compose down em 2 passos: Esc cancela, duplo clique não confirma', async 
   await down.click();
   await expect(confirm).toBeVisible();
   await expect(page.getByRole('button', { name: 'Cancelar compose down do projeto shop' })).toBeFocused();
-  await expect(page.locator('#rows [data-key="g:shop"]')).toContainText('Derrubar shop? Remove api e db e as redes do projeto. Os volumes ficam; para subir de novo, use compose up no terminal.');
+  await expect(page.locator('#armdock')).toContainText('Derrubar shop? Remove api e db e as redes do projeto. Os volumes ficam; para subir de novo, use compose up no terminal.');
   await page.keyboard.press('Escape');
   await expect(confirm).toBeHidden();
   // o × também cancela (no toque não há Esc)
@@ -80,8 +80,8 @@ test('o compose down diz primeiro os containers da faixa de atenção', async ({
   ] });
   await projectMenu(page).click();
   await page.getByRole('button', { name: 'compose down do projeto shop', exact: true }).click();
-  // 4 containers: os 3 primeiros pelo nome e "e mais 1"; o que caiu não fica escondido no "e mais"
-  await expect(page.locator('#rows [data-key="g:shop"]')).toContainText('Remove web, api, db e mais 1');
+  // todos pelo nome (até 10), o que caiu primeiro
+  await expect(page.locator('#armdock')).toContainText('Remove web, api, db e cache');
 });
 
 test('compose que falha mostra a última linha do stderr', async ({ page, gui }) => {
@@ -191,4 +191,11 @@ test('Logs do projeto ao vivo trazem as linhas novas e param quando tudo para', 
   gui.update(s => { Object.assign(s.containers[1], { State: 'exited', Status: 'Exited (0) 1 second ago' }); });
   await expect(page.locator('#follow')).toHaveAttribute('aria-pressed', 'false');
   await expect(page.locator('#lmeta')).toContainText('os containers pararam');
+});
+
+test('a faixa de estado do projeto tem um bloco por container, na cor do estado', async ({ page, gui }) => {
+  await gui.open({ containers: containers() });
+  const blocks = page.locator('#rows [data-key="g:shop"] [data-strip] > span');
+  await expect(blocks).toHaveCount(2);  // api e db; o solto não é do projeto
+  await expect(blocks.first()).toHaveAttribute('title', /^api: /);
 });

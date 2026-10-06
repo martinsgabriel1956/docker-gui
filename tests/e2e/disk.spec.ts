@@ -227,3 +227,18 @@ test('a aba fica na URL, o voltar do navegador volta de aba e as setas andam ent
   await expect(page.locator('#q')).toBeFocused();
   await expect(page.locator('#panel-containers')).toBeVisible();
 });
+
+test('limpar volumes diz quais saem: no Docker, só os anônimos sem uso', async ({ page, gui }) => {
+  await gui.open(OBJECTS());
+  await openTab(page, 'volumes');
+  await page.getByRole('button', { name: 'Limpar volumes' }).click();
+  await expect(page.locator('#df-volumes')).toContainText(`Vai apagar 1 volume anônimo sem uso: ${ANON.slice(0, 12)}…. Os dados deles se perdem. Os nomeados ficam.`);
+});
+
+test('cada categoria do disco tem a barra do que a limpeza libera', async ({ page, gui }) => {
+  await gui.open({ ...OBJECTS(), df: DF });
+  await openTab(page, 'images');
+  // 1.2GB (29%) das imagens; o build cache não traz a porcentagem e sai pela conta (tudo)
+  await expect(page.locator('#df-images span[style]').first()).toHaveAttribute('style', 'width:29%');
+  await expect(page.locator('#df-images span[style]').last()).toHaveAttribute('style', 'width:100%');
+});
