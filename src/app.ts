@@ -292,17 +292,52 @@ function renderCount() {
 function filterBy(k: Bucket) { only = only === k ? '' : k; render(); }
 function clearFilters() { only = ''; $<HTMLInputElement>('#q').value = ''; render(); $('#q').focus(); }
 
-// filtros vivem na URL (#estado=problema&q=redis): sobrevivem ao recarregar e dá para salvar o link
-function saveHash() {
+// aba e filtros vivem na URL (#aba=volumes, #estado=problema&q=redis): sobrevivem ao recarregar e dá para salvar o link
+type Tab = 'containers' | ObjKind;
+const TAB_URL: Record<Tab, string> = {containers: '', images: 'imagens', volumes: 'volumes', networks: 'redes'};
+let tab: Tab = 'containers';
+function hashUrl() {
   const h = new URLSearchParams(), q = $<HTMLInputElement>('#q').value.trim();
+  if (tab !== 'containers') h.set('aba', TAB_URL[tab]);
   if (only) h.set('estado', only);
   if (q) h.set('q', q);
-  history.replaceState(null, '', h.size ? '#' + h : location.pathname);
+  return h.size ? '#' + h : location.pathname;
 }
+function saveHash() { history.replaceState(null, '', hashUrl()); }
 function readHash() {
   const h = new URLSearchParams(location.hash.slice(1));
+  tab = (Object.keys(TAB_URL) as Tab[]).find(k => k !== 'containers' && TAB_URL[k] === h.get('aba')) || 'containers';
   only = BUCKETS.find(([k]) => k === h.get('estado'))?.[0] || '';
   $<HTMLInputElement>('#q').value = h.get('q') || '';
+}
+
+// trocar de aba entra no histórico (o voltar do navegador volta de aba); filtros, não
+function pickTab(t: Tab, focus = false) {
+  if (t !== tab) {
+    disarm(false);  // confirmação armada não sobrevive fora da vista
+    tab = t;
+    history.pushState(null, '', hashUrl());
+    showTab();
+  }
+  if (focus) $('#tab-' + t).focus();
+}
+function showTab() {
+  for (const b of document.querySelectorAll<HTMLElement>('[role="tab"]')) {
+    const on = b.id === 'tab-' + tab;
+    b.setAttribute('aria-selected', String(on));
+    b.tabIndex = on ? 0 : -1;
+    $('#' + b.getAttribute('aria-controls')).hidden = !on;
+  }
+  render();
+  loadTab();
+}
+// setas, Home e End andam entre as abas e já ativam (padrão do ARIA para abas que abrem rápido)
+function tabKey(e: KeyboardEvent) {
+  const all = Object.keys(TAB_URL) as Tab[], i = all.indexOf(tab);
+  const j = {ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: all.length - 1}[e.key];
+  if (j === undefined) return;
+  e.preventDefault();
+  pickTab(all[(j + all.length) % all.length], true);
 }
 
 function copyAddr(h: string) {
@@ -865,9 +900,10 @@ document.addEventListener('keydown', e => {
     if ((e.key === 'r' || e.key === 'R') && !typing && logId && data.find(c => c.ID === logId)?.State === 'running') act('restart', logId);
     return;
   }
-  if (e.key === '/' && !typing) { e.preventDefault(); return $('#q').focus(); }
+  if (e.key === '/' && !typing) { e.preventDefault(); pickTab('containers'); return $('#q').focus(); }
   if (e.key === '?' && !typing) return $('#hint').togglePopover();
   if ((e.key === 'z' || e.key === 'Z') && !typing && toastFn) return runToastAction();
+  if (tab !== 'containers') return;  // o resto mexe na lista de containers, que está escondida
   // x marca a linha em foco (junto com ↑↓ dá para selecionar sem mouse); a marca ou desmarca todos os visíveis
   const curId = el.closest?.<HTMLElement>('tr[data-row]')?.dataset.key?.slice(2);
   if ((e.key === 'x' || e.key === 'X') && !typing && curId) return toggleSel(curId);
@@ -1337,7 +1373,8 @@ const DISK: [string, DiskKind, string, string, string][] = [
   ['Images', 'images', 'Imagens', 'as imagens que nenhum container usa', 'Dá para baixar de novo.'],
   ['Local Volumes', 'volumes', 'Volumes', 'os volumes que nenhum container usa', 'Os dados deles se perdem.'],
   ['Build Cache', 'buildcache', 'Build cache', 'o cache de build', 'O próximo build fica mais lento.']];
-let disk: DiskUsage[] | string | null = null, diskBusy: DiskKind | '' = '', diskHtml = '';  // string = erro
+let disk: DiskUsage[] | string | null = null, diskBusy: DiskKind | '' = '';  // string = erro
+const diskHtml: Record<string, string> = {};
 const PODMAN = /^podman\b/.test(document.documentElement.dataset.cli ?? '');
 // o volume prune diz exatamente o que leva, pela lista de volumes (no Docker só os anônimos, no Podman os nomeados também)
 function volumeNote(): string {
@@ -1355,9 +1392,10 @@ const pruneNote = (d: DiskUsage | undefined, note: string) => {
   return d ? `Libera até ${d.Reclaimable.split(' ')[0]}${idle > 0 ? `, de ${plural(idle, 'item sem uso', 'itens sem uso')}` : ''}. ${note}` : note;
 };
 
-// abrir a seção (e depois de uma limpeza ou remoção) relê o df e as listas que estiverem abertas
-async function loadDisk() {
-  await Promise.all([loadDf(), ...KINDS.filter(k => $<HTMLDetailsElement>(`#obj-${k}`).open).map(loadObjects)]);
+// abrir a aba (e depois de uma limpeza ou remoção) relê a lista dela e, se ela tem, o df
+async function loadTab() {
+  if (tab === 'containers') return;
+  await Promise.all([...(tab === 'networks' ? [] : [loadDf()]), loadObjects(tab)]);
 }
 
 async function loadDf() {
@@ -1368,26 +1406,29 @@ async function loadDf() {
   render();
 }
 
+// build cache fica na aba Imagens: é o que o build deixa junto com elas
 function renderDisk() {
-  const html = disk === null ? '<p class="py-3 text-muted">Carregando…</p>'
-    : typeof disk === 'string' ? `<p class="py-3 text-bad-fg">${esc(disk)}</p>`
-    : DISK.map(([type, k, label, what, note]) => {
-      const d = (disk as DiskUsage[]).find(d => d.Type === type), id = 'df-' + k, armed = arming?.id === id;
-      if (!d) return '';
-      const cls = armed ? 'bg-danger text-white ring-danger hover:bg-danger-hover' : 'text-fg hover:bg-hover', share = reclaimShare(d);
-      // a barra é o total; a parte em ciano, na ponta, é o que a limpeza libera
-      const bar = share === null ? '' : `<div aria-hidden="true" class="mt-1.5 h-1.5 w-full max-w-80 rounded-sm bg-line-strong overflow-hidden flex justify-end">
-          <span class="h-full bg-accent" style="width:${Math.round(share * 100)}%"></span></div>`;
-      return `<div class="flex flex-wrap items-center gap-x-3 gap-y-2 py-3 border-t border-line/70">
-        <div class="mr-auto min-w-0 flex-1"><div class="font-medium text-fg-strong">${label}</div>
-          <div class="font-mono text-xs text-muted">${esc(d.Size)} no total · ${esc(d.Reclaimable)} liberável · ${esc(d.TotalCount)} ${d.TotalCount === '1' ? 'item' : 'itens'}, ${esc(d.Active)} em uso</div>${bar}</div>
-        <button data-id="${id}" data-a="prune" ${diskBusy ? 'aria-disabled="true"' : ''} onclick="prune('${k}')"
-          aria-label="${armed ? `Confirmar limpeza de ${label.toLowerCase()}` : `Limpar ${label.toLowerCase()}`}" class="${BTN} ${cls}">${
-          diskBusy === k ? 'Limpando…' : armed ? `Limpar ${label.toLowerCase()}` : 'Limpar…'}</button>${armed ? cancelBtn(id, `limpeza de ${label.toLowerCase()}`) : ''}
-        ${armed ? armNote(`Apagar ${what}? ${esc(pruneNote(d, note))}`) : ''}
-      </div>`;
-    }).join('');
-  if (html !== diskHtml) $('#df').innerHTML = diskHtml = html;  // o render roda a cada poll: só troca se mudou
+  for (const panel of ['images', 'volumes'] as const) {
+    const html = disk === null ? '<p class="py-3 text-muted">Carregando…</p>'
+      : typeof disk === 'string' ? `<p class="py-3 text-bad-fg">${esc(disk)}</p>`
+      : DISK.filter(([, k]) => (k === 'volumes') === (panel === 'volumes')).map(([type, k, label, what, note]) => {
+        const d = (disk as DiskUsage[]).find(d => d.Type === type), id = 'df-' + k, armed = arming?.id === id;
+        if (!d) return '';
+        const cls = armed ? 'bg-danger text-white ring-danger hover:bg-danger-hover' : 'text-fg hover:bg-hover', share = reclaimShare(d);
+        // a barra é o total; a parte em ciano, na ponta, é o que a limpeza libera
+        const bar = share === null ? '' : `<div aria-hidden="true" class="mt-1.5 h-1.5 w-full max-w-80 rounded-sm bg-line-strong overflow-hidden flex justify-end">
+            <span class="h-full bg-accent" style="width:${Math.round(share * 100)}%"></span></div>`;
+        return `<div class="flex flex-wrap items-center gap-x-3 gap-y-2 py-3">
+          <div class="mr-auto min-w-0 flex-1"><div class="font-medium text-fg-strong">${label}</div>
+            <div class="font-mono text-xs text-muted">${esc(d.Size)} no total · ${esc(d.Reclaimable)} liberável · ${esc(d.TotalCount)} ${d.TotalCount === '1' ? 'item' : 'itens'}, ${esc(d.Active)} em uso</div>${bar}</div>
+          <button data-id="${id}" data-a="prune" ${diskBusy ? 'aria-disabled="true"' : ''} onclick="prune('${k}')"
+            aria-label="${armed ? `Confirmar limpeza de ${label.toLowerCase()}` : `Limpar ${label.toLowerCase()}`}" class="${BTN} ${cls}">${
+            diskBusy === k ? 'Limpando…' : armed ? `Limpar ${label.toLowerCase()}` : 'Limpar…'}</button>${armed ? cancelBtn(id, `limpeza de ${label.toLowerCase()}`) : ''}
+          ${armed ? armNote(`Apagar ${what}? ${esc(pruneNote(d, note))}`) : ''}
+        </div>`;
+      }).join('');
+    if (html !== diskHtml[panel]) $('#df-' + panel).innerHTML = diskHtml[panel] = html;  // o render roda a cada poll: só troca se mudou
+  }
 }
 
 async function prune(k: DiskKind) {
@@ -1404,10 +1445,10 @@ async function prune(k: DiskKind) {
     else toast(`Não deu para limpar ${label.toLowerCase()}: ${msg || 'erro sem mensagem'}`);
   } catch { toast('Sem resposta do servidor do Docker GUI.'); }
   diskBusy = '';
-  await loadDisk();
+  await loadTab();
 }
 
-// imagens, volumes e redes um a um: cada lista só vai ao docker quando é aberta (e depois de uma remoção)
+// imagens, volumes e redes um a um: cada lista só vai ao docker quando a aba abre (e depois de uma remoção)
 type ObjKind = 'images' | 'volumes' | 'networks';
 type Obj = Image | Volume | Network;
 const KINDS: ObjKind[] = ['images', 'volumes', 'networks'];
@@ -1504,16 +1545,15 @@ async function rmObj(k: ObjKind, r: string) {
     }
   } catch { toast('Sem resposta do servidor do Docker GUI.'); }
   objBusy = '';
-  // rede não ocupa disco; imagem e volume mudam o df também
-  await (k === 'networks' ? loadObjects(k) : loadDisk());
-  if (ok) (document.querySelector<HTMLElement>(`[data-id="${near}"][data-a="rm"]`) || $(`#obj-${k} > summary`)).focus();
+  await loadTab();  // imagem e volume mudam o df também
+  if (ok) (document.querySelector<HTMLElement>(`[data-id="${near}"][data-a="rm"]`) || $('#tab-' + k)).focus();
 }
 
 // o HTML gerado chama estas funções pelo nome (onclick="act(...)"); com módulos nada é global, então
 // esta lista é a interface completa entre o HTML e o código
 Object.assign(window, {
   act, afterClose, askNotify, bulkAct, clearFilters, clearSel, composeAct, copyAddr, copyExec, copyLogs, disarm, downloadLogs,
-  filterBy, followClick, loadDisk, loadHealth, loadInspect, loadMore, loadObjects, menuPick, openCreate, openShell, placeMenu, projectLogs,
+  filterBy, followClick, loadHealth, loadInspect, loadMore, menuPick, openCreate, openShell, pickTab, placeMenu, projectLogs,
   prune, refreshLogs, restartService, rmObj, runToastAction, selectAll, stackAct, toggleSel,
 });
 
@@ -1523,6 +1563,7 @@ $('#shell').addEventListener('cancel', e => e.preventDefault());
 // a barra de lote flutua embaixo: o toast sobe acima dela e a página ganha a mesma folga, para a última linha não ficar atrás
 new ResizeObserver(() => document.documentElement.style.setProperty('--dock', `${$('#bulk').offsetHeight && $('#bulk').offsetHeight + 8}px`))
   .observe($('#bulk'));  // Esc é do vim/less, não do modal
+$('#tabs').addEventListener('keydown', tabKey);
 $('#create-form').addEventListener('submit', createContainer);
 $('#run-public').addEventListener('change', createLabel);
 $('#create').addEventListener('close', () => $('#new').focus());
@@ -1539,6 +1580,12 @@ document.addEventListener('visibilitychange', () => {
   if (!document.hidden) load();
 });
 $('#notify').hidden = !canAsk();
-readHash(); render(); load(); connectEvents(); statsLoop();
+// voltar/avançar do navegador: a URL manda na aba e nos filtros
+addEventListener('popstate', () => {
+  // link novo colado nesta aba (#t=..., depois de reiniciar o servidor): só o carregamento lê o token
+  if (new URLSearchParams(location.hash.slice(1)).has('t')) return location.reload();
+  disarm(false); readHash(); showTab();
+});
+readHash(); showTab(); load(); connectEvents(); statsLoop();
 // o tique é sempre de 2 s; com o stream de eventos no ar, só consulta se a última consulta tem mais de 30 s
 setInterval(() => { if (watching() && Date.now() - lastLoad > (live ? POLL_LIVE : POLL) - 500) load(); }, POLL);

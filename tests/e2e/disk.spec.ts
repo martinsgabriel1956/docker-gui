@@ -9,28 +9,32 @@ const DF: DiskUsage[] = [
   { Type: 'Build Cache', TotalCount: '2', Active: '0', Size: '16.38kB', Reclaimable: '16.38kB' },
 ];
 
-const openDisk = async (page: import('@playwright/test').Page) => {
-  await page.locator('#disk > summary').click();
-  await expect(page.locator('#df')).toContainText('Imagens');
+// a aba abre e a lista dela chega (o df chega junto, nas abas que têm)
+const openTab = async (page: import('@playwright/test').Page, k: 'images' | 'volumes' | 'networks') => {
+  await page.locator(`#tab-${k}`).click();
+  await expect(page.locator(`#obj-${k}-list`)).not.toHaveText('Carregando…');
 };
 
-test('Uso de disco mostra imagens, volumes e build cache', async ({ page, gui }) => {
+test('cada aba mostra o uso de disco dela: build cache junto das imagens', async ({ page, gui }) => {
   await gui.open({ containers: [ctr('web')], df: DF });
-  await openDisk(page);
-  const df = page.locator('#df');
+  await openTab(page, 'images');
+  const df = page.locator('#df-images');
   await expect(df).toContainText('4.01GB no total · 1.2GB (29%) liberável · 10 itens, 7 em uso');
-  await expect(df).toContainText('Volumes');
   await expect(df).toContainText('Build cache');
-  await expect(df).not.toContainText('643.1kB');  // containers ficam na lista, não aqui
+  await expect(df).not.toContainText('Volumes');
+  await openTab(page, 'volumes');
+  await expect(page.locator('#df-volumes')).toContainText('1.147GB no total');
+  await expect(page.locator('#df-volumes')).not.toContainText('Build cache');
+  await expect(page.locator('main')).not.toContainText('643.1kB');  // containers ficam na lista, não aqui
 });
 
 test('limpar imagens usa a confirmação em 2 passos', async ({ page, gui }) => {
   await gui.open({ containers: [], df: DF });
-  await openDisk(page);
+  await openTab(page, 'images');
   await page.getByRole('button', { name: 'Limpar imagens' }).click();
   const confirm = page.getByRole('button', { name: 'Confirmar limpeza de imagens' });
   await expect(page.getByRole('button', { name: 'Cancelar limpeza de imagens' })).toBeFocused();
-  await expect(page.locator('#df')).toContainText('Apagar as imagens que nenhum container usa? Libera até 1.2GB, de 3 itens sem uso. Dá para baixar de novo. Esc cancela.');
+  await expect(page.locator('#df-images')).toContainText('Apagar as imagens que nenhum container usa? Libera até 1.2GB, de 3 itens sem uso. Dá para baixar de novo. Esc cancela.');
 
   await confirm.click();  // logo em seguida, < 600 ms: duplo clique não confirma
   await page.getByRole('button', { name: 'Cancelar limpeza de imagens' }).click();
@@ -41,18 +45,20 @@ test('limpar imagens usa a confirmação em 2 passos', async ({ page, gui }) => 
   await page.waitForTimeout(700);  // passado o intervalo anti duplo clique
   await confirm.click();
   await expect(page.locator('#toast')).toHaveText('Imagens: 1.2GB liberados.');
-  await expect(page.locator('#df')).toContainText('4.01GB no total · 0B liberável');
+  await expect(page.locator('#df-images')).toContainText('4.01GB no total · 0B liberável');
   expect(gui.read().pruned).toEqual(['image prune -a -f']);
 });
 
-test('armar a limpeza desarma a remoção de um container (e vice-versa)', async ({ page, gui }) => {
+test('trocar de aba desarma a remoção de um container', async ({ page, gui }) => {
   await gui.open({ containers: [ctr('cron', { State: 'exited', Status: 'Exited (0) 3 days ago' })], df: DF });
-  await openDisk(page);
   await page.locator('summary[aria-label="Mais ações para cron"]').click();
   await page.getByRole('button', { name: 'Remover…' }).click();
   await expect(page.getByRole('button', { name: 'Confirmar remoção de cron' })).toBeVisible();
+  await openTab(page, 'images');
+  await page.locator('#tab-containers').click();
+  await expect(page.getByRole('button', { name: 'Confirmar remoção de cron' })).toHaveCount(0);
+  await openTab(page, 'images');
   await page.getByRole('button', { name: 'Limpar build cache' }).click();
-  await expect(page.getByRole('button', { name: 'Confirmar remoção de cron' })).toBeHidden();
   await page.waitForTimeout(700);
   await page.getByRole('button', { name: 'Confirmar limpeza de build cache' }).click();
   await expect(page.locator('#toast')).toHaveText('Build cache: 16.38kB liberados.');
@@ -88,22 +94,18 @@ const OBJECTS = (): DockerState => ({
     { ID: sha('velha'), Name: 'velha', Driver: 'bridge', Scope: 'local' },
   ],
 });
-const openList = async (page: import('@playwright/test').Page, k: 'images' | 'volumes' | 'networks') => {
-  await page.locator(`#obj-${k} > summary`).click();
-  await expect(page.locator(`#obj-${k}-list`)).not.toHaveText('Carregando…');
-};
 const item = (page: import('@playwright/test').Page, k: string, text: string) =>
   page.locator(`#obj-${k}-list li`).filter({ hasText: text });
 
-test('imagens, volumes e redes só vão ao docker quando a lista é aberta', async ({ page, gui }) => {
+test('imagens, volumes e redes só vão ao docker quando a aba abre', async ({ page, gui }) => {
   const asked: string[] = [];
   page.on('request', r => asked.push(new URL(r.url()).pathname));
   await gui.open(OBJECTS());
-  await openDisk(page);
-  expect(asked.filter(p => /images|volumes|networks/.test(p))).toEqual([]);
+  await expect(page.locator('#count')).not.toHaveText('Carregando…');
+  expect(asked.filter(p => /images|volumes|networks|df/.test(p))).toEqual([]);
 
-  await openList(page, 'images');
-  await expect(page.locator('#obj-images > summary')).toHaveText('Imagens · 4');
+  await openTab(page, 'images');
+  await expect(page.locator('#tab-images')).toHaveText('Imagens · 4');
   await expect(item(page, 'images', 'postgres:16'))
     .toContainText(`${sha('postgres').slice(0, 12)} · 412MB · criada há 2 sem · em uso por db`);
   await expect(item(page, 'images', 'nginx:latest')).toContainText('em uso por web');  // parado também conta
@@ -112,12 +114,12 @@ test('imagens, volumes e redes só vão ao docker quando a lista é aberta', asy
   await expect(item(page, 'images', 'sem tag')).toContainText(`${sha('old').slice(0, 12)} · 12MB`);
   expect(asked.filter(p => /volumes|networks/.test(p))).toEqual([]);
 
-  await openList(page, 'volumes');
+  await openTab(page, 'volumes');
   await expect(item(page, 'volumes', 'pgdata')).toContainText('local · em uso por db');
   await expect(item(page, 'volumes', 'cache')).toContainText('sem uso');
   await expect(item(page, 'volumes', 'anônimo')).toContainText(ANON.slice(0, 12));
 
-  await openList(page, 'networks');
+  await openTab(page, 'networks');
   await expect(item(page, 'networks', 'loja_default')).toContainText('bridge · local · em uso por db');
   await expect(item(page, 'networks', 'padrão')).toContainText(['bridge', 'host', 'none']);
   for (const builtin of ['bridge', 'host', 'none'])
@@ -127,8 +129,7 @@ test('imagens, volumes e redes só vão ao docker quando a lista é aberta', asy
 
 test('remover um volume usa a confirmação em 2 passos', async ({ page, gui }) => {
   await gui.open(OBJECTS());
-  await openDisk(page);
-  await openList(page, 'volumes');
+  await openTab(page, 'volumes');
   await page.getByRole('button', { name: 'Remover o volume cache' }).click();
   const confirm = page.getByRole('button', { name: 'Confirmar remoção de o volume cache' });
   await expect(page.getByRole('button', { name: 'Cancelar remoção de o volume cache' })).toBeFocused();
@@ -143,7 +144,7 @@ test('remover um volume usa a confirmação em 2 passos', async ({ page, gui }) 
   await confirm.click();
   await expect(page.locator('#toast')).toHaveText('Volume cache removido.');
   await expect(item(page, 'volumes', 'cache')).toHaveCount(0);
-  await expect(page.locator('#obj-volumes > summary')).toHaveText('Volumes · 2');
+  await expect(page.locator('#tab-volumes')).toHaveText('Volumes · 2');
   expect(gui.read().removed).toEqual(['volume rm cache']);
   // o foco vai para o próximo item, não se perde no body
   await expect(page.getByRole('button', { name: 'Remover o volume pgdata' })).toBeFocused();
@@ -151,8 +152,7 @@ test('remover um volume usa a confirmação em 2 passos', async ({ page, gui }) 
 
 test('em uso: o erro do docker aparece explicado e o item fica', async ({ page, gui }) => {
   await gui.open(OBJECTS());
-  await openDisk(page);
-  await openList(page, 'volumes');
+  await openTab(page, 'volumes');
   await page.getByRole('button', { name: 'Remover o volume pgdata' }).click();
   await page.waitForTimeout(700);
   await page.getByRole('button', { name: 'Confirmar remoção de o volume pgdata' }).click();
@@ -164,7 +164,7 @@ test('em uso: o erro do docker aparece explicado e o item fica', async ({ page, 
   expect(gui.read().volumes!.map(v => v.Name)).toContain('pgdata');
 
   // imagem com duas tags: o docker exige -f, e a página diz o que fazer
-  await openList(page, 'images');
+  await openTab(page, 'images');
   await page.getByRole('button', { name: 'Remover a imagem app:latest, app:1.0' }).click();
   await page.waitForTimeout(700);
   await page.getByRole('button', { name: 'Confirmar remoção de a imagem app:latest, app:1.0' }).click();
@@ -175,22 +175,20 @@ test('em uso: o erro do docker aparece explicado e o item fica', async ({ page, 
 
 test('remover uma imagem atualiza a lista e o uso de disco', async ({ page, gui }) => {
   await gui.open(OBJECTS());
-  await openDisk(page);
-  await openList(page, 'images');
+  await openTab(page, 'images');
   await page.getByRole('button', { name: `Remover a imagem sem tag ${sha('old').slice(0, 12)}` }).click();
   await page.waitForTimeout(700);
   gui.update(s => { s.df![0].Size = '3.99GB'; });  // o que o docker system df diria depois
   await page.getByRole('button', { name: `Confirmar remoção de a imagem sem tag ${sha('old').slice(0, 12)}` }).click();
   await expect(page.locator('#toast')).toHaveText(`Imagem sem tag ${sha('old').slice(0, 12)} removida.`);
   await expect(item(page, 'images', 'sem tag')).toHaveCount(0);
-  await expect(page.locator('#df')).toContainText('3.99GB no total');
+  await expect(page.locator('#df-images')).toContainText('3.99GB no total');
   expect(gui.read().removed).toEqual([`image rm ${sha('old')}`]);
 });
 
 test('remover uma rede criada; as padrão não têm botão', async ({ page, gui }) => {
   await gui.open(OBJECTS());
-  await openDisk(page);
-  await openList(page, 'networks');
+  await openTab(page, 'networks');
   await page.getByRole('button', { name: 'Remover a rede velha' }).click();
   await expect(item(page, 'networks', 'velha')).toContainText('Apagar a rede velha? Esc cancela.');
   await page.waitForTimeout(700);
@@ -200,17 +198,47 @@ test('remover uma rede criada; as padrão não têm botão', async ({ page, gui 
   expect(gui.read().removed).toEqual([`network rm ${sha('velha')}`]);
 });
 
+test('a aba fica na URL, o voltar do navegador volta de aba e as setas andam entre elas', async ({ page, gui }) => {
+  await gui.open(OBJECTS());
+  await openTab(page, 'volumes');
+  await expect(page).toHaveURL(/#aba=volumes$/);
+  await expect(page.locator('#panel-containers')).toBeHidden();
+  await page.reload();  // o token já está no localStorage desta aba
+  await expect(page.getByRole('tab', { name: 'Volumes' })).toHaveAttribute('aria-selected', 'true');
+  await expect(item(page, 'volumes', 'pgdata')).toBeVisible();
+
+  await page.goBack();  // o reload não cria entrada: volta para a aba Containers de antes
+  await expect(page.locator('#panel-containers')).toBeVisible();
+  await expect(page.getByRole('tab', { name: 'Containers' })).toHaveAttribute('aria-selected', 'true');
+
+  await page.getByRole('tab', { name: 'Containers' }).focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(page.getByRole('tab', { name: 'Imagens' })).toBeFocused();
+  await expect(page.locator('#panel-images')).toBeVisible();
+  await page.keyboard.press('ArrowLeft');
+  await page.keyboard.press('ArrowLeft');  // dá a volta
+  await expect(page.getByRole('tab', { name: 'Redes' })).toBeFocused();
+  await expect(item(page, 'networks', 'velha')).toBeVisible();
+
+  // os atalhos da lista não mexem nos containers escondidos; / volta para a busca
+  await page.keyboard.press('a');
+  await expect(page.locator('#bulk')).toBeHidden();
+  await page.keyboard.press('/');
+  await expect(page.locator('#q')).toBeFocused();
+  await expect(page.locator('#panel-containers')).toBeVisible();
+});
+
 test('limpar volumes diz quais saem: no Docker, só os anônimos sem uso', async ({ page, gui }) => {
   await gui.open(OBJECTS());
-  await openDisk(page);
+  await openTab(page, 'volumes');
   await page.getByRole('button', { name: 'Limpar volumes' }).click();
-  await expect(page.locator('#df')).toContainText(`Vai apagar 1 volume anônimo sem uso: ${ANON.slice(0, 12)}…. Os dados deles se perdem. Os nomeados ficam.`);
+  await expect(page.locator('#df-volumes')).toContainText(`Vai apagar 1 volume anônimo sem uso: ${ANON.slice(0, 12)}…. Os dados deles se perdem. Os nomeados ficam.`);
 });
 
 test('cada categoria do disco tem a barra do que a limpeza libera', async ({ page, gui }) => {
-  await gui.open({ containers: [], df: DF });
-  await openDisk(page);
+  await gui.open({ ...OBJECTS(), df: DF });
+  await openTab(page, 'images');
   // 1.2GB (29%) das imagens; o build cache não traz a porcentagem e sai pela conta (tudo)
-  await expect(page.locator('#df span[style]').first()).toHaveAttribute('style', 'width:29%');
-  await expect(page.locator('#df span[style]').last()).toHaveAttribute('style', 'width:100%');
+  await expect(page.locator('#df-images span[style]').first()).toHaveAttribute('style', 'width:29%');
+  await expect(page.locator('#df-images span[style]').last()).toHaveAttribute('style', 'width:100%');
 });
