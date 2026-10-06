@@ -30,6 +30,28 @@ test('cabeçalho do projeto mostra só a ação principal, Logs e o ⋯', async 
   await expect(head.getByRole('button').filter({ visible: true })).toHaveText(['Parar tudo (2)', 'Logs']);
 });
 
+test('serviço do arquivo sem container aparece no cabeçalho e sobe pelo menu', async ({ page, gui }) => {
+  await gui.open({ containers: containers(), compose_services: { shop: ['api', 'db', 'worker'] } });
+  const head = page.locator('#rows [data-key="g:shop"]');
+  await expect(head).toContainText('sem container: worker');
+  await projectMenu(page).click();
+  await page.getByRole('button', { name: 'compose up worker do projeto shop' }).click();
+  await expect(page.locator('#toast')).toHaveText('shop-worker-1 está de pé.');
+  expect(gui.read().compose_calls).toEqual([[...PREFIX, 'up', '-d', '--', 'worker']]);
+  await expect(head).not.toContainText('sem container');
+  await expect(page.locator('#rows')).toContainText('shop-worker-1');
+});
+
+test('serviço que nasce pelo terminal sai da lista dos sem container', async ({ page, gui }) => {
+  await gui.open({ containers: containers(), compose_services: { shop: ['api', 'db', 'worker'] } });
+  const head = page.locator('#rows [data-key="g:shop"]');
+  await expect(head).toContainText('sem container: worker');
+  // um compose up worker pelo terminal: o container novo muda os serviços do projeto, e a lista é relida
+  gui.update(s => { s.containers.push(ctr('shop-worker-1', { Labels: shop('worker') })); });
+  await expect(page.locator('#rows')).toContainText('shop-worker-1');
+  await expect(head).not.toContainText('sem container');
+});
+
 test('compose up sobe o projeto a partir dos labels', async ({ page, gui }) => {
   await gui.open({ containers: containers() });
   await projectMenu(page).click();

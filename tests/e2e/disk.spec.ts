@@ -103,7 +103,7 @@ const OBJECTS = (): DockerState => ({
     { ID: `sha256:${sha('app')}`, Repository: 'app', Tag: '1.0', Size: '90MB', CreatedAt: created(1) },
     { ID: `sha256:${sha('old')}`, Repository: '<none>', Tag: '<none>', Size: '12MB', CreatedAt: created(100) },
   ],
-  volumes: [{ Name: 'cache', Driver: 'local' }, { Name: 'pgdata', Driver: 'local' }, { Name: ANON, Driver: 'local' }],
+  volumes: [{ Name: 'cache', Driver: 'local' }, { Name: 'pgdata', Driver: 'local', Size: '52.56MB' }, { Name: ANON, Driver: 'local' }],
   networks: [
     { ID: sha('bridge'), Name: 'bridge', Driver: 'bridge', Scope: 'local' },
     { ID: sha('host'), Name: 'host', Driver: 'host', Scope: 'local' },
@@ -134,7 +134,9 @@ test('imagens, volumes e redes só vão ao docker quando a aba abre', async ({ p
   expect(asked.filter(p => /volumes|networks/.test(p))).toEqual([]);
 
   await openTab(page, 'volumes');
-  await expect(item(page, 'volumes', 'pgdata')).toContainText('Driver: localEm uso por: db');
+  // o tamanho vem do system df -v; sem ele, um traço
+  await expect(item(page, 'volumes', 'pgdata')).toContainText('Driver: localTamanho: 52.56MBEm uso por: db');
+  await expect(item(page, 'volumes', 'cache')).toContainText('Tamanho: —');
   await expect(item(page, 'volumes', 'cache')).toContainText('Em uso por: nenhum container');
   await expect(item(page, 'volumes', 'anônimo')).toContainText(ANON.slice(0, 12));
 

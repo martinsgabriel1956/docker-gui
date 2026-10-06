@@ -214,7 +214,7 @@ export interface Image {
   Created: number | null;  // epoch em segundos
   Containers: string[];
 }
-export interface Volume { Name: string; Driver: string; Containers: string[] }
+export interface Volume { Name: string; Driver: string; Size: string; Containers: string[] }  // Size: "52.56MB" ou '' (podman)
 export interface Network { ID: string; Name: string; Driver: string; Scope: string; Builtin: boolean; Containers: string[] }
 
 // idade a partir do epoch (segundos), no estilo do dur(): "<1 min", "5 h", "3 sem", "4 meses"
@@ -231,12 +231,52 @@ export function errHint(msg: string): string {
   if (/container name .* is already in use/i.test(msg)) return t`Já existe um container com esse nome: escolha outro ou remova o antigo.`;
   if (/pull access denied|repository does not exist|manifest unknown|manifest for \S+ not found/i.test(msg)) return t`A imagem não existe no registry, ou falta login: confira o nome, a tag e o docker login.`;
   if (/no space left on device/i.test(msg)) return t`Disco cheio: libere espaço (aba Imagens, Limpar…).`;
+  if (/network \S+ not found/i.test(msg)) return t`A rede do container não existe mais: recrie o container (no compose, compose up).`;
   if (/exec format error/i.test(msg)) return t`A imagem é de outra arquitetura (ex.: arm64 num host amd64).`;
   if (/executable file not found|exec: .*no such file or directory/i.test(msg)) return t`O comando que a imagem roda não existe dentro dela.`;
   if (/referenced in multiple repositories/.test(msg)) return t`A imagem tem mais de uma tag: remova as tags pelo terminal, uma a uma.`;
   if (/dependent child images/.test(msg)) return t`Outras imagens foram construídas sobre esta.`;
   if (/in use|being used|active endpoints|associated containers/i.test(msg)) return t`Em uso: remova o container que usa (ou tire ele da rede) antes.`;
   return '';
+}
+
+// GET /api/history/<id>: o que o docker events ainda guarda do container (o servidor já põe docker e podman num
+// formato só). t em segundos; code só no die; health só no health_status
+export interface HistoryEvent { t: number; a: 'start' | 'die' | 'oom' | 'pause' | 'unpause' | 'health_status'; code: number | null; health: string }
+// [texto, tom] de um evento: "saiu com código 137 · morto à força ou sem memória (OOM)"
+export function eventText(e: HistoryEvent): [string, Tone] {
+  if (e.a === 'start') return [t`subiu`, 'ok'];
+  if (e.a === 'die') return e.code ? [t`saiu com código ${e.code}` + (EXIT[e.code] ? ` · ${EXIT[e.code]}` : ''), 'bad'] : [t`parou`, 'off'];
+  if (e.a === 'oom') return [t`ficou sem memória (OOM)`, 'bad'];
+  if (e.a === 'pause') return [t`pausado`, 'pause'];
+  if (e.a === 'unpause') return [t`retomado`, 'ok'];
+  return e.health === 'unhealthy' ? [t`healthcheck começou a falhar`, 'warn'] : e.health === 'healthy' ? [t`healthcheck voltou a passar`, 'ok']
+    : [t`healthcheck: ${e.health || '?'}`, 'check'];
+}
+// o podman avisa a saúde a cada probe, o docker só quando muda: fica só a mudança
+export function healthChanges(evs: HistoryEvent[]): HistoryEvent[] {
+  let last = '';
+  return evs.filter(e => {
+    if (e.a !== 'health_status') return true;
+    const changed = e.health !== last;
+    last = e.health;
+    return changed;
+  });
+}
+// "subiu 5× · caiu 4× · 1 OOM": o que importa num loop de reinício, sem ler a lista; '' sem nada disso
+export function historySummary(evs: HistoryEvent[]): string {
+  const n = (f: (e: HistoryEvent) => boolean) => evs.filter(f).length;
+  const up = n(e => e.a === 'start'), fell = n(e => e.a === 'die' && !!e.code), oom = n(e => e.a === 'oom');
+  return [up && t`subiu ${up}×`, fell && t`caiu ${fell}×`, oom && t`${oom} OOM`].filter(Boolean).join(' · ');
+}
+
+// saída do `docker top` -> linhas de células, a primeira com os títulos. O docker alinha as colunas com muitos espaços (a
+// CMD, que é a que importa, ia parar fora da tela): separa por 2+ espaços, e o que sobra depois da última coluna é do
+// comando. ponytail: um argumento com dois espaços seguidos no CMD vira dois; aqui ele volta junto, com dois espaços
+export function topTable(text: string): string[][] {
+  const [head, ...lines] = text.split('\n').filter(l => l.trim()).map(l => l.trim().split(/\s{2,}/));
+  if (!head) return [];
+  return [head, ...lines.map(c => [...c.slice(0, head.length - 1), c.slice(head.length - 1).join('  ')])];
 }
 
 // criar container: as mesmas regras do run_argv do servidor, para apontar o erro no campo antes de enviar.
@@ -323,13 +363,15 @@ export function bulkSummary(done: string, ok: number, fails: [name: string, msg:
 
 // nível de uma linha de log, para a cor: 'bad' (erro), 'warn' (aviso), 'dim' (debug) ou '' (o resto). Vale a palavra
 // solta em maiúsculas (ERROR, WARN: "0 errors" não é nível), Error:/Warning: começando a mensagem, level=... ou
-// "level":"..." de log estruturado, o [error] do nginx e o começo de um stack trace (ValueError:, java.io.IOException:,
-// Traceback do Python). ponytail: heurística; "No Error: found" sai vermelho
+// "level":"..." (também lvl e severity) de log estruturado, o "level":50 do pino e do bunyan (10 trace ... 60 fatal), o
+// [error] do nginx e o começo de um stack trace (ValueError:, java.io.IOException:, Traceback do Python).
+// ponytail: heurística; "No Error: found" sai vermelho
 export type LogLevel = 'bad' | 'warn' | 'dim' | '';
 const LEVEL: [Exclude<LogLevel, ''>, RegExp, RegExp][] = [
-  ['bad', /\b(FATAL|PANIC|CRIT(ICAL)?|ERROR|ERR|EMERG)\b|\b\w*(Error|Exception)\b:|\bTraceback \(most recent call last\)/, /\blevel["=: ]+"?(fatal|panic|crit|err)|\[(error|crit|alert|emerg)\]/i],
-  ['warn', /\bWARN(ING)?\b|\bWarning:/, /\blevel["=: ]+"?warn|\[warn\]/i],
-  ['dim', /\b(DEBUG|TRACE)\b/, /\blevel["=: ]+"?(debug|trace)|\[debug\]/i]];
+  ['bad', /\b(FATAL|PANIC|CRIT(ICAL)?|ERROR|ERR|EMERG)\b|\b\w*(Error|Exception)\b:|\bTraceback \(most recent call last\)/,
+   /\b(level|lvl|severity)["=: ]+"?(fatal|panic|crit|err|alert|emerg)|"level":\s*[56]0\b|\[(error|crit|alert|emerg)\]/i],
+  ['warn', /\bWARN(ING)?\b|\bWarning:/, /\b(level|lvl|severity)["=: ]+"?warn|"level":\s*40\b|\[warn\]/i],
+  ['dim', /\b(DEBUG|TRACE)\b/, /\b(level|lvl|severity)["=: ]+"?(debug|trace)|"level":\s*[12]0\b|\[debug\]/i]];
 export const logLevel = (line: string): LogLevel => LEVEL.find(([, word, mark]) => word.test(line) || mark.test(line))?.[0] ?? '';
 // linha que continua a de cima num stack trace (indentada, "Caused by:", "... 3 more"): ela herda o nível da linha que
 // abriu o trace, para "Só erros" mostrar o trace inteiro. Recebe a linha sem o prefixo do serviço e sem o timestamp

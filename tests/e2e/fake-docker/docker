@@ -11,18 +11,22 @@ ação que falha ou demora) viram dados. Campos extras por container, fora do fo
   fail    {ação: stderr}: a ação falha com essa mensagem
   delay   {ação: segundos}: a ação demora (para ver o estado "ocupado" na tela)
   after   {ação: {State, Status}}: estado depois da ação, no lugar do padrão (ex.: start que cai)
+  events  lista de eventos (linhas do `docker events --format {{json .}}`) que o histórico (`events --until`) devolve
+  top     texto do `docker top` (padrão: um sh); com o container parado, o top falha como o docker
   stats   {CPUPerc, MemUsage, MemPerc, NetIO, BlockIO}: linha do `docker stats`; sem ele, o container não
           aparece lá. Numa lista, cada `docker stats` usa o item seguinte (o último se repete), para a
           página ver os números mudando; "stats_calls", no topo do JSON, conta as leituras
 No topo do JSON, "ps_error" faz o `docker ps` (e o `docker events`) falhar (daemon fora do ar),
 "events_error" faz só o `docker events` falhar (como um podman sem events), "df" é a saída do
-`docker system df` (lista de linhas) e "pruned" registra os prunes que rodaram. O prune zera o
+`docker system df` (lista de linhas; o `df -v` dá o "Size" de cada volume de "volumes") e "pruned" registra os prunes que rodaram. O prune zera o
 "Reclaimable" da categoria e diz que liberou o que estava lá. "compose_fail" faz todo
 `docker compose` falhar com esse stderr, e cada `docker compose` grava o argv em "compose_calls".
 `compose up` (com ou sem --build) deixa os containers do projeto rodando, `down` os remove, `pull` não
 muda nada, `restart <serviço>` e `up --build --no-deps <serviço>` deixam os containers do serviço rodando (com
 "compose_recreate" ({State, Status}), o up --build troca cada container por um de outro ID, nesse estado) e `logs` junta os logs do projeto
-com o prefixo do serviço ("api-1  | "), como o compose; com --follow, acompanha como o `logs -f`.
+com o prefixo do serviço ("api-1  | "), como o compose; com --follow, acompanha como o `logs -f`. `config --services` lista
+"compose_services" ({projeto: [serviços]}; padrão: os serviços dos containers do projeto) e não entra em "compose_calls";
+`up -d -- <serviço>` de um serviço sem container cria um, rodando, com os labels do projeto.
 "images", "volumes" e "networks" são as linhas do `image ls`/`volume ls`/`network ls` (uma por tag, no caso
 das imagens). Quem usa cada uma sai do "inspect" dos containers (Image, Mounts, NetworkSettings.Networks): o rm
 recusa o que está em uso, com a mensagem do docker, e cada rm que deu certo fica em "removed".
@@ -205,15 +209,27 @@ def objects(state, args):
 
 
 def compose(state, args):
+    sub, rest = subcommand(args)
+    mine = project(state, args)
+    p = args[args.index("-p") + 1]
+    services = state.get("compose_services", {}).get(p) or sorted({labels(c).get("com.docker.compose.service") for c in mine})
+    if sub == "config":  # config --services: só leitura, fora do compose_calls
+        return state.get("compose_fail") or print("\n".join(services))
     state.setdefault("compose_calls", []).append(["compose", *args])
     if state.get("compose_fail"):
         return state["compose_fail"]
-    sub, rest = subcommand(args)
-    mine = project(state, args)
     if "--" in rest:  # restart <serviço> e up --build --no-deps <serviço>: só os containers daquele serviço
-        mine = [c for c in mine if labels(c).get("com.docker.compose.service") == rest[-1]]
+        svc = rest[-1]
+        mine = [c for c in mine if labels(c).get("com.docker.compose.service") == svc]
+        if not mine and sub == "up" and svc in services and project(state, args):  # serviço que nunca subiu: o compose cria
+            first = labels(project(state, args)[0])
+            name = f"{p}-{svc}-1"
+            state["containers"].append({"ID": hashlib.sha256(name.encode()).hexdigest()[:12], "Names": name, "Image": f"{svc}:latest",
+                                        "Ports": "", **RUNNING, "Labels": ",".join(
+                                            f"{k}={v}" for k, v in {**first, "com.docker.compose.service": svc}.items())})
+            return None
         if not mine:
-            return f"no such service: {rest[-1]}"
+            return f"no such service: {svc}"
     for c in mine:
         if sub == "down":
             state["containers"].remove(c)
@@ -252,6 +268,12 @@ def main(args):
     action = "remove" if cmd == "rm" else cmd
     if cmd == "logs" and "-f" in args:
         return follow(path, lambda state: [find(state, ref)], args=args)
+    if cmd == "events" and "--until" in args:  # histórico de um container: os eventos dele e termina
+        with locked(path, exclusive=False) as (_, state):
+            c = find(state, args[args.index("--filter") + 1].split("=", 1)[1])
+        for ev in c.get("events", []):
+            print(json.dumps(ev))
+        return None
     if cmd == "events":
         if args[1:] != ["--format", "{{json .}}", "--filter", "type=container"]:
             fail(f"events inesperado: {args}")
@@ -330,9 +352,16 @@ def main(args):
                     s = c["stats"]
                     s = s[min(n, len(s)) - 1] if isinstance(s, list) else s
                     print(json.dumps({"ID": c["ID"], "Name": c["Names"], **s}))
+        elif cmd == "system" and "-v" in args:  # system df -v --format '{{json .Volumes}}': o tamanho de cada volume
+            print(json.dumps([{"Name": v["Name"], "Size": v["Size"]} for v in state.get("volumes", []) if "Size" in v]))
         elif cmd == "system":
             for row in state.get("df", []):
                 print(json.dumps(row))
+        elif cmd == "top":
+            c = find(state, ref)
+            if c["State"] != "running":
+                fail(f"Error response from daemon: container {ref} is not running")
+            print(c.get("top", "UID   PID   PPID   C   STIME   TTY   TIME       CMD\nroot  4242  4220   0   10:00   ?     00:00:00   sh"))
         elif cmd in ("image", "volume", "network") and args[1] != "prune":
             if objects(state, args):
                 save(f, state)

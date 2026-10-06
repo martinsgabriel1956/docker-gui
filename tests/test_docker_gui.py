@@ -329,6 +329,53 @@ class LogsAndHealthTest(ServerTest):
         self.docker.return_value = fail("No such object\n")
         self.assertEqual(self.request("GET", f"/api/health/{HEX_ID}"), (500, "No such object"))
 
+    def test_history_asks_docker_events_until_now(self):
+        lines_ = [{"Type": "container", "Action": "start", "Actor": {"ID": HEX_ID, "Attributes": {"name": "web"}}, "time": 100},
+                  {"Type": "container", "Action": "exec_start: sh -c true", "time": 101},  # healthcheck: ruído
+                  {"Type": "container", "Action": "die", "Actor": {"Attributes": {"exitCode": "137"}}, "time": 102},
+                  {"Type": "container", "Action": "health_status: unhealthy", "time": 103}]
+        self.docker.return_value = ok(lines(lines_))
+        with mock.patch.object(docker_gui.time, "time", return_value=1700000000.5):
+            self.assertEqual(self.request("GET", f"/api/history/{HEX_ID}"), (200, [
+                {"t": 100, "a": "start", "code": None, "health": ""}, {"t": 102, "a": "die", "code": 137, "health": ""},
+                {"t": 103, "a": "health_status", "code": None, "health": "unhealthy"}]))
+        self.docker.assert_called_once_with("events", "--since", "24h", "--until", "1700000001", "--filter",
+                                            f"container={HEX_ID}", "--filter", "type=container", "--format", "{{json .}}")
+
+    def test_history_error(self):
+        self.docker.return_value = fail("Error: No such container\n")
+        self.assertEqual(self.request("GET", f"/api/history/{HEX_ID}"), (500, "Error: No such container"))
+
+    def test_top(self):
+        self.docker.return_value = ok("UID  PID  CMD\n70   104  postgres\n")
+        self.assertEqual(self.request("GET", f"/api/top/{HEX_ID}"), (200, "UID  PID  CMD\n70   104  postgres"))
+        self.docker.assert_called_once_with("top", HEX_ID)
+        self.docker.return_value = fail("Error response from daemon: container 0123 is not running\n")
+        self.assertEqual(self.request("GET", f"/api/top/{HEX_ID}"), (500, "Error response from daemon: container 0123 is not running"))
+
+
+class HistoryTest(unittest.TestCase):
+    """docker events (e podman events) -> só o que explica uma queda, no mesmo formato."""
+
+    def test_podman_names_and_fields(self):
+        out = lines([{"Status": "died", "Type": "container", "ContainerExitCode": 1, "time": 10},  # podman 4+
+                     {"Status": "health_status", "HealthStatus": "healthy", "time": 11},
+                     {"Status": "start", "Time": "2026-10-06T12:00:01.123456789-03:00"},  # podman 3: texto
+                     {"Status": "oom", "Time": "2026-10-06T15:00:02Z"}])
+        self.assertEqual(docker_gui.history(out), [
+            {"t": 10, "a": "die", "code": 1, "health": ""}, {"t": 11, "a": "health_status", "code": None, "health": "healthy"},
+            {"t": 1791298801.0, "a": "start", "code": None, "health": ""}, {"t": 1791298802.0, "a": "oom", "code": None, "health": ""}])
+
+    def test_noise_and_garbage_are_dropped(self):
+        out = "não é json\n[1]\n" + lines([{"Action": "kill", "time": 1}, {"Action": "start"}, {"Action": "start", "time": "ontem"},
+                                             {"Action": "die", "time": True}, {"status": "start", "time": 5}])
+        self.assertEqual(docker_gui.history(out), [{"t": 5, "a": "start", "code": None, "health": ""}])
+
+    def test_keeps_only_the_latest(self):
+        out = lines([{"Action": "start", "time": i} for i in range(docker_gui.HISTORY_MAX + 5)])
+        events = docker_gui.history(out)
+        self.assertEqual((len(events), events[0]["t"]), (docker_gui.HISTORY_MAX, 5))
+
 
 @unittest.skipUnless(os.name == "posix", "usa script shell")
 class StreamTest(ServerTest):
@@ -652,7 +699,8 @@ class ComposeTest(ServerTest):
                 *self.BASE, *args, timeout=docker_gui.COMPOSE_TIMEOUT)])
 
     def test_restart_one_service(self):
-        self.assertEqual(docker_gui.COMPOSE_SERVICE, {"restart": ["restart"], "build": ["up", "-d", "--build", "--no-deps"]})
+        self.assertEqual(docker_gui.COMPOSE_SERVICE, {"restart": ["restart"], "build": ["up", "-d", "--build", "--no-deps"],
+                                                      "svcup": ["up", "-d"]})
         self.docker.side_effect = [ok(self.PS), ok(stderr="Container shop-db-1  Started\n")]
         self.assertEqual(self.request("POST", "/api/compose/restart", body={**self.SHOP, "service": "db"}),
                          (200, "Container shop-db-1  Started"))
@@ -666,6 +714,35 @@ class ComposeTest(ServerTest):
                          (200, "Container shop-api-1  Started"))
         self.assertEqual(self.docker.call_args_list, [self.ps_call(), mock.call(
             *self.BASE, "up", "-d", "--build", "--no-deps", "--", "api", timeout=docker_gui.COMPOSE_TIMEOUT)])
+
+    def test_services_come_from_the_compose_file(self):
+        self.docker.side_effect = [ok(self.PS), ok("api\ndb\nworker\n")]
+        self.assertEqual(self.request("GET", "/api/compose/services?" + urlencode(self.SHOP)), (200, ["api", "db", "worker"]))
+        self.assertEqual(self.docker.call_args_list, [self.ps_call(), mock.call(*self.BASE, "config", "--services")])
+        self.docker.side_effect = [ok(self.PS), fail("open /srv/shop/compose.yml: no such file or directory\n")]
+        self.assertEqual(self.request("GET", "/api/compose/services?" + urlencode(self.SHOP)),
+                         (500, "open /srv/shop/compose.yml: no such file or directory"))
+        self.docker.reset_mock(side_effect=True)
+        self.docker.side_effect = [ok(self.PS)]
+        self.assertEqual(self.request("GET", "/api/compose/services?project=shop&dir=/srv/blog")[0], 404)
+        self.assertEqual(self.request("GET", "/api/compose/services?project=shop", )[0], 400)
+        self.assertEqual(self.request("GET", "/api/compose/services?" + urlencode(self.SHOP), token="x")[0], 401)
+
+    def test_up_one_service_without_container(self):
+        # o worker não tem container (não está nos labels), mas está no arquivo do compose
+        self.docker.side_effect = [ok(self.PS), ok("api\ndb\nworker\n"), ok(stderr="Container shop-worker-1  Started\n")]
+        self.assertEqual(self.request("POST", "/api/compose/svcup", body={**self.SHOP, "service": "worker"}),
+                         (200, "Container shop-worker-1  Started"))
+        self.assertEqual(self.docker.call_args_list, [self.ps_call(), mock.call(*self.BASE, "config", "--services"), mock.call(
+            *self.BASE, "up", "-d", "--", "worker", timeout=docker_gui.COMPOSE_TIMEOUT)])
+
+    def test_up_one_service_must_be_in_the_compose_file(self):
+        for config in (ok("api\ndb\n"), fail("yaml: line 3: bad indentation\n")):
+            self.docker.reset_mock()
+            self.docker.side_effect = [ok(self.PS), config]
+            status, _ = self.request("POST", "/api/compose/svcup", body={**self.SHOP, "service": "--help"})
+            self.assertEqual(status, 404 if config.returncode == 0 else 500)
+            self.assertEqual(self.docker.call_count, 2)  # o up não roda
 
     def test_restart_service_must_be_from_the_project(self):
         # web existe, mas é do blog; o resto não é serviço de ninguém (nem vira flag do compose)
@@ -1004,9 +1081,12 @@ INSPECT = [
 ]
 
 
-def fake_docker(out, ps="1111\n2222\n", inspect=None):
-    """docker falso por subcomando: o ls devolve `out`; ps -q e container inspect, os dois containers acima."""
+def fake_docker(out, ps="1111\n2222\n", inspect=None, df=None):
+    """docker falso por subcomando: o ls devolve `out`; ps -q e container inspect, os dois containers acima; o
+    system df -v (tamanho dos volumes), `df` ou nenhum volume."""
     def run(*args, **kw):
+        if args[0] == "system":
+            return df or ok("[]\n")
         if args[0] == "ps":
             return ok(ps) if isinstance(ps, str) else ps
         if args[:2] == ("container", "inspect"):
@@ -1033,12 +1113,27 @@ class ObjectsTest(ServerTest):
             mock.call("image", "ls", "--no-trunc", "--format", "{{json .}}"), mock.call("ps", "-a", "-q", "--no-trunc"),
             mock.call("container", "inspect", "1111", "2222")])
 
-    def test_volumes_with_usage(self):
-        self.docker.side_effect = fake_docker(lines(DOCKER_VOLUMES))
+    def test_volumes_with_usage_and_size(self):
+        df = ok(json.dumps([{"Name": "pgdata", "Size": "52.56MB", "Links": "1"}]) + "\n")  # system df -v, só os .Volumes
+        self.docker.side_effect = fake_docker(lines(DOCKER_VOLUMES), df=df)
         self.assertEqual(self.request("GET", "/api/volumes"), (200, [
-            {"Name": "pgdata", "Driver": "local", "Containers": ["db"]},  # o bind mount não conta
-            {"Name": "cache", "Driver": "local", "Containers": []}]))
+            {"Name": "pgdata", "Driver": "local", "Size": "52.56MB", "Containers": ["db"]},  # o bind mount não conta
+            {"Name": "cache", "Driver": "local", "Size": "", "Containers": []}]))
         self.assertEqual(self.docker.call_args_list[0], mock.call("volume", "ls", "--format", "{{json .}}"))
+        self.assertEqual(self.docker.call_args_list[-1], mock.call("system", "df", "-v", "--format", "{{json .Volumes}}",
+                                                                   timeout=docker_gui.ACTION_TIMEOUT))
+
+    def test_volume_sizes_are_optional(self):
+        # o df -v que falha ou responde outra coisa deixa a lista sem tamanho, mas não a derruba
+        for df in (fail("unknown flag: --verbose"), ok("não é json"), ok("null"), ok('[{"Size": "1MB"}]')):
+            self.docker.side_effect = fake_docker(lines(DOCKER_VOLUMES[1:]), df=df)
+            self.assertEqual(self.request("GET", "/api/volumes"), (200, [{"Name": "cache", "Driver": "local", "Size": "",
+                                                                         "Containers": []}]), df)
+
+    def test_only_volumes_ask_for_sizes(self):
+        self.docker.side_effect = fake_docker(lines(DOCKER_NETWORKS))
+        self.request("GET", "/api/networks")
+        self.assertNotIn("system", [c.args[0] for c in self.docker.call_args_list])
 
     def test_networks_mark_builtins(self):
         self.docker.side_effect = fake_docker(lines(DOCKER_NETWORKS))
@@ -1050,9 +1145,10 @@ class ObjectsTest(ServerTest):
         self.assertEqual(self.docker.call_args_list[0], mock.call("network", "ls", "--no-trunc", "--format", "{{json .}}"))
 
     def test_no_containers_skips_inspect(self):
-        self.docker.side_effect = fake_docker(lines(DOCKER_VOLUMES[1:]), ps="")
-        self.assertEqual(self.request("GET", "/api/volumes"), (200, [{"Name": "cache", "Driver": "local", "Containers": []}]))
-        self.assertEqual(self.docker.call_count, 2)
+        self.docker.side_effect = fake_docker(lines(DOCKER_VOLUMES[1:]), ps="", df=ok("[]"))
+        self.assertEqual(self.request("GET", "/api/volumes"), (200, [{"Name": "cache", "Driver": "local", "Size": "",
+                                                                     "Containers": []}]))
+        self.assertEqual(self.docker.call_count, 3)  # volume ls, ps e o df -v
 
     def test_container_gone_between_ps_and_inspect(self):
         # o docker sai com 1, mas o stdout tem os que ainda existem
@@ -1096,8 +1192,10 @@ class ObjectsTest(ServerTest):
                 {"ID": IMG2, "Tags": [], "Size": "999B", "Created": 1778649709, "Containers": []}]))
             self.assertEqual(self.docker.call_args_list[0], mock.call("image", "ls", "--no-trunc", "--format", "json"))
             self.docker.side_effect = fake_docker(json.dumps(volumes), inspect=inspect)
+            # o podman não junta --verbose e --format: sem tamanho, e o df -v nem roda
             self.assertEqual(self.request("GET", "/api/volumes"),
-                             (200, [{"Name": "pgdata", "Driver": "local", "Containers": ["db"]}]))
+                             (200, [{"Name": "pgdata", "Driver": "local", "Size": "", "Containers": ["db"]}]))
+            self.assertNotIn("system", [c.args[0] for c in self.docker.call_args_list])
             self.docker.side_effect = fake_docker(json.dumps(nets), inspect=inspect)
             self.assertEqual(self.request("GET", "/api/networks"), (200, [
                 {"ID": "f" * 64, "Name": "podman", "Driver": "bridge", "Scope": "local", "Builtin": True, "Containers": []},
@@ -1703,6 +1801,19 @@ class MainTest(unittest.TestCase):
             self.assertIn('data-lang="en"', docker_gui.PAGE)
         self.assertEqual(docker_gui.LANG, "pt")
 
+    def test_no_browser(self):
+        for argv, opened in ((["docker_gui.py"], 1), (["docker_gui.py", "--no-browser"], 0)):
+            with mock.patch.object(docker_gui, "CLI", docker_gui.CLI), mock.patch.object(docker_gui, "PAGE", docker_gui.PAGE), \
+                    mock.patch.object(docker_gui, "LANG", docker_gui.LANG), mock.patch.object(sys, "argv", argv), \
+                    mock.patch.object(docker_gui, "where", return_value=("docker", "", False)), \
+                    mock.patch.object(docker_gui, "serve") as serve, mock.patch.object(docker_gui.webbrowser, "open") as browser, \
+                    mock.patch("builtins.print") as out:
+                serve.return_value.server_address = ("127.0.0.1", 8765)
+                serve.return_value.serve_forever.side_effect = KeyboardInterrupt
+                docker_gui.main()
+                self.assertEqual(browser.call_count, opened, argv)
+                self.assertIn(f"#t={docker_gui.TOKEN}", out.call_args[0][0])  # o link sai no terminal nos dois casos
+
     def test_where_asks_docker_for_the_current_context(self):
         ok = lambda out: subprocess.CompletedProcess([], 0, out, "")
         with mock.patch.object(docker_gui, "CLI", ["docker"]), mock.patch.object(docker_gui, "docker") as run:
@@ -1781,6 +1892,17 @@ class RealDockerTest(WsClient, ServerTest):
         status, health = self.request("GET", f"/api/health/{short}")
         self.assertEqual((status, health), (200, None))  # sem HEALTHCHECK na imagem
 
+        # o pause/stop/start acima ficaram no docker events: o histórico os lê, e o stop (sleep morto) não tem código 0
+        status, hist = self.request("GET", f"/api/history/{short}")
+        self.assertEqual(status, 200, hist)
+        self.assertEqual([e["a"] for e in hist], ["start", "pause", "unpause", "die", "start"])
+        self.assertIsInstance(hist[-1]["t"], int)
+        self.assertIsInstance(hist[3]["code"], int)
+
+        status, top = self.request("GET", f"/api/top/{short}")
+        self.assertEqual(status, 200, top)
+        self.assertIn("sleep 300", top)
+
         status, insp = self.request("GET", f"/api/inspect/{short}")
         self.assertEqual((status, insp["Restart"]), (200, "no"))
         self.assertIn(["PATH", None], insp["Env"])  # mascarado
@@ -1843,7 +1965,9 @@ class RealDockerTest(WsClient, ServerTest):
             self.assertIn(name, busybox["Containers"])
             self.assertIsInstance(busybox["Created"], int)
             _, vols = self.request("GET", "/api/volumes")
-            self.assertIn({"Name": vol, "Driver": "local", "Containers": [name]}, vols)
+            mine = next(v for v in vols if v["Name"] == vol)
+            self.assertEqual((mine["Driver"], mine["Containers"]), ("local", [name]))
+            self.assertRegex(mine["Size"], r"^\d+(\.\d+)?[kMGT]?B$")  # do system df -v: volume vazio, "0B"
             status, err = self.request("POST", f"/api/rm/volume/{vol}")
             self.assertEqual(status, 500)
             self.assertIn("volume is in use", err)

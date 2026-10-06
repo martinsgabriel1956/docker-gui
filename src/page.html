@@ -30,7 +30,7 @@
           <dt><kbd>/</kbd></dt><dd>busca na lista de containers (nos logs, filtra as linhas)</dd>
           <dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>nas abas, troca de aba</dd>
           <dt><kbd>↑</kbd> <kbd>↓</kbd></dt><dd>anda entre os botões Logs</dd>
-          <dt><kbd>Enter</kbd></dt><dd>no botão Logs, abre os logs</dd>
+          <dt><kbd>Enter</kbd> <kbd>l</kbd></dt><dd>abre os logs do container da linha em foco</dd>
           <dt><kbd>r</kbd></dt><dd>reinicia o container da linha em foco (nos logs, o dos logs)</dd>
           <dt><kbd>b</kbd></dt><dd>reconstrói o serviço do compose da linha em foco (nos logs, o dos logs)</dd>
           <dt><kbd>x</kbd></dt><dd>marca ou desmarca a linha em foco</dd>
@@ -126,6 +126,16 @@
     <details id="insp" ontoggle="this.open && loadInspect()" class="text-xs">
       <summary class="cursor-pointer w-fit py-1 max-lg:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent text-muted hover:text-fg">Configuração: restart, redes, mounts e env</summary>
       <div id="insp-body" class="mt-1">Carregando…</div>
+    </details>
+    <!-- o que aconteceu com o container (docker events das últimas 24 h) e o que roda nele agora (docker top): o "por quê"
+         de um loop de reinício ou de uma CPU alta, sem sair dos logs. Cada um só vai ao docker quando abre (app.ts) -->
+    <details id="hist" ontoggle="this.open && loadHistory()" class="text-xs">
+      <summary class="cursor-pointer w-fit py-1 max-lg:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent text-muted hover:text-fg">Histórico: quando subiu, caiu ou mudou de saúde</summary>
+      <div id="hist-body" class="mt-1">Carregando…</div>
+    </details>
+    <details id="procs" ontoggle="this.open && loadTop()" class="text-xs">
+      <summary class="cursor-pointer w-fit py-1 max-lg:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent text-muted hover:text-fg">Processos (docker top)</summary>
+      <div id="procs-body" class="mt-1 max-h-48 overflow-auto text-fg-soft">Carregando…</div>
     </details>
   </div>
   <!-- ferramentas dos logs, coladas na caixa: filtro (só na página; / foca o campo, como a busca da lista) e o que fazer com o texto -->

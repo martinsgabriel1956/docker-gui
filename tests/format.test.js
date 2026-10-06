@@ -427,3 +427,53 @@ test('prunedVolumes: sem uso; no Docker só os anônimos, no Podman os nomeados 
 test('sparkPoints põe série sem variação no meio da altura', () => {
   assert.equal(f.sparkPoints([5, 5, 5], 48, 14, 3), '0,7 24,7 48,7');
 });
+
+test('logLevel entende o nível numérico do pino e do bunyan, e o severity e o lvl', () => {
+  assert.equal(f.logLevel('{"level":50,"time":1,"msg":"boom"}'), 'bad');
+  assert.equal(f.logLevel('{"level": 60,"msg":"fatal"}'), 'bad');
+  assert.equal(f.logLevel('{"level":40,"msg":"devagar"}'), 'warn');
+  assert.equal(f.logLevel('{"level":20,"msg":"detalhe"}'), 'dim');
+  assert.equal(f.logLevel('{"level":30,"msg":"ok"}'), '');
+  assert.equal(f.logLevel('{"level":500,"msg":"ok"}'), '');  // número que não é nível do pino
+  assert.equal(f.logLevel('{"severity":"ERROR","message":"x"}'), 'bad');
+  assert.equal(f.logLevel('lvl=warn msg=x'), 'warn');
+  assert.equal(f.logLevel('zoom level: 50'), '');  // fora de JSON, número não é nível
+});
+
+test('errHint explica a rede que sumiu e as falhas de porta também no podman', () => {
+  assert.match(f.errHint('Error response from daemon: network loja_default not found'), /rede do container não existe mais/);
+  assert.match(f.errHint('Error: rootlessport listen tcp 0.0.0.0:8080: bind: address already in use'), /porta do host já está em uso/);
+  assert.equal(f.errHint('Error response from daemon: No such container: abc'), '');
+});
+
+test('eventText e historySummary contam o que aconteceu com o container', () => {
+  const ev = (a, extra = {}) => ({t: 1, a, code: null, health: '', ...extra});
+  assert.deepEqual(f.eventText(ev('die', {code: 137})), ['saiu com código 137 · morto à força ou sem memória (OOM)', 'bad']);
+  assert.deepEqual(f.eventText(ev('die', {code: 3})), ['saiu com código 3', 'bad']);
+  assert.deepEqual(f.eventText(ev('die', {code: 0})), ['parou', 'off']);
+  assert.deepEqual(f.eventText(ev('start')), ['subiu', 'ok']);
+  assert.deepEqual(f.eventText(ev('oom')), ['ficou sem memória (OOM)', 'bad']);
+  assert.deepEqual(f.eventText(ev('health_status', {health: 'unhealthy'})), ['healthcheck começou a falhar', 'warn']);
+  assert.deepEqual(f.eventText(ev('health_status', {health: 'starting'})), ['healthcheck: starting', 'check']);
+  const loop = [ev('start'), ev('die', {code: 1}), ev('start'), ev('oom'), ev('die', {code: 137}), ev('start'), ev('die', {code: 0})];
+  assert.equal(f.historySummary(loop), 'subiu 3× · caiu 2× · 1 OOM');  // o die com 0 é parada, não queda
+  assert.equal(f.historySummary([ev('pause')]), '');
+});
+
+test('healthChanges deixa só a mudança de saúde (o podman avisa a cada probe)', () => {
+  const h = (health, t) => ({t, a: 'health_status', code: null, health});
+  const evs = [h('healthy', 1), h('healthy', 2), {t: 3, a: 'start', code: null, health: ''}, h('healthy', 4), h('unhealthy', 5), h('unhealthy', 6)];
+  assert.deepEqual(f.healthChanges(evs).map(e => e.t), [1, 3, 5]);
+});
+
+test('topTable separa as colunas do docker top e deixa o comando inteiro', () => {
+  const out = 'UID                 PID                 PPID                C                   STIME               TTY                 TIME                CMD\n'
+            + '70                  104584              104560              0                   out05               ?                   00:00:02            postgres: background writer\n'
+            + 'root                7                   1                   0                   10:00               ?                   00:00:00            sh -c echo  oi\n';
+  assert.deepEqual(f.topTable(out), [
+    ['UID', 'PID', 'PPID', 'C', 'STIME', 'TTY', 'TIME', 'CMD'],
+    ['70', '104584', '104560', '0', 'out05', '?', '00:00:02', 'postgres: background writer'],
+    ['root', '7', '1', '0', '10:00', '?', '00:00:00', 'sh -c echo  oi'],
+  ]);
+  assert.deepEqual(f.topTable(''), []);
+});
