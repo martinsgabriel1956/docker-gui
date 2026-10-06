@@ -1594,7 +1594,7 @@ class PipeTerminalTest(TerminalTest):
         # seta para cima (sem TTY não faz nada), "a" apagado com Backspace
         sock.sendall(client_frame(b"echo $((6*7))\x1b[Aa\x7f\r"))
         out, notes = self.until(f, b"42\r\n")
-        self.assertEqual(notes, [docker_gui.NO_TTY])  # a página mostra o aviso
+        self.assertEqual(notes, [docker_gui.tr("Conectado, mas sem TTY: a imagem não tem o script, que o terminal usa no Windows. Comandos simples funcionam; vim, less, Tab e Ctrl+C não. Feche pelo ×.")])  # a página mostra o aviso
         self.assertIn(b"echo $((6*7))a\b \b\r\n", out)  # eco feito pelo servidor
         sock.sendall(client_frame(b'{"cols": 100, "rows": 30}', 1))  # sem TTY, nada a redimensionar
         sock.sendall(client_frame(b"exit\r"))

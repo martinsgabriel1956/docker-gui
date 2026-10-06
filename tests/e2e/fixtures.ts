@@ -92,7 +92,8 @@ export class Gui {
     this.write(state);
     const proc = spawn('python3', ['-u', 'docker_gui.py', '--port', '0'], {
       cwd: ROOT,
-      env: { ...process.env, PATH: FAKE_BIN + path.delimiter + process.env.PATH, FAKE_DOCKER_STATE: this.file, BROWSER: 'true', ...env },
+      env: { ...process.env, PATH: FAKE_BIN + path.delimiter + process.env.PATH, FAKE_DOCKER_STATE: this.file, BROWSER: 'true',
+             DOCKER_GUI_LANG: 'pt', ...env },
     });
     this.proc = proc;
     this.url = await new Promise<string>((resolve, reject) => {
@@ -100,7 +101,7 @@ export class Gui {
       const timer = setTimeout(() => reject(new Error(`servidor não subiu: ${out}`)), 10_000);
       const onData = (d: Buffer) => {
         out += d;
-        const m = out.match(/Docker GUI em (http:\S+)/);
+        const m = out.match(/Docker GUI (?:em|at) (http:\S+)/);
         if (m) { clearTimeout(timer); resolve(m[1]); }
       };
       proc.stdout!.on('data', onData);

@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import html
 import json
+import locale
 import os
 import re
 import secrets
@@ -58,8 +59,6 @@ TTY_INIT = ("stty cols {} rows {} 2>/dev/null; printf '\\033_docker-gui:tty=%s\\
 TTY_MARK = re.compile(rb"\x1b_docker-gui:(?:notty|tty=([^\x1b]*))\x1b\\")
 # mudar o tamanho do TTY de outro processo faz o kernel mandar o SIGWINCH ao programa em primeiro plano (vim...)
 TTY_RESIZE = ["sh", "-c", 'stty cols "$1" rows "$2" < "$3"', "sh"]
-NO_TTY = ("Conectado, mas sem TTY: a imagem não tem o script, que o terminal usa no Windows. Comandos simples "
-          "funcionam; vim, less, Tab e Ctrl+C não. Feche pelo ×.")
 KEYS = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|O.|.)?", re.DOTALL)  # setas, F1, Alt+...: sem TTY não fazem nada
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"  # constante do RFC 6455 para o Sec-WebSocket-Accept
 WS_MAX = 1 << 20  # maior mensagem aceita do navegador (colar um texto grande cabe com folga)
@@ -115,13 +114,73 @@ ENV_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,255}")
 VOLUME_RE = re.compile(r"([a-zA-Z0-9][a-zA-Z0-9_.-]{1,127}):((?:/[A-Za-z0-9._@+-]+)+)")
 MAX_IMAGE, MAX_ENV_VALUE, MAX_ITEMS = 512, 4096, 64
 
+# língua do que sai para a página e para o terminal: main() troca pelo --lang, o DOCKER_GUI_LANG ou o locale do
+# sistema. O texto fica em pt-BR no código; em inglês, pela tabela (o tests/test_i18n.py confere que nada falta nela)
+LANG = "pt"
+EN = {
+    "{cli} {cmd} não respondeu em {timeout}s. O daemon está travado?": "{cli} {cmd} did not respond in {timeout}s. Is the daemon stuck?",
+    "corpo inválido: esperado um objeto JSON": "invalid body: expected a JSON object",
+    "campo não suportado: {fields}": "unsupported field: {fields}",
+    "{key}: tipo inválido": "{key}: invalid type",
+    "{key}: no máximo {n} itens": "{key}: at most {n} items",
+    "imagem inválida: use repo[:tag] ou repo@sha256:…": "invalid image: use repo[:tag] or repo@sha256:…",
+    "nome inválido: 2 a 128 caracteres entre letras, números, _ . e -, começando por letra ou número":
+        "invalid name: 2 to 128 characters among letters, digits, _ . and -, starting with a letter or digit",
+    "restart inválido: use {options}": "invalid restart: use {options}",
+    "porta inválida: {port} (use portaDoHost:portaDoContainer[/tcp|udp], de 1 a 65535)":
+        "invalid port: {port} (use hostPort:containerPort[/tcp|udp], from 1 to 65535)",
+    "porta do host repetida: {port}": "host port repeated: {port}",
+    "variável inválida: {var} (use CHAVE=valor; a chave com letras, números e _)":
+        "invalid variable: {var} (use KEY=value; the key with letters, digits and _)",
+    "{key}: valor com NUL ou maior que {n} caracteres": "{key}: value with NUL or longer than {n} characters",
+    "variável repetida: {key}": "variable repeated: {key}",
+    "volume inválido: use nome:/caminho/no/container (só volume nomeado, nunca pasta do host)":
+        "invalid volume: use name:/path/in/container (named volumes only, never a host folder)",
+    "token ausente ou inválido": "missing or invalid token",
+    "tail inválido": "invalid tail",
+    "since inválido": "invalid since",
+    "não consegui ler quando o container subiu": "could not read when the container started",
+    "formato inesperado na saída do {cmd}": "unexpected format in the output of {cmd}",
+    "streams de eventos demais abertos": "too many event streams open",
+    "{name} é uma rede padrão e não pode ser removida": "{name} is a default network and cannot be removed",
+    "Conectado, mas sem TTY: a imagem não tem o script, que o terminal usa no Windows. Comandos simples funcionam; vim, less, Tab e Ctrl+C não. Feche pelo ×.":
+        "Connected, but without a TTY: the image has no script, which the terminal uses on Windows. Simple commands work; vim, less, Tab and Ctrl+C don't. Close with ×.",
+    "corpo inválido: esperado JSON de até {n} KiB": "invalid body: expected JSON of up to {n} KiB",
+    "corpo inválido: esperado {project, dir, service}": "invalid body: expected {project, dir, service}",
+    "corpo inválido: esperado {project, dir}": "invalid body: expected {project, dir}",
+    "query inválida: esperado ?project=...&dir=...": "invalid query: expected ?project=...&dir=...",
+    "projeto compose não encontrado": "compose project not found",
+    "serviço não encontrado no projeto": "service not found in the project",
+    "Porta {port} ocupada. Escolha outra com --port.": "Port {port} is in use. Pick another with --port.",
+    "Portas {first}-{last} ocupadas. Escolha uma com --port.": "Ports {first}-{last} are in use. Pick one with --port.",
+    "Gerenciador de containers Docker no navegador. Só stdlib + docker CLI.": "Docker container manager in the browser. Stdlib + docker CLI only.",
+    "porta local (padrão: {port}, ou a próxima livre)": "local port (default: {port}, or the next free one)",
+    "CLI de containers: docker ou podman (padrão: $DOCKER_GUI_CLI ou docker)": "container CLI: docker or podman (default: $DOCKER_GUI_CLI or docker)",
+    "contexto do docker (docker --context); sem ele vale o DOCKER_CONTEXT ou o atual": "docker context (docker --context); without it, DOCKER_CONTEXT or the current one",
+    "língua da página e das mensagens: pt ou en (padrão: $DOCKER_GUI_LANG ou o locale do sistema)":
+        "language of the page and messages: pt or en (default: $DOCKER_GUI_LANG or the system locale)",
+    "Docker GUI em {url}  (Ctrl+C para sair)": "Docker GUI at {url}  (Ctrl+C to quit)",
+}
+
+
+def tr(s):
+    return EN.get(s, s) if LANG == "en" else s
+
+
+def system_lang(env=os.environ):
+    """pt ou en: o DOCKER_GUI_LANG ou, sem ele, o locale (LC_ALL, LC_MESSAGES, LANG; no Windows, o do sistema)."""
+    v = (env.get("DOCKER_GUI_LANG") or env.get("LC_ALL") or env.get("LC_MESSAGES") or env.get("LANG")
+         or locale.getlocale()[0] or "")
+    return "pt" if v.lower().startswith(("pt", "portuguese")) else "en"
+
 
 def docker(*args, timeout=READ_TIMEOUT):
     # sem timeout, um daemon travado prende uma thread por poll (a cada 2s, por aba) para sempre
     try:
         return subprocess.run([*CLI, *args], capture_output=True, text=True, timeout=timeout, check=False)
     except subprocess.TimeoutExpired:
-        return subprocess.CompletedProcess(args, 124, "", f"{CLI[0]} {args[0]} não respondeu em {timeout}s. O daemon está travado?")
+        return subprocess.CompletedProcess(args, 124, "", tr("{cli} {cmd} não respondeu em {timeout}s. O daemon está travado?").format(
+            cli=CLI[0], cmd=args[0], timeout=timeout))
 
 
 def from_podman(c):
@@ -312,27 +371,27 @@ def run_argv(body):
     algo não bater. Cada valor é conferido por regex ou lista fixa e vai num item só do argv: nada passa por shell,
     e nenhum começa com "-", então não vira flag. O "--" antes da imagem fecha as opções de vez."""
     if not isinstance(body, dict):
-        raise TypeError("corpo inválido: esperado um objeto JSON")
+        raise TypeError(tr("corpo inválido: esperado um objeto JSON"))
     extra = sorted(set(body) - RUN_FIELDS)
     if extra:  # --privileged, command... não são ignorados em silêncio: o pedido inteiro é recusado
-        raise ValueError(f"campo não suportado: {', '.join(extra)}")
+        raise ValueError(tr("campo não suportado: {fields}").format(fields=", ".join(extra)))
 
     def field(key, kind, default):
         v = body.get(key, default)
         if not isinstance(v, kind) or (kind is list and not all(isinstance(x, str) for x in v)):
-            raise TypeError(f"{key}: tipo inválido")
+            raise TypeError(tr("{key}: tipo inválido").format(key=key))
         if kind is list and len(v) > MAX_ITEMS:
-            raise ValueError(f"{key}: no máximo {MAX_ITEMS} itens")
+            raise ValueError(tr("{key}: no máximo {n} itens").format(key=key, n=MAX_ITEMS))
         return v
 
     image, name, volume = field("image", str, ""), field("name", str, ""), field("volume", str, "")
     restart, public = field("restart", str, "no"), field("all_interfaces", bool, False)
     if len(image) > MAX_IMAGE or not IMAGE_RE.fullmatch(image):
-        raise ValueError("imagem inválida: use repo[:tag] ou repo@sha256:…")
+        raise ValueError(tr("imagem inválida: use repo[:tag] ou repo@sha256:…"))
     if name and not NAME_RE.fullmatch(name):
-        raise ValueError("nome inválido: 2 a 128 caracteres entre letras, números, _ . e -, começando por letra ou número")
+        raise ValueError(tr("nome inválido: 2 a 128 caracteres entre letras, números, _ . e -, começando por letra ou número"))
     if restart not in RESTART:
-        raise ValueError(f"restart inválido: use {', '.join(RESTART)}")
+        raise ValueError(tr("restart inválido: use {options}").format(options=", ".join(RESTART)))
     args = ["run", "-d", f"--restart={restart}", *([f"--name={name}"] if name else [])]
 
     # sem o IP na frente, o docker publica em 0.0.0.0 (a rede toda, passando por cima do ufw/firewalld)
@@ -340,10 +399,10 @@ def run_argv(body):
     for p in field("ports", list, []):
         m = PORT_RE.fullmatch(p)
         if not m or not all(1 <= int(n) <= 65535 for n in m.groups()[:2]):
-            raise ValueError(f"porta inválida: {p[:40]!r} (use portaDoHost:portaDoContainer[/tcp|udp], de 1 a 65535)")
+            raise ValueError(tr("porta inválida: {port} (use portaDoHost:portaDoContainer[/tcp|udp], de 1 a 65535)").format(port=repr(p[:40])))
         host, ctr, proto = int(m[1]), int(m[2]), m[3] or "tcp"
         if (host, proto) in seen:
-            raise ValueError(f"porta do host repetida: {host}/{proto}")
+            raise ValueError(tr("porta do host repetida: {port}").format(port=f"{host}/{proto}"))
         seen.add((host, proto))
         args += ["-p", f"{ip}:{host}:{ctr}/{proto}"]
 
@@ -352,18 +411,18 @@ def run_argv(body):
         k, eq, v = e.partition("=")
         # sem "=", o docker copiaria a variável do ambiente do próprio docker_gui.py para o container
         if not eq or not ENV_RE.fullmatch(k):
-            raise ValueError(f"variável inválida: {e[:60]!r} (use CHAVE=valor; a chave com letras, números e _)")
+            raise ValueError(tr("variável inválida: {var} (use CHAVE=valor; a chave com letras, números e _)").format(var=repr(e[:60])))
         if "\0" in v or len(v) > MAX_ENV_VALUE:
-            raise ValueError(f"{k}: valor com NUL ou maior que {MAX_ENV_VALUE} caracteres")
+            raise ValueError(tr("{key}: valor com NUL ou maior que {n} caracteres").format(key=k, n=MAX_ENV_VALUE))
         if k in keys:
-            raise ValueError(f"variável repetida: {k}")
+            raise ValueError(tr("variável repetida: {key}").format(key=k))
         keys.add(k)
         args += ["-e", f"{k}={v}"]
 
     if volume:
         m = len(volume) <= 1024 and VOLUME_RE.fullmatch(volume)
         if not m or any(s in (".", "..") for s in m[2].split("/")):
-            raise ValueError("volume inválido: use nome:/caminho/no/container (só volume nomeado, nunca pasta do host)")
+            raise ValueError(tr("volume inválido: use nome:/caminho/no/container (só volume nomeado, nunca pasta do host)"))
         # --mount com type=volume em vez de -v: o tipo fica explícito e nunca é interpretado como bind mount
         args.append(f"--mount=type=volume,source={m[1]},target={m[2]}")
     return [*args, "--", image]
@@ -481,7 +540,7 @@ class Handler(BaseHTTPRequestHandler):
         if m:  # EventSource não manda header custom: só estas rotas (GET, só leitura) aceitam o token na query
             qs = parse_qs(query, keep_blank_values=True)  # "?tail=" vazio é inválido, não o padrão
             if not hmac.compare_digest(qs.get("t", [""])[0].encode(), TOKEN.encode()):
-                return self.send(401, '"token ausente ou inválido"')
+                return self.send(401, json.dumps(tr("token ausente ou inválido")))
             if m[2]:
                 return self.stream_events()
             tail = self.log_tail(qs)
@@ -493,7 +552,7 @@ class Handler(BaseHTTPRequestHandler):
             base = self.compose_query(query)
             return None if base is None else self.stream_logs([*base, *COMPOSE_LOGS, *tail, *since, "--follow"])
         if not self.token_ok():
-            return self.send(401, '"token ausente ou inválido"')
+            return self.send(401, json.dumps(tr("token ausente ou inválido")))
         if path == "/api/compose/logs":  # todos os serviços juntos, em ordem cronológica
             qs = parse_qs(query, keep_blank_values=True)
             tail = self.log_tail(qs)
@@ -553,7 +612,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             return self.send(200, json.dumps(normalize(rows(r.stdout), use)))
         except (ValueError, KeyError, TypeError, AttributeError):  # versão do CLI com outro formato: erro legível
-            return self.send(500, json.dumps(f"formato inesperado na saída do {CLI[0]} {' '.join(argv)}"))
+            return self.send(500, json.dumps(tr("formato inesperado na saída do {cmd}").format(cmd=" ".join([CLI[0], *argv]))))
 
     def stream_logs(self, args):
         """Server-Sent Events com o `docker logs -f` (ou o `compose logs -f` do projeto, de argv já validado):
@@ -596,7 +655,7 @@ class Handler(BaseHTTPRequestHandler):
         """SSE com o `docker events`: só um aviso "mudou" por leva de eventos (o evento em si não sai do servidor);
         quem busca a lista é a página. Um "end" quando o docker events termina (daemon fora do ar, podman sem events)."""
         if not EVENTS_SLOTS.acquire(blocking=False):
-            return self.send(503, '"streams de eventos demais abertos"')
+            return self.send(503, json.dumps(tr("streams de eventos demais abertos")))
         # o podman nem sempre entende {{json .}}; o "json" dele já sai um JSON por linha, como o do docker
         fmt = "json" if os.path.basename(CLI[0]).startswith("podman") else "{{json .}}"
         try:
@@ -635,7 +694,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.host_ok():
             return self.send(403, '"forbidden"')
         if not self.token_ok():
-            return self.send(401, '"token ausente ou inválido"')
+            return self.send(401, json.dumps(tr("token ausente ou inválido")))
         m = re.fullmatch(r"/api/compose/(\w+)", self.path)
         if m and (m[1] in COMPOSE or m[1] in COMPOSE_SERVICE):
             return self.compose(m[1])
@@ -661,7 +720,7 @@ class Handler(BaseHTTPRequestHandler):
             if r.returncode:
                 return self.send(500, json.dumps(r.stderr.strip()))
             if r.stdout.strip() in BUILTIN_NETWORKS:
-                return self.send(403, json.dumps(f"{r.stdout.strip()} é uma rede padrão e não pode ser removida"))
+                return self.send(403, json.dumps(tr("{name} é uma rede padrão e não pode ser removida").format(name=r.stdout.strip())))
         r = docker(*REMOVE[kind][1], ref, timeout=ACTION_TIMEOUT)
         self.send(500 if r.returncode else 200, json.dumps((r.stderr if r.returncode else r.stdout).strip()))
 
@@ -676,7 +735,7 @@ class Handler(BaseHTTPRequestHandler):
         # o WebSocket do navegador não manda header custom: o token vem na query (o servidor não loga URLs)
         token = parse_qs(self.path.partition("?")[2]).get("t", [""])[0]
         if not hmac.compare_digest(token.encode(), TOKEN.encode()):
-            return self.send(401, '"token ausente ou inválido"')
+            return self.send(401, json.dumps(tr("token ausente ou inválido")))
         key = self.headers.get("Sec-WebSocket-Key")
         if self.headers.get("Upgrade", "").lower() != "websocket" or not key:
             return self.send(400, '"esperava um WebSocket"')
@@ -792,7 +851,8 @@ class Handler(BaseHTTPRequestHandler):
                         mode["pts"] = pts.decode() if re.fullmatch(rb"/dev/pts/\d+", pts) else None
                         marked.set()
                         if m and not mode["tty"]:
-                            send(NO_TTY.encode(), 1)  # texto: a página mostra no status
+                            # texto: a página mostra no status
+                            send(tr("Conectado, mas sem TTY: a imagem não tem o script, que o terminal usa no Windows. Comandos simples funcionam; vim, less, Tab e Ctrl+C não. Feche pelo ×.").encode(), 1)
                         data = head.replace(m[0], b"", 1) if m else head
                     if data:
                         send(data if mode["tty"] else data.replace(b"\n", b"\r\n"))  # sem TTY, ninguém faz o \r
@@ -849,7 +909,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             body = self.json_body()
         except ValueError:  # UnicodeDecodeError e JSONDecodeError também são ValueError
-            return self.send(400, json.dumps(f"corpo inválido: esperado JSON de até {MAX_BODY // 1024} KiB"))
+            return self.send(400, json.dumps(tr("corpo inválido: esperado JSON de até {n} KiB").format(n=MAX_BODY // 1024)))
         try:
             args = run_argv(body)
         except (ValueError, TypeError) as e:
@@ -869,8 +929,8 @@ class Handler(BaseHTTPRequestHandler):
             if not all(isinstance(v, str) and v for v in key):
                 raise ValueError
         except (ValueError, KeyError, TypeError):
-            return self.send(400, '"corpo inválido: esperado {project, dir, service}"' if service
-                             else '"corpo inválido: esperado {project, dir}"')
+            return self.send(400, json.dumps(tr("corpo inválido: esperado {project, dir, service}") if service
+                                             else tr("corpo inválido: esperado {project, dir}")))
         base = self.compose_base(*key)
         if base is None:
             return None
@@ -883,7 +943,7 @@ class Handler(BaseHTTPRequestHandler):
         """?tail= (padrão 500) -> as flags da whitelist LOG_TAIL; fora dela responde 400 e devolve None."""
         tail = qs.get("tail", ["500"])
         if len(tail) != 1 or tail[0] not in LOG_TAIL:
-            self.send(400, '"tail inválido"')
+            self.send(400, json.dumps(tr("tail inválido")))
             return None
         return LOG_TAIL[tail[0]]
 
@@ -896,7 +956,7 @@ class Handler(BaseHTTPRequestHandler):
         if len(since) == 1 and since[0] in LOG_SINCE:
             return LOG_SINCE[since[0]]
         if since != ["start"] or not cid:
-            self.send(400, '"since inválido"')
+            self.send(400, json.dumps(tr("since inválido")))
             return None
         # {{json}}: o docker guarda o StartedAt como texto e o podman como data; em JSON os dois saem RFC 3339
         r = docker("inspect", "--format", "{{json .State.StartedAt}}", cid)
@@ -905,7 +965,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             started = None
         if not isinstance(started, str) or not STARTED_RE.fullmatch(started):
-            self.send(500, json.dumps(r.stderr.strip() or "não consegui ler quando o container subiu"))
+            self.send(500, json.dumps(r.stderr.strip() or tr("não consegui ler quando o container subiu")))
             return None
         return ["--since", started]
 
@@ -914,7 +974,7 @@ class Handler(BaseHTTPRequestHandler):
         q = parse_qs(query)
         key = [q.get(k, [""])[0] for k in ("project", "dir")]
         if not all(key):
-            self.send(400, '"query inválida: esperado ?project=...&dir=..."')
+            self.send(400, json.dumps(tr("query inválida: esperado ?project=...&dir=...")))
             return None
         return self.compose_base(*key)
 
@@ -928,10 +988,10 @@ class Handler(BaseHTTPRequestHandler):
             return None
         rows = [row for row in map(json.loads, r.stdout.splitlines()) if row[:2] == [project, wd]]
         if not rows:
-            self.send(404, '"projeto compose não encontrado"')
+            self.send(404, json.dumps(tr("projeto compose não encontrado")))
             return None
         if service is not None and service not in {row[3] for row in rows}:
-            self.send(404, '"serviço não encontrado no projeto"')
+            self.send(404, json.dumps(tr("serviço não encontrado no projeto")))
             return None
         return ["compose", "-p", project, "--project-directory", wd,
                 *[a for f in rows[0][2].split(",") if f for a in ("-f", f)]]
@@ -948,8 +1008,8 @@ def serve(port):
         except OSError as e:
             if e.errno != errno.EADDRINUSE:
                 raise
-    sys.exit(f"Porta {port} ocupada. Escolha outra com --port." if port is not None
-             else f"Portas {PORT}-{PORT + 9} ocupadas. Escolha uma com --port.")
+    sys.exit(tr("Porta {port} ocupada. Escolha outra com --port.").format(port=port) if port is not None
+             else tr("Portas {first}-{last} ocupadas. Escolha uma com --port.").format(first=PORT, last=PORT + 9))
 
 
 def where():
@@ -970,22 +1030,27 @@ def where():
 
 
 def main():
-    global CLI, PAGE
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--port", type=int, help=f"porta local (padrão: {PORT}, ou a próxima livre)")
+    global CLI, LANG, PAGE
+    LANG = system_lang()  # já vale para a ajuda do --help; o --lang, se vier, troca depois
+    ap = argparse.ArgumentParser(description=tr("Gerenciador de containers Docker no navegador. Só stdlib + docker CLI."))
+    ap.add_argument("--port", type=int, help=tr("porta local (padrão: {port}, ou a próxima livre)").format(port=PORT))
     ap.add_argument("--cli", default=os.environ.get("DOCKER_GUI_CLI", "docker"),
-                    help="CLI de containers: docker ou podman (padrão: $DOCKER_GUI_CLI ou docker)")
-    ap.add_argument("--context", help="contexto do docker (docker --context); sem ele vale o DOCKER_CONTEXT ou o atual")
+                    help=tr("CLI de containers: docker ou podman (padrão: $DOCKER_GUI_CLI ou docker)"))
+    ap.add_argument("--context", help=tr("contexto do docker (docker --context); sem ele vale o DOCKER_CONTEXT ou o atual"))
+    ap.add_argument("--lang", choices=("pt", "en"),
+                    help=tr("língua da página e das mensagens: pt ou en (padrão: $DOCKER_GUI_LANG ou o locale do sistema)"))
     args = ap.parse_args()
+    LANG = args.lang or LANG
     CLI = [args.cli, *(["--context", args.context] if args.context else [])]
     # o "Copiar docker exec" da página usa o mesmo binário e contexto; o rótulo do daemon fica à vista no cabeçalho
     label, host, remote = where()
     PAGE = PAGE.replace('data-cli="docker"', f'data-cli="{html.escape(" ".join(map(shlex.quote, CLI)))}" '
-                        f'data-where="{html.escape(label)}" data-host="{html.escape(host)}"{" data-remote" if remote else ""}')
+                        f'data-where="{html.escape(label)}" data-host="{html.escape(host)}"{" data-remote" if remote else ""} '
+                        f'data-lang="{LANG}"')
     server = serve(args.port)
     # o token vai no #fragmento: não é enviado ao servidor nem fica em log; a página guarda e o tira da URL
     url = f"http://localhost:{server.server_address[1]}/#t={TOKEN}"
-    print(f"Docker GUI em {url}  (Ctrl+C para sair)")
+    print(tr("Docker GUI em {url}  (Ctrl+C para sair)").format(url=url))
     webbrowser.open(url)
     try:
         server.serve_forever()
@@ -1265,18 +1330,483 @@ PAGE = r"""<!doctype html>
 <script>
 "use strict";
 (() => {
+  // src/en.json
+  var en_default = {
+    " (somente leitura)": " (read-only)",
+    " O docker system df conta {0}: a lista pode ter vindo antes do df. Troque de aba e volte para ler de novo.": " docker system df counts {0}: the list may have arrived before the df. Switch tabs and come back to read it again.",
+    " Os nomeados ficam.": " Named ones stay.",
+    " e mais {0}": " and {0} more",
+    " e {0}": " and {0}",
+    " · healthcheck falhando": " · healthcheck failing",
+    " · saudável": " · healthy",
+    " · verificando saúde": " · checking health",
+    "(oculto)": "(hidden)",
+    "(opcional)": "(optional)",
+    "(opcional; sem ele, o docker sorteia um)": "(optional; without it, docker picks one)",
+    "(sem logs)": "(no logs)",
+    "(sem saída)": "(no output)",
+    "+ Novo container": "+ New container",
+    ", daemon remoto em {0}": ", remote daemon at {0}",
+    ", de {0}": ", from {0}",
+    ", rede e PID do host, devices e comando ou entrypoint próprio. Para isso, use o terminal.": ", host network and PID, devices and a custom command or entrypoint. For those, use the terminal.",
+    ", {0} fora do filtro": ", {0} outside the filter",
+    ". Se a imagem faltar, ela é baixada antes.": ". If the image is missing, it is pulled first.",
+    "0 containers": "0 containers",
+    ": só esta máquina acessa.": ": only this machine can reach them.",
+    "; e mais {0}": "; and {0} more",
+    "A imagem tem mais de uma tag: remova as tags pelo terminal, uma a uma.": "The image has more than one tag: remove the tags one by one in the terminal.",
+    "A lista muda assim que o docker avisa (docker events)": "The list changes as soon as docker reports it (docker events)",
+    "A porta {0} do host aparece duas vezes.": "Host port {0} appears twice.",
+    "Abra o link com {0} que aparece no terminal onde você rodou {1}. O token muda a cada execução.": "Open the link with {0} shown in the terminal where you ran {1}. The token changes on every run.",
+    "Abrir no navegador": "Open in the browser",
+    "Abrir terminal": "Open terminal",
+    "Abrir {0}:{1} em nova aba (porta {2} do container)": "Open {0}:{1} in a new tab (container port {2})",
+    "Acompanhar ao vivo": "Follow live",
+    "Ao vivo": "Live",
+    "Ao vivo parado às {0}{1}": "Live stopped at {0}{1}",
+    "Ao vivo · reconectando…": "Live · reconnecting…",
+    "Ao vivo · {0} e as novas": "Live · {0} and new ones",
+    "Ao vivo, o histórico vai até {0} linhas. Para carregar tudo, desligue o ao vivo.": "While live, history goes up to {0} lines. To load everything, turn live off.",
+    "Apagar {0}? {1}": "Delete {0}? {1}",
+    Atalho: "Shortcut",
+    "Atalho: barra (/) volta para esta busca; interrogação (?) mostra todos os atalhos.": "Shortcut: slash (/) comes back to this search; question mark (?) shows all shortcuts.",
+    Atalhos: "Shortcuts",
+    "Atalhos do teclado": "Keyboard shortcuts",
+    "Atenção: qualquer máquina que alcance a sua (Wi-Fi, VPN, rede do escritório) passa a acessar essas portas, e o Docker abre as portas por cima do firewall do sistema (ufw, firewalld). Só marque se precisar mesmo.": "Warning: any machine that can reach yours (Wi-Fi, VPN, office network) can then access these ports, and Docker opens them past the system firewall (ufw, firewalld). Only check this if you really need it.",
+    Atualizar: "Refresh",
+    "Avisos e erros": "Warnings and errors",
+    Ações: "Actions",
+    "Ações em lote": "Bulk actions",
+    "Baixando…": "Pulling…",
+    "Baixar .log": "Download .log",
+    "Build cache": "Build cache",
+    "Cancela sozinho em 8 s.": "Cancels by itself in 8 s.",
+    "Cancela sozinho em 8 segundos.": "Cancels by itself in 8 seconds.",
+    Cancelar: "Cancel",
+    "Cancelar (Esc)": "Cancel (Esc)",
+    "Cancelar {0}": "Cancel {0}",
+    "Carregando…": "Loading…",
+    "Carregar 2.000 linhas": "Load 2,000 lines",
+    "Carregar tudo": "Load everything",
+    "Carregar {0} linhas": "Load {0} lines",
+    "Clique em Derrubar {0} para derrubar o projeto.": "Click Take down {0} to take the project down.",
+    "Clique em Limpar para apagar {0}.": "Click Clean up to delete {0}.",
+    "Clique em Remover para apagar {0} de vez.": "Click Remove to delete {0} for good.",
+    "Conectado. Esc vai para o terminal; feche pelo ×.": "Connected. Esc goes to the terminal; close with ×.",
+    "Conectando…": "Connecting…",
+    "Conferindo quais volumes saem…": "Checking which volumes go…",
+    "Configuração: restart, redes, mounts e env": "Configuration: restart, networks, mounts and env",
+    "Confirmar compose down do projeto {0}": "Confirm compose down of project {0}",
+    "Confirmar limpeza de {0}": "Confirm cleanup of {0}",
+    "Confirmar remoção de {0}": "Confirm removal of {0}",
+    "Confirmação cancelada: passaram 8 s sem o segundo clique. Nada foi apagado.": "Confirmation canceled: 8 s went by without the second click. Nothing was deleted.",
+    Containers: "Containers",
+    "Containers parados": "Stopped containers",
+    "Copiado: {0}": "Copied: {0}",
+    Copiar: "Copy",
+    "Copiar docker exec": "Copy docker exec",
+    "Copiar {0}:{1}": "Copy {0}:{1}",
+    "Copiar {0}:{1} (porta {2}/{3} do container)": "Copy {0}:{1} (container port {2}/{3})",
+    "Cria e inicia com": "Creates and starts with",
+    Criada: "Created",
+    "Criado, nunca iniciado": "Created, never started",
+    "Criando {0}…": "Creating {0}…",
+    "Criando… (baixa a imagem se faltar)": "Creating… (pulls the image if missing)",
+    "Criar e expor na rede": "Create and expose to the network",
+    "Criar e iniciar": "Create and start",
+    "Daemon em {0}": "Daemon at {0}",
+    "Daemon remoto {0} {1}: tudo o que você fizer aqui vale lá.": "Remote daemon {0} {1}: everything you do here happens there.",
+    "Demais containers": "Other containers",
+    "Derrubando…": "Taking down…",
+    "Derrubar {0}": "Take down {0}",
+    "Derrubar {0}? {1}": "Take down {0}? {1}",
+    "Desatualizado · dados de {0}": "Out of date · data from {0}",
+    "Desde o começo": "From the start",
+    "Desde que subiu": "Since it started",
+    "Detalhes técnicos": "Technical details",
+    "Disco: {0} lidos · {1} gravados": "Disk: {0} read · {1} written",
+    "Docker GUI": "Docker GUI",
+    "Docker fora do ar": "Docker is down",
+    "Dá para baixar de novo.": "It can be pulled again.",
+    "Em uso por": "Used by",
+    "Em uso: remova o container que usa (ou tire ele da rede) antes.": "In use: remove the container using it (or take it off the network) first.",
+    "Erro sem mensagem.": "Error without a message.",
+    "Esc cancela.": "Esc cancels.",
+    "Escolha uma das opções da lista.": "Pick one of the options in the list.",
+    Escopo: "Scope",
+    "Esta aba não tem o token do Docker GUI.": "This tab doesn't have the Docker GUI token.",
+    "Este container não existe mais.": "This container no longer exists.",
+    "Este projeto não tem mais containers.": "This project has no containers left.",
+    "Faixa de portas: {0} do host → {1} do container": "Port range: {0} on the host → {1} in the container",
+    "Falhou ao {0} · ver erro": "Failed to {0} · see error",
+    Fechar: "Close",
+    "Fechar logs": "Close logs",
+    "Fechar terminal": "Close terminal",
+    "Ficam de fora, para a GUI não ampliar o acesso ao host: pasta do host (bind mount),": "Left out, so the GUI never widens access to the host: host folders (bind mounts),",
+    "Filtrar containers por nome, imagem ou projeto": "Filter containers by name, image or project",
+    "Filtrar linhas dos logs": "Filter log lines",
+    "Filtrar linhas…": "Filter lines…",
+    "Filtrar por estado": "Filter by state",
+    "Filtrar por nome, imagem ou projeto…": "Filter by name, image or project…",
+    Imagem: "Image",
+    "Imagem inválida: use repo[:tag] ou repo@sha256:…, com o caminho em minúsculas.": "Invalid image: use repo[:tag] or repo@sha256:…, with the path in lowercase.",
+    "Imagem:": "Image:",
+    Imagens: "Images",
+    "Informe a imagem, ex.: nginx:1.27 ou ghcr.io/acme/api:1.4.": "Enter the image, e.g. nginx:1.27 or ghcr.io/acme/api:1.4.",
+    "Iniciando…": "Starting…",
+    Iniciar: "Start",
+    "Iniciar de novo": "Start again",
+    "Iniciar tudo": "Start all",
+    "Libera até {0}{1}. {2}": "Frees up to {0}{1}. {2}",
+    "Limpando {0}…": "Cleaning up {0}…",
+    "Limpando…": "Cleaning up…",
+    "Limpar filtros": "Clear filters",
+    "Limpar seleção": "Clear selection",
+    "Limpar {0}": "Clean up {0}",
+    "Limpar…": "Clean up…",
+    "Linhas em branco e com": "Blank lines and lines starting with",
+    Logs: "Logs",
+    "Logs copiados.": "Logs copied.",
+    "Logs do projeto {0}": "Logs of project {0}",
+    "Logs ·": "Logs ·",
+    "Mais ações do projeto {0}": "More actions for project {0}",
+    "Mais ações dos logs": "More log actions",
+    "Mais ações para {0}": "More actions for {0}",
+    "Mais ações para {0} nos logs": "More actions for {0} in the logs",
+    Memória: "Memory",
+    "Memória: {0} ({1})": "Memory: {0} ({1})",
+    "Morto · só dá para remover": "Dead · can only be removed",
+    "Nada no log ainda. As linhas novas aparecem aqui assim que o container escrever.": "Nothing in the log yet. New lines show up here as soon as the container writes.",
+    "Nada no log nesse período.": "Nothing in the log for this period.",
+    "Nenhum container ainda. Crie um em “Novo container” ou com {0}.": "No containers yet. Create one with “New container” or with {0}.",
+    "Nenhum container parado para remover.": "No stopped container to remove.",
+    "Nenhum container selecionado": "No containers selected",
+    "Nenhum container {0}agora.": "No containers {0}right now.",
+    "Nenhum container {0}corresponde a “{1}”.": "No containers {0}match “{1}”.",
+    "Nenhum probe rodou ainda.": "No probe has run yet.",
+    "Nenhum volume sem uso para apagar.": "No unused volume to delete.",
+    "Nenhum volume.": "No volumes.",
+    "Nenhuma imagem.": "No images.",
+    "Nenhuma linha": "No lines",
+    "Nenhuma ocorrência": "No matches",
+    "Nenhuma rede.": "No networks.",
+    "No daemon remoto {0}: ": "On the remote daemon {0}: ",
+    "No máximo {0} portas.": "At most {0} ports.",
+    "No máximo {0} variáveis.": "At most {0} variables.",
+    Nome: "Name",
+    "Nome inválido: 2 a 128 caracteres entre letras, números, _ . e -, começando por letra ou número.": "Invalid name: 2 to 128 characters among letters, digits, _ . and -, starting with a letter or digit.",
+    "Notificar quando algo der problema": "Notify me when something breaks",
+    "Novo container": "New container",
+    "Não consegui carregar os logs. O servidor do Docker GUI está rodando?": "Could not load the logs. Is the Docker GUI server running?",
+    "Não consegui conectar ao servidor do Docker GUI.": "Could not connect to the Docker GUI server.",
+    "Não consegui copiar.": "Could not copy.",
+    "Não consegui copiar. O comando é: {0}": "Could not copy. The command is: {0}",
+    "Não consegui falar com o Docker.": "Could not talk to Docker.",
+    "Não consegui ler a lista de volumes; o prune leva os sem uso.": "Could not read the volume list; the prune takes the unused ones.",
+    "Não consegui ler a lista. O servidor do Docker GUI está rodando?": "Could not read the list. Is the Docker GUI server running?",
+    "Não consegui ler a lista: {0}": "Could not read the list: {0}",
+    "Não consegui ler o healthcheck.": "Could not read the healthcheck.",
+    "Não consegui ler o healthcheck: {0}": "Could not read the healthcheck: {0}",
+    "Não consegui ler o inspect.": "Could not read the inspect.",
+    "Não consegui ler o inspect: {0}": "Could not read the inspect: {0}",
+    "Não consegui ler o uso de disco. O servidor do Docker GUI está rodando?": "Could not read the disk usage. Is the Docker GUI server running?",
+    "Não consegui ler o uso de disco: {0}": "Could not read the disk usage: {0}",
+    "Não consegui ler os logs: {0}": "Could not read the logs: {0}",
+    "Não deu para criar {0}.": "Could not create {0}.",
+    "Não deu para criar {0}. {1}": "Could not create {0}. {1}",
+    "Não deu para limpar {0}: {1}": "Could not clean up {0}: {1}",
+    "Não deu para remover {0} {1}. {2}": "Could not remove {0} {1}. {2}",
+    "Não deu para {0} {1}. O erro ficou na linha.": "Could not {0} {1}. The error is on its row.",
+    "Nível das linhas": "Line level",
+    "O daemon está rodando? Verifique com {0}.": "Is the daemon running? Check with {0}.",
+    "O docker só remove container parado (sem -f)": "docker only removes stopped containers (without -f)",
+    "O erro ficou na lista.": "The error is shown in the list.",
+    "O próximo build fica mais lento.": "The next build will be slower.",
+    "O servidor do Docker GUI parou de responder.": "The Docker GUI server stopped responding.",
+    "O valor de {0} tem o caractere NUL ou passa de {1} caracteres.": "The value of {0} has the NUL character or is longer than {1} characters.",
+    "Ocultar valores": "Hide values",
+    "Os dados dele se perdem.": "Its data is lost.",
+    "Os dados deles se perdem.": "Their data is lost.",
+    "Os logs deles se perdem; os volumes ficam.": "Their logs are lost; volumes stay.",
+    "Os volumes não são afetados.": "Volumes are not affected.",
+    "Os {0} containers estão de pé.": "All {0} containers are up.",
+    "Outras imagens foram construídas sobre esta.": "Other images were built on top of this one.",
+    "Parado há {0}": "Stopped {0} ago",
+    "Parando…": "Stopping…",
+    Parar: "Stop",
+    "Parar tudo": "Stop all",
+    "Pare antes de remover": "Stop before removing",
+    Pausado: "Paused",
+    "Pausando…": "Pausing…",
+    Pausar: "Pause",
+    Período: "Period",
+    Portas: "Ports",
+    "Precisa de atenção · {0}": "Needs attention · {0}",
+    "Projeto compose · {0} de {1} rodando · todos os serviços": "Compose project · {0} of {1} running · all services",
+    "Pronto: aviso quando um container entrar na faixa de atenção, mesmo com a aba em segundo plano.": "Done: you'll be notified when a container enters the attention band, even with the tab in the background.",
+    "Publicar em todas as interfaces (": "Publish on all interfaces (",
+    "Pular para a lista": "Skip to the list",
+    "Reconstruindo…": "Rebuilding…",
+    "Reconstruir serviço {0}": "Rebuild service {0}",
+    Rede: "Network",
+    "Rede: {0} recebidos · {1} enviados": "Network: {0} received · {1} sent",
+    Redes: "Networks",
+    "Reiniciando em loop · saiu com código {0}": "Restart loop · exited with code {0}",
+    "Reiniciando…": "Restarting…",
+    Reiniciar: "Restart",
+    "Reiniciar (r)": "Restart (r)",
+    "Reiniciar serviço {0}": "Restart service {0}",
+    "Reiniciar tudo": "Restart all",
+    "Reiniciar {0}": "Restart {0}",
+    "Remove {0} e as redes do projeto. Os volumes ficam; para subir de novo, use compose up no terminal.": "Removes {0} and the project's networks. Volumes stay; to bring it back up, run compose up in the terminal.",
+    "Removendo {0} {1}…": "Removing {0} {1}…",
+    "Removendo…": "Removing…",
+    Remover: "Remove",
+    "Remover (indisponível: pare o container antes)": "Remove (unavailable: stop the container first)",
+    "Remover {0}": "Remove {0}",
+    "Remover {0} de vez? Os volumes ficam.": "Remove {0} for good? Volumes stay.",
+    "Remover {0}? {1}": "Remove {0}? {1}",
+    "Remover…": "Remove…",
+    Restart: "Restart",
+    "Retomando…": "Resuming…",
+    Retomar: "Resume",
+    "Revelar valores": "Reveal values",
+    "Rodando há {0}{1}": "Up for {0}{1}",
+    "Rode {0} de novo; a página volta sozinha.": "Run {0} again; the page comes back by itself.",
+    "Rode {0} e entre de novo na sessão.": "Run {0} and log in again.",
+    "Saiu com código {0} há {1}": "Exited with code {0} {1} ago",
+    "Saída dos logs": "Log output",
+    "Selecionar todos os visíveis": "Select all visible",
+    "Selecionar {0}": "Select {0}",
+    "Sem dados ainda.": "No data yet.",
+    "Sem o docker events: a lista é relida a cada 2 s": "Without docker events: the list is re-read every 2 s",
+    "Sem permissão para notificar. Dá para liberar nas configurações do site, no navegador.": "No permission to notify. You can allow it in the browser's site settings.",
+    "Sem projeto compose": "No compose project",
+    "Sem resposta do servidor do Docker GUI.": "No response from the Docker GUI server.",
+    Serviço: "Service",
+    "Sessão encerrada.": "Session ended.",
+    "Seu usuário não tem acesso ao Docker.": "Your user has no access to Docker.",
+    Seções: "Sections",
+    Status: "Status",
+    "Subindo…": "Bringing up…",
+    "Só erros": "Errors only",
+    "Só no loopback do daemon remoto {0}: não abre daqui": "Only on the loopback of the remote daemon {0}: can't be opened from here",
+    Tamanho: "Size",
+    "Terminal ·": "Terminal ·",
+    "Todos os níveis": "All levels",
+    "Todos os serviços": "All services",
+    "Totais desde que o container subiu": "Totals since the container started",
+    "Tudo carregado": "All loaded",
+    "Use nome:/caminho/no/container, ex.: dados:/var/lib/postgresql/data. Pasta do host (bind mount) não é aceita.": "Use name:/path/in/container, e.g. data:/var/lib/postgresql/data. Host folders (bind mounts) are not accepted.",
+    "Vai apagar {0}: {1}{2}. Os dados deles se perdem.": "Will delete {0}: {1}{2}. Their data is lost.",
+    "Vai remover {0}. {1}": "Will remove {0}. {1}",
+    "Variáveis de ambiente": "Environment variables",
+    "Ver logs": "View logs",
+    "Ver último healthcheck": "See last healthcheck",
+    Volume: "Volume",
+    "Volume nomeado (criado se não existir): nome:/caminho/no/container.": "Named volume (created if missing): name:/path/in/container.",
+    Volumes: "Volumes",
+    "a cada 2 s": "every 2 s",
+    "a imagem": "the image",
+    "a rede": "the network",
+    "always · sempre": "always · always",
+    "anda entre os botões Logs": "moves between the Logs buttons",
+    ano: "yr",
+    anos: "yr",
+    anônimo: "anonymous",
+    "ao vivo": "live",
+    "as imagens que nenhum container usa": "the images no container uses",
+    "busca na lista de containers (nos logs, filtra as linhas)": "searches the container list (in the logs, filters the lines)",
+    "cancela uma confirmação, fecha menus e modais": "cancels a confirmation, closes menus and dialogs",
+    "com problema": "with problems",
+    "comando não encontrado": "command not found",
+    "comando sem permissão de execução": "command not executable",
+    "compose down do projeto {0}": "compose down of project {0}",
+    "container selecionado": "container selected",
+    "containers selecionados": "containers selected",
+    "criado sem nome, por um container": "created without a name, by a container",
+    "código {0} · {1}": "code {0} · {1}",
+    "da última hora": "from the last hour",
+    "das últimas 24 h": "from the last 24 h",
+    "desde que o container subiu": "since the container started",
+    "desfaz a última ação (Iniciar de novo, Retomar)": "undoes the last action (Start again, Resume)",
+    "dos últimos 15 min": "from the last 15 min",
+    "dos últimos 5 min": "from the last 5 min",
+    "encerrado por SIGTERM": "terminated by SIGTERM",
+    "erro da aplicação": "application error",
+    "erro sem mensagem": "error without a message",
+    "ex.: 8080:80, 5353:53/udp": "e.g. 8080:80, 5353:53/udp",
+    "ex.: CHAVE=valor (uma por linha)": "e.g. KEY=value (one per line)",
+    "ex.: dados:/var/lib/data": "e.g. data:/var/lib/data",
+    "ex.: nginx:1.27": "e.g. nginx:1.27",
+    "ex.: web": "e.g. web",
+    "falha de segmentação": "segmentation fault",
+    "falha do próprio docker run": "docker run itself failed",
+    falharam: "failed",
+    falhou: "failed",
+    "healthcheck falhando, loop de reinício ou saída com erro": "failing healthcheck, restart loop or exit with an error",
+    "há {0}": "{0} ago",
+    iniciado: "started",
+    item: "item",
+    "item sem uso": "unused item",
+    itens: "items",
+    "itens sem uso": "unused items",
+    "limpeza de {0}": "cleanup of {0}",
+    "limpeza feita": "cleanup done",
+    linha: "line",
+    linhas: "lines",
+    "marca ou desmarca a linha em foco": "selects or unselects the focused row",
+    "marca ou desmarca todos os visíveis": "selects or unselects all visible rows",
+    meses: "mo",
+    "morto à força ou sem memória (OOM)": "killed or out of memory (OOM)",
+    "mostra esta lista": "shows this list",
+    mês: "mo",
+    "nas abas, troca de aba": "on the tabs, switches tabs",
+    nenhum: "none",
+    "nenhum container": "no container",
+    nenhuma: "none",
+    "nenhuma tag aponta para ela": "no tag points to it",
+    "no botão Logs, abre os logs": "on a Logs button, opens the logs",
+    "no · não reinicia": "no · never restarts",
+    "não reinicia": "never restarts",
+    "o cache de build": "the build cache",
+    "o container parou": "the container stopped",
+    "o volume": "the volume",
+    ocorrência: "match",
+    ocorrências: "matches",
+    "on-failure · se sair com erro": "on-failure · if it exits with an error",
+    "os containers parados": "the stopped containers",
+    "os containers pararam": "the containers stopped",
+    "os volumes que nenhum container usa": "the volumes no container uses",
+    padrão: "default",
+    parado: "stopped",
+    parados: "stopped",
+    pausado: "paused",
+    pausados: "paused",
+    "portaDoHost:portaDoContainer, separadas por vírgula ou espaço. Ficam em {0} do daemon remoto {1}: só aquela máquina acessa, não esta.": "hostPort:containerPort, separated by commas or spaces. Bound to {0} of the remote daemon {1}: only that machine can reach them, not this one.",
+    "portaDoHost:portaDoContainer, separadas por vírgula ou espaço. Ficam só em": "hostPort:containerPort, separated by commas or spaces. Bound only to",
+    "reinicia o container da linha em foco (nos logs, o dos logs)": "restarts the focused row's container (in the logs, the one shown)",
+    reiniciado: "restarted",
+    reiniciando: "restarting",
+    removida: "removed",
+    removido: "removed",
+    "remoção de {0}": "removal of {0}",
+    "remoção em lote": "bulk removal",
+    retomado: "resumed",
+    "rodando bem": "running fine",
+    "se sair com erro": "if it exits with an error",
+    selecionado: "selected",
+    selecionados: "selected",
+    sem: "wk",
+    "sem acesso ao Docker": "no access to Docker",
+    "sem conexão": "no connection",
+    "sem tag": "untagged",
+    "sem tag {0}": "untagged {0}",
+    "sem token": "no token",
+    sempre: "always",
+    "sempre, menos se você parar": "always, unless you stop it",
+    "são ignoradas. Os valores ficam visíveis no": "are ignored. The values are visible in",
+    "todas as linhas": "all lines",
+    "unless-stopped · sempre, menos se você parar": "unless-stopped · always, unless you stop it",
+    "vem com o daemon e não pode ser removida": "comes with the daemon and cannot be removed",
+    "volume anônimo sem uso": "unused anonymous volume",
+    "volume sem uso": "unused volume",
+    "volumes anônimos sem uso": "unused anonymous volumes",
+    "volumes sem uso": "unused volumes",
+    "{0} aparece duas vezes.": "{0} appears twice.",
+    "{0} com problema": "{0} with problems",
+    "{0} containers precisam de atenção": "{0} containers need attention",
+    "{0} containers subiram mas não ficaram bem. Veja a faixa de atenção.": "{0} containers started but aren't healthy. See the attention band.",
+    "{0} criado, conferindo se ficou de pé…": "{0} created, checking it stays up…",
+    "{0} criado.": "{0} created.",
+    "{0} de {1} containers": "{0} of {1} containers",
+    "{0} de {1} rodando": "{0} of {1} running",
+    "{0} do projeto {1}": "{0} of project {1}",
+    "{0} do projeto {1} ({2})": "{0} of project {1} ({2})",
+    "{0} e mais {1}": "{0} and {1} more",
+    "{0} está de pé.": "{0} is up.",
+    "{0} fora do filtro": "{0} outside the filter",
+    "{0} liberados": "{0} freed",
+    "{0} na faixa de atenção, acima": "{0} in the attention band above",
+    "{0} no total · {1} liberável · {2} {3}, {4} em uso": "{0} total · {1} reclaimable · {2} {3}, {4} in use",
+    "{0} nos últimos {1}: mín {2}, máx {3}, agora {4}": "{0} over the last {1}: min {2}, max {3}, now {4}",
+    "{0} precisa de atenção": "{0} needs attention",
+    "{0} rodando": "{0} running",
+    "{0} subiu mas não ficou bem: {1}.": "{0} started but isn't healthy: {1}.",
+    "{0} {1} containers de {2}": "{0} {1} containers of {2}",
+    "{0} {1} em {2} {3}": "{0} {1} in {2} {3}",
+    "{0} {1}, conferindo se ficou de pé…": "{0} {1}, checking it stays up…",
+    "{0} · atualizado às {1}": "{0} · updated at {1}",
+    "{0} às {1}": "{0} at {1}",
+    "{0}, conferindo se ficaram de pé…": "{0}, checking they stay up…",
+    "{0}: 1 de {1} falhou. O erro ficou na linha.": "{0}: 1 of {1} failed. The error is on its row.",
+    "{0}: sem resposta do servidor do Docker GUI.": "{0}: no response from the Docker GUI server.",
+    "{0}: {1} concluído, conferindo se ficou de pé…": "{0}: {1} done, checking it stays up…",
+    "{0}: {1} concluído.": "{0}: {1} done.",
+    "{0}: {1} de {2} falharam. Os erros ficaram nas linhas.": "{0}: {1} of {2} failed. The errors are on their rows.",
+    "{0}: {1} falhou. {2}": "{0}: {1} failed. {2}",
+    "{0}: {1} iniciados, conferindo se ficaram de pé…": "{0}: {1} started, checking they stay up…",
+    "{0}: {1} parados.": "{0}: {1} stopped.",
+    "{0}: {1} reiniciados, conferindo se ficaram de pé…": "{0}: {1} restarted, checking they stay up…",
+    "Última hora": "Last hour",
+    "Última linha do log:": "Last log line:",
+    "Últimas 24 h": "Last 24 h",
+    "Últimas 500 linhas": "Last 500 lines",
+    "Último healthcheck:": "Last healthcheck:",
+    "Últimos 15 min": "Last 15 min",
+    "Últimos 5 min": "Last 5 min",
+    "últimas {0} linhas": "last {0} lines",
+    "últimas {0} linhas de cada container": "last {0} lines of each container",
+    "“{0}” não é CHAVE=valor: a chave tem letras, números e _, e não começa com número.": "“{0}” is not KEY=value: the key has letters, digits and _, and doesn't start with a digit.",
+    "“{0}” não é uma porta válida: use portaDoHost:portaDoContainer, ex.: 8080:80 ou 5353:53/udp.": "“{0}” is not a valid port: use hostPort:containerPort, e.g. 8080:80 or 5353:53/udp."
+  };
+
+  // src/i18n.ts
+  var LANG = globalThis.document?.documentElement.dataset.lang === "en" ? "en" : "pt";
+  var LOCALE = LANG === "en" ? "en-US" : "pt-BR";
+  var dict = LANG === "en" ? en_default : null;
+  function t(s15, ...v2) {
+    const key = s15.slice(1).reduce((a, x, i) => `${a}{${i}}${x}`, s15[0]);
+    return (dict?.[key] ?? key).replace(/\{(\d+)\}/g, (_2, i) => String(v2[+i]));
+  }
+  var ATTRS = ["aria-label", "title", "placeholder", "data-empty"];
+  function translatePage() {
+    if (!dict) return;
+    document.documentElement.lang = "en";
+    const walk = document.createTreeWalker(document.documentElement, NodeFilter.SHOW_TEXT);
+    for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+      if (n.parentElement?.closest("style, script, kbd, code")) continue;
+      const v2 = n.nodeValue, k = v2.replace(/\s+/g, " ").trim(), en2 = k && dict[k];
+      if (en2) n.nodeValue = v2.match(/^\s*/)[0] + en2 + v2.match(/\s*$/)[0];
+    }
+    for (const el2 of document.querySelectorAll(ATTRS.map((a) => `[${a}]`).join(","))) {
+      for (const a of ATTRS) {
+        const en2 = dict[el2.getAttribute(a)?.replace(/\s+/g, " ").trim() ?? ""];
+        if (en2) el2.setAttribute(a, en2);
+      }
+    }
+  }
+
   // src/format.ts
   var esc = (s15) => String(s15).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
   var EXIT = {
-    1: "erro da aplicação",
-    125: "falha do próprio docker run",
-    126: "comando sem permissão de execução",
-    127: "comando não encontrado",
-    137: "morto à força ou sem memória (OOM)",
-    139: "falha de segmentação",
-    143: "encerrado por SIGTERM"
+    1: t`erro da aplicação`,
+    125: t`falha do próprio docker run`,
+    126: t`comando sem permissão de execução`,
+    127: t`comando não encontrado`,
+    137: t`morto à força ou sem memória (OOM)`,
+    139: t`falha de segmentação`,
+    143: t`encerrado por SIGTERM`
   };
-  var UNIT = { second: "s", minute: "min", hour: "h", day: "d", week: "sem", month: "mês", year: "ano" };
+  var UNIT = {
+    second: ["s", "s"],
+    minute: ["min", "min"],
+    hour: ["h", "h"],
+    day: ["d", "d"],
+    week: [t`sem`, t`sem`],
+    month: [t`mês`, t`meses`],
+    year: [t`ano`, t`anos`]
+  };
   var restartCode = (c) => +(c.Status.match(/^Restarting \((\d+)\)/)?.[1] ?? 0);
   function tone(c) {
     if (c.State === "running") return /\(unhealthy\)/.test(c.Status) ? "warn" : /health: starting/.test(c.Status) ? "check" : "ok";
@@ -1297,18 +1827,18 @@ PAGE = r"""<!doctype html>
     const m = s15.match(/(about )?(an?|\d+) (second|minute|hour|day|week|month|year)/i);
     if (!m) return s15;
     const n = /^an?$/i.test(m[2]) ? 1 : +m[2], u = UNIT[m[3].toLowerCase()];
-    return `${m[1] ? "~" : ""}${n} ${n > 1 && u === "mês" ? "meses" : n > 1 && u === "ano" ? "anos" : u}`;
+    return `${m[1] ? "~" : ""}${n} ${u[+(n > 1)]}`;
   }
   function status(c) {
-    const s15 = c.Status, t = dur(s15.replace(/^(Up|Exited \(\d+\)|Restarting \(\d+\))\s*/, "").replace(/ \(.*\)$/, "").replace(/ ago$/, ""));
-    const h2 = /\(unhealthy\)/.test(s15) ? " · healthcheck falhando" : /health: starting/.test(s15) ? " · verificando saúde" : /\(healthy\)/.test(s15) ? " · saudável" : "";
-    if (c.State === "running") return [`Rodando há ${t}${h2}`];
-    if (c.State === "paused") return ["Pausado"];
-    if (c.State === "restarting") return restartCode(c) ? [`Reiniciando em loop · saiu com código ${restartCode(c)}`, EXIT[restartCode(c)]] : ["Reiniciando…"];
-    if (c.State === "created") return ["Criado, nunca iniciado"];
-    if (c.State === "dead") return ["Morto · só dá para remover"];
-    const code = +(s15.match(/^Exited \((\d+)\)/)?.[1] ?? 0);
-    return code ? [`Saiu com código ${code} há ${t}`, EXIT[code]] : [`Parado há ${t}`];
+    const s15 = c.Status, d = dur(s15.replace(/^(Up|Exited \(\d+\)|Restarting \(\d+\))\s*/, "").replace(/ \(.*\)$/, "").replace(/ ago$/, ""));
+    const h2 = /\(unhealthy\)/.test(s15) ? t` · healthcheck falhando` : /health: starting/.test(s15) ? t` · verificando saúde` : /\(healthy\)/.test(s15) ? t` · saudável` : "";
+    if (c.State === "running") return [t`Rodando há ${d}${h2}`];
+    if (c.State === "paused") return [t`Pausado`];
+    if (c.State === "restarting") return restartCode(c) ? [t`Reiniciando em loop · saiu com código ${restartCode(c)}`, EXIT[restartCode(c)]] : [t`Reiniciando…`];
+    if (c.State === "created") return [t`Criado, nunca iniciado`];
+    if (c.State === "dead") return [t`Morto · só dá para remover`];
+    const code2 = +(s15.match(/^Exited \((\d+)\)/)?.[1] ?? 0);
+    return code2 ? [t`Saiu com código ${code2} há ${d}`, EXIT[code2]] : [t`Parado há ${d}`];
   }
   var MAX_EXPAND = 8;
   var ports = (p) => {
@@ -1322,7 +1852,7 @@ PAGE = r"""<!doctype html>
   };
   var shortImage = (img) => img.replace(/^[^/]+[.:][^/]*\//, "");
   var hasHealth = (c) => /\((un)?healthy\)|health: starting/.test(c.Status);
-  var usage = (s15) => [`CPU ${s15.CPUPerc}`, `RAM ${s15.MemUsage.split(" / ")[0]}`, [`Memória: ${s15.MemUsage} (${s15.MemPerc})`, ...io(s15)].join("\n")];
+  var usage = (s15) => [`CPU ${s15.CPUPerc}`, `RAM ${s15.MemUsage.split(" / ")[0]}`, [t`Memória: ${s15.MemUsage} (${s15.MemPerc})`, ...io(s15)].join("\n")];
   var SIZE = {
     B: 1,
     KB: 1e3,
@@ -1356,7 +1886,7 @@ PAGE = r"""<!doctype html>
   }
   function io(s15) {
     const net = pair(s15.NetIO), blk = pair(s15.BlockIO);
-    return [net && `Rede: ${net[0]} recebidos · ${net[1]} enviados`, blk && `Disco: ${blk[0]} lidos · ${blk[1]} gravados`].filter((x) => !!x);
+    return [net && t`Rede: ${net[0]} recebidos · ${net[1]} enviados`, blk && t`Disco: ${blk[0]} lidos · ${blk[1]} gravados`].filter((x) => !!x);
   }
   var HISTORY = 60;
   function pushSample(buf2, s15, max = HISTORY, gap = 3e4) {
@@ -1370,17 +1900,17 @@ PAGE = r"""<!doctype html>
   }
   function trend(label, vs2, span, fmt2) {
     const when = span < 6e4 ? `${Math.max(1, Math.round(span / 1e3))} s` : `${Math.round(span / 6e4)} min`;
-    return `${label} nos últimos ${when}: mín ${fmt2(Math.min(...vs2))}, máx ${fmt2(Math.max(...vs2))}, agora ${fmt2(vs2.at(-1))}`;
+    return t`${label} nos últimos ${when}: mín ${fmt2(Math.min(...vs2))}, máx ${fmt2(Math.max(...vs2))}, agora ${fmt2(vs2.at(-1))}`;
   }
   var logFilter = (q2) => q2 ? new RegExp(`(${q2.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "i") : null;
-  function age(t, now = Date.now() / 1e3) {
-    const s15 = now - t, d = s15 / 86400, n = (x) => Math.floor(x);
-    return s15 < 60 ? "<1 min" : s15 < 3600 ? `${n(s15 / 60)} min` : s15 < 172800 ? `${n(s15 / 3600)} h` : d < 14 ? `${n(d)} d` : d < 60 ? `${n(d / 7)} sem` : d < 730 ? `${n(d / 30)} meses` : `${n(d / 365)} anos`;
+  function age(t2, now = Date.now() / 1e3) {
+    const s15 = now - t2, d = s15 / 86400, n = (x) => Math.floor(x);
+    return s15 < 60 ? "<1 min" : s15 < 3600 ? `${n(s15 / 60)} min` : s15 < 172800 ? `${n(s15 / 3600)} h` : d < 14 ? `${n(d)} d` : d < 60 ? `${n(d / 7)} ${UNIT.week[1]}` : d < 730 ? `${n(d / 30)} ${UNIT.month[1]}` : `${n(d / 365)} ${UNIT.year[1]}`;
   }
   function rmHint(msg) {
-    if (/referenced in multiple repositories/.test(msg)) return "A imagem tem mais de uma tag: remova as tags pelo terminal, uma a uma.";
-    if (/dependent child images/.test(msg)) return "Outras imagens foram construídas sobre esta.";
-    if (/in use|being used|active endpoints|associated containers/i.test(msg)) return "Em uso: remova o container que usa (ou tire ele da rede) antes.";
+    if (/referenced in multiple repositories/.test(msg)) return t`A imagem tem mais de uma tag: remova as tags pelo terminal, uma a uma.`;
+    if (/dependent child images/.test(msg)) return t`Outras imagens foram construídas sobre esta.`;
+    if (/in use|being used|active endpoints|associated containers/i.test(msg)) return t`Em uso: remova o container que usa (ou tire ele da rede) antes.`;
     return "";
   }
   var RESTART = ["no", "on-failure", "unless-stopped", "always"];
@@ -1398,55 +1928,55 @@ PAGE = r"""<!doctype html>
   function runSpec(f) {
     const errors2 = {}, image = f.image.trim(), name = f.name.trim(), volume = f.volume.trim();
     const ports2 = splitPorts(f.ports), env = splitEnv(f.env);
-    if (!image) errors2.image = "Informe a imagem, ex.: nginx:1.27 ou ghcr.io/acme/api:1.4.";
-    else if (image.length > 512 || !IMAGE_RE.test(image)) errors2.image = "Imagem inválida: use repo[:tag] ou repo@sha256:…, com o caminho em minúsculas.";
-    if (name && !NAME_RE.test(name)) errors2.name = "Nome inválido: 2 a 128 caracteres entre letras, números, _ . e -, começando por letra ou número.";
+    if (!image) errors2.image = t`Informe a imagem, ex.: nginx:1.27 ou ghcr.io/acme/api:1.4.`;
+    else if (image.length > 512 || !IMAGE_RE.test(image)) errors2.image = t`Imagem inválida: use repo[:tag] ou repo@sha256:…, com o caminho em minúsculas.`;
+    if (name && !NAME_RE.test(name)) errors2.name = t`Nome inválido: 2 a 128 caracteres entre letras, números, _ . e -, começando por letra ou número.`;
     const seen2 = /* @__PURE__ */ new Set();
     for (const p of ports2) {
       const m = p.match(PORT_RE);
       if (!m || [m[1], m[2]].some((n) => +n < 1 || +n > 65535)) {
-        errors2.ports = `“${p.slice(0, 40)}” não é uma porta válida: use portaDoHost:portaDoContainer, ex.: 8080:80 ou 5353:53/udp.`;
+        errors2.ports = t`“${p.slice(0, 40)}” não é uma porta válida: use portaDoHost:portaDoContainer, ex.: 8080:80 ou 5353:53/udp.`;
         break;
       }
       const key = `${+m[1]}/${m[3] || "tcp"}`;
       if (seen2.has(key)) {
-        errors2.ports = `A porta ${key} do host aparece duas vezes.`;
+        errors2.ports = t`A porta ${key} do host aparece duas vezes.`;
         break;
       }
       seen2.add(key);
     }
-    if (!errors2.ports && ports2.length > MAX_ITEMS) errors2.ports = `No máximo ${MAX_ITEMS} portas.`;
+    if (!errors2.ports && ports2.length > MAX_ITEMS) errors2.ports = t`No máximo ${MAX_ITEMS} portas.`;
     const keys = /* @__PURE__ */ new Set();
     for (const e of env) {
       const i = e.indexOf("="), k = e.slice(0, i), v2 = e.slice(i + 1);
       if (i < 0 || !ENV_RE.test(k)) {
-        errors2.env = `“${e.slice(0, 40)}” não é CHAVE=valor: a chave tem letras, números e _, e não começa com número.`;
+        errors2.env = t`“${e.slice(0, 40)}” não é CHAVE=valor: a chave tem letras, números e _, e não começa com número.`;
         break;
       }
       if (v2.includes("\0") || v2.length > MAX_ENV_VALUE) {
-        errors2.env = `O valor de ${k} tem o caractere NUL ou passa de ${MAX_ENV_VALUE} caracteres.`;
+        errors2.env = t`O valor de ${k} tem o caractere NUL ou passa de ${MAX_ENV_VALUE} caracteres.`;
         break;
       }
       if (keys.has(k)) {
-        errors2.env = `${k} aparece duas vezes.`;
+        errors2.env = t`${k} aparece duas vezes.`;
         break;
       }
       keys.add(k);
     }
-    if (!errors2.env && env.length > MAX_ITEMS) errors2.env = `No máximo ${MAX_ITEMS} variáveis.`;
+    if (!errors2.env && env.length > MAX_ITEMS) errors2.env = t`No máximo ${MAX_ITEMS} variáveis.`;
     const restart = RESTART.find((r) => r === f.restart);
-    if (!restart) errors2.restart = "Escolha uma das opções da lista.";
+    if (!restart) errors2.restart = t`Escolha uma das opções da lista.`;
     const path = volume.length <= 1024 ? volume.match(VOLUME_RE)?.[1] : void 0;
     if (volume && (!path || path.split("/").some((s15) => s15 === "." || s15 === "..")))
-      errors2.volume = "Use nome:/caminho/no/container, ex.: dados:/var/lib/postgresql/data. Pasta do host (bind mount) não é aceita.";
+      errors2.volume = t`Use nome:/caminho/no/container, ex.: dados:/var/lib/postgresql/data. Pasta do host (bind mount) não é aceita.`;
     return { spec: { image, name, ports: ports2, all_interfaces: f.all_interfaces, env, restart: restart || "no", volume }, errors: errors2 };
   }
   function bulkSummary(done, ok, fails) {
-    const why = (m) => m.trim().split("\n")[0].replace(/\.$/, "") || "erro sem mensagem";
+    const why = (m) => m.trim().split("\n")[0].replace(/\.$/, "") || t`erro sem mensagem`;
     const f = fails.length, list = fails.slice(0, 2).map(([n, m]) => `${n}: ${why(m)}`).join("; ");
     return [
-      ok && `${ok} ${ok === 1 ? done : done + "s"}`,
-      f && `${f} ${f === 1 ? "falhou" : "falharam"}: ${list}${f > 2 ? `; e mais ${f - 2}` : ""}`
+      ok && `${ok} ${ok === 1 || LANG === "en" ? done : done + "s"}`,
+      f && `${f} ${f === 1 ? t`falhou` : t`falharam`}: ${list}${f > 2 ? t`; e mais ${f - 2}` : ""}`
     ].filter(Boolean).join(", ") + ".";
   }
   var LEVEL = [
@@ -1456,8 +1986,8 @@ PAGE = r"""<!doctype html>
   ];
   var logLevel = (line) => LEVEL.find(([, word, mark2]) => word.test(line) || mark2.test(line))?.[0] ?? "";
   function reclaimShare(d) {
-    const pct = d.Reclaimable.match(/\((\d+(?:\.\d+)?)%\)/), r = bytes(d.Reclaimable.split(" ")[0]), t = bytes(d.Size);
-    const v2 = pct ? +pct[1] / 100 : r !== null && t ? r / t : null;
+    const pct = d.Reclaimable.match(/\((\d+(?:\.\d+)?)%\)/), r = bytes(d.Reclaimable.split(" ")[0]), t2 = bytes(d.Size);
+    const v2 = pct ? +pct[1] / 100 : r !== null && t2 ? r / t2 : null;
     return v2 === null ? null : Math.min(1, Math.max(0, v2));
   }
   var anonVolume = (name) => /^[0-9a-f]{64}$/.test(name);
@@ -1466,14 +1996,14 @@ PAGE = r"""<!doctype html>
   // node_modules/@xterm/xterm/lib/xterm.mjs
   var zs = Object.defineProperty;
   var Rl = Object.getOwnPropertyDescriptor;
-  var Ll = (s15, t) => {
-    for (var e in t) zs(s15, e, { get: t[e], enumerable: true });
+  var Ll = (s15, t2) => {
+    for (var e in t2) zs(s15, e, { get: t2[e], enumerable: true });
   };
-  var M = (s15, t, e, i) => {
-    for (var r = i > 1 ? void 0 : i ? Rl(t, e) : t, n = s15.length - 1, o2; n >= 0; n--) (o2 = s15[n]) && (r = (i ? o2(t, e, r) : o2(r)) || r);
-    return i && r && zs(t, e, r), r;
+  var M = (s15, t2, e, i) => {
+    for (var r = i > 1 ? void 0 : i ? Rl(t2, e) : t2, n = s15.length - 1, o2; n >= 0; n--) (o2 = s15[n]) && (r = (i ? o2(t2, e, r) : o2(r)) || r);
+    return i && r && zs(t2, e, r), r;
   };
-  var S = (s15, t) => (e, i) => t(e, i, s15);
+  var S = (s15, t2) => (e, i) => t2(e, i, s15);
   var Gs = "Terminal input";
   var mi = { get: () => Gs, set: (s15) => Gs = s15 };
   var $s = "Too much output to announce, navigate to rows manually to read";
@@ -1481,34 +2011,34 @@ PAGE = r"""<!doctype html>
   function Al(s15) {
     return s15.replace(/\r?\n/g, "\r");
   }
-  function kl(s15, t) {
-    return t ? "\x1B[200~" + s15 + "\x1B[201~" : s15;
+  function kl(s15, t2) {
+    return t2 ? "\x1B[200~" + s15 + "\x1B[201~" : s15;
   }
-  function Vs(s15, t) {
-    s15.clipboardData && s15.clipboardData.setData("text/plain", t.selectionText), s15.preventDefault();
+  function Vs(s15, t2) {
+    s15.clipboardData && s15.clipboardData.setData("text/plain", t2.selectionText), s15.preventDefault();
   }
-  function qs(s15, t, e, i) {
+  function qs(s15, t2, e, i) {
     if (s15.stopPropagation(), s15.clipboardData) {
       let r = s15.clipboardData.getData("text/plain");
-      Cn(r, t, e, i);
+      Cn(r, t2, e, i);
     }
   }
-  function Cn(s15, t, e, i) {
-    s15 = Al(s15), s15 = kl(s15, e.decPrivateModes.bracketedPasteMode && i.rawOptions.ignoreBracketedPasteMode !== true), e.triggerDataEvent(s15, true), t.value = "";
+  function Cn(s15, t2, e, i) {
+    s15 = Al(s15), s15 = kl(s15, e.decPrivateModes.bracketedPasteMode && i.rawOptions.ignoreBracketedPasteMode !== true), e.triggerDataEvent(s15, true), t2.value = "";
   }
-  function Mn(s15, t, e) {
+  function Mn(s15, t2, e) {
     let i = e.getBoundingClientRect(), r = s15.clientX - i.left - 10, n = s15.clientY - i.top - 10;
-    t.style.width = "20px", t.style.height = "20px", t.style.left = `${r}px`, t.style.top = `${n}px`, t.style.zIndex = "1000", t.focus();
+    t2.style.width = "20px", t2.style.height = "20px", t2.style.left = `${r}px`, t2.style.top = `${n}px`, t2.style.zIndex = "1000", t2.focus();
   }
-  function Pn(s15, t, e, i, r) {
-    Mn(s15, t, e), r && i.rightClickSelect(s15), t.value = i.selectionText, t.select();
+  function Pn(s15, t2, e, i, r) {
+    Mn(s15, t2, e), r && i.rightClickSelect(s15), t2.value = i.selectionText, t2.select();
   }
   function Ce(s15) {
     return s15 > 65535 ? (s15 -= 65536, String.fromCharCode((s15 >> 10) + 55296) + String.fromCharCode(s15 % 1024 + 56320)) : String.fromCharCode(s15);
   }
-  function It(s15, t = 0, e = s15.length) {
+  function It(s15, t2 = 0, e = s15.length) {
     let i = "";
-    for (let r = t; r < e; ++r) {
+    for (let r = t2; r < e; ++r) {
       let n = s15[r];
       n > 65535 ? (n -= 65536, i += String.fromCharCode((n >> 10) + 55296) + String.fromCharCode(n % 1024 + 56320)) : i += String.fromCharCode(n);
     }
@@ -1521,19 +2051,19 @@ PAGE = r"""<!doctype html>
     clear() {
       this._interim = 0;
     }
-    decode(t, e) {
-      let i = t.length;
+    decode(t2, e) {
+      let i = t2.length;
       if (!i) return 0;
       let r = 0, n = 0;
       if (this._interim) {
-        let o2 = t.charCodeAt(n++);
+        let o2 = t2.charCodeAt(n++);
         56320 <= o2 && o2 <= 57343 ? e[r++] = (this._interim - 55296) * 1024 + o2 - 56320 + 65536 : (e[r++] = this._interim, e[r++] = o2), this._interim = 0;
       }
       for (let o2 = n; o2 < i; ++o2) {
-        let l = t.charCodeAt(o2);
+        let l = t2.charCodeAt(o2);
         if (55296 <= l && l <= 56319) {
           if (++o2 >= i) return this._interim = l, r;
-          let a = t.charCodeAt(o2);
+          let a = t2.charCodeAt(o2);
           56320 <= a && a <= 57343 ? e[r++] = (l - 55296) * 1024 + a - 56320 + 65536 : (e[r++] = l, e[r++] = a);
           continue;
         }
@@ -1549,8 +2079,8 @@ PAGE = r"""<!doctype html>
     clear() {
       this.interim.fill(0);
     }
-    decode(t, e) {
-      let i = t.length;
+    decode(t2, e) {
+      let i = t2.length;
       if (!i) return 0;
       let r = 0, n, o2, l, a, u = 0, h2 = 0;
       if (this.interim[0]) {
@@ -1561,7 +2091,7 @@ PAGE = r"""<!doctype html>
         let A = (this.interim[0] & 224) === 192 ? 2 : (this.interim[0] & 240) === 224 ? 3 : 4, R = A - m;
         for (; h2 < R; ) {
           if (h2 >= i) return 0;
-          if (f = t[h2++], (f & 192) !== 128) {
+          if (f = t2[h2++], (f & 192) !== 128) {
             h2--, _2 = true;
             break;
           } else this.interim[m++] = f, p <<= 6, p |= f & 63;
@@ -1570,11 +2100,11 @@ PAGE = r"""<!doctype html>
       }
       let c = i - 4, d = h2;
       for (; d < i; ) {
-        for (; d < c && !((n = t[d]) & 128) && !((o2 = t[d + 1]) & 128) && !((l = t[d + 2]) & 128) && !((a = t[d + 3]) & 128); ) e[r++] = n, e[r++] = o2, e[r++] = l, e[r++] = a, d += 4;
-        if (n = t[d++], n < 128) e[r++] = n;
+        for (; d < c && !((n = t2[d]) & 128) && !((o2 = t2[d + 1]) & 128) && !((l = t2[d + 2]) & 128) && !((a = t2[d + 3]) & 128); ) e[r++] = n, e[r++] = o2, e[r++] = l, e[r++] = a, d += 4;
+        if (n = t2[d++], n < 128) e[r++] = n;
         else if ((n & 224) === 192) {
           if (d >= i) return this.interim[0] = n, r;
-          if (o2 = t[d++], (o2 & 192) !== 128) {
+          if (o2 = t2[d++], (o2 & 192) !== 128) {
             d--;
             continue;
           }
@@ -1585,12 +2115,12 @@ PAGE = r"""<!doctype html>
           e[r++] = u;
         } else if ((n & 240) === 224) {
           if (d >= i) return this.interim[0] = n, r;
-          if (o2 = t[d++], (o2 & 192) !== 128) {
+          if (o2 = t2[d++], (o2 & 192) !== 128) {
             d--;
             continue;
           }
           if (d >= i) return this.interim[0] = n, this.interim[1] = o2, r;
-          if (l = t[d++], (l & 192) !== 128) {
+          if (l = t2[d++], (l & 192) !== 128) {
             d--;
             continue;
           }
@@ -1598,17 +2128,17 @@ PAGE = r"""<!doctype html>
           e[r++] = u;
         } else if ((n & 248) === 240) {
           if (d >= i) return this.interim[0] = n, r;
-          if (o2 = t[d++], (o2 & 192) !== 128) {
+          if (o2 = t2[d++], (o2 & 192) !== 128) {
             d--;
             continue;
           }
           if (d >= i) return this.interim[0] = n, this.interim[1] = o2, r;
-          if (l = t[d++], (l & 192) !== 128) {
+          if (l = t2[d++], (l & 192) !== 128) {
             d--;
             continue;
           }
           if (d >= i) return this.interim[0] = n, this.interim[1] = o2, this.interim[2] = l, r;
-          if (a = t[d++], (a & 192) !== 128) {
+          if (a = t2[d++], (a & 192) !== 128) {
             d--;
             continue;
           }
@@ -1627,15 +2157,15 @@ PAGE = r"""<!doctype html>
       this.bg = 0;
       this.extended = new rt();
     }
-    static toColorRGB(t) {
-      return [t >>> 16 & 255, t >>> 8 & 255, t & 255];
+    static toColorRGB(t2) {
+      return [t2 >>> 16 & 255, t2 >>> 8 & 255, t2 & 255];
     }
-    static fromColorRGB(t) {
-      return (t[0] & 255) << 16 | (t[1] & 255) << 8 | t[2] & 255;
+    static fromColorRGB(t2) {
+      return (t2[0] & 255) << 16 | (t2[1] & 255) << 8 | t2[2] & 255;
     }
     clone() {
-      let t = new s();
-      return t.fg = this.fg, t.bg = this.bg, t.extended = this.extended.clone(), t;
+      let t2 = new s();
+      return t2.fg = this.fg, t2.bg = this.bg, t2.extended = this.extended.clone(), t2;
     }
     isInverse() {
       return this.fg & 67108864;
@@ -1754,41 +2284,41 @@ PAGE = r"""<!doctype html>
     }
   };
   var rt = class s2 {
-    constructor(t = 0, e = 0) {
+    constructor(t2 = 0, e = 0) {
       this._ext = 0;
       this._urlId = 0;
-      this._ext = t, this._urlId = e;
+      this._ext = t2, this._urlId = e;
     }
     get ext() {
       return this._urlId ? this._ext & -469762049 | this.underlineStyle << 26 : this._ext;
     }
-    set ext(t) {
-      this._ext = t;
+    set ext(t2) {
+      this._ext = t2;
     }
     get underlineStyle() {
       return this._urlId ? 5 : (this._ext & 469762048) >> 26;
     }
-    set underlineStyle(t) {
-      this._ext &= -469762049, this._ext |= t << 26 & 469762048;
+    set underlineStyle(t2) {
+      this._ext &= -469762049, this._ext |= t2 << 26 & 469762048;
     }
     get underlineColor() {
       return this._ext & 67108863;
     }
-    set underlineColor(t) {
-      this._ext &= -67108864, this._ext |= t & 67108863;
+    set underlineColor(t2) {
+      this._ext &= -67108864, this._ext |= t2 & 67108863;
     }
     get urlId() {
       return this._urlId;
     }
-    set urlId(t) {
-      this._urlId = t;
+    set urlId(t2) {
+      this._urlId = t2;
     }
     get underlineVariantOffset() {
-      let t = (this._ext & 3758096384) >> 29;
-      return t < 0 ? t ^ 4294967288 : t;
+      let t2 = (this._ext & 3758096384) >> 29;
+      return t2 < 0 ? t2 ^ 4294967288 : t2;
     }
-    set underlineVariantOffset(t) {
-      this._ext &= 536870911, this._ext |= t << 29 & 3758096384;
+    set underlineVariantOffset(t2) {
+      this._ext &= 536870911, this._ext |= t2 << 29 & 3758096384;
     }
     clone() {
       return new s2(this._ext, this._urlId);
@@ -1847,14 +2377,14 @@ PAGE = r"""<!doctype html>
   }
   function ie(s15) {
     if (Fn.has(s15)) return Fn.get(s15);
-    let t = function(e, i, r) {
+    let t2 = function(e, i, r) {
       if (arguments.length !== 3) throw new Error("@IServiceName-decorator can only be used to decorate a parameter");
-      Pl(t, e, r);
+      Pl(t2, e, r);
     };
-    return t._id = s15, Fn.set(s15, t), t;
+    return t2._id = s15, Fn.set(s15, t2), t2;
   }
-  function Pl(s15, t, e) {
-    t[js] === t ? t[Hn].push({ id: s15, index: e }) : (t[Hn] = [{ id: s15, index: e }], t[js] = t);
+  function Pl(s15, t2, e) {
+    t2[js] === t2 ? t2[Hn].push({ id: s15, index: e }) : (t2[Hn] = [{ id: s15, index: e }], t2[js] = t2);
   }
   var F = ie("BufferService");
   var rr = ie("CoreMouseService");
@@ -1867,13 +2397,13 @@ PAGE = r"""<!doctype html>
   var Js = ie("UnicodeService");
   var Be = ie("DecorationService");
   var wt = class {
-    constructor(t, e, i) {
-      this._bufferService = t;
+    constructor(t2, e, i) {
+      this._bufferService = t2;
       this._optionsService = e;
       this._oscLinkService = i;
     }
-    provideLinks(t, e) {
-      let i = this._bufferService.buffer.lines.get(t - 1);
+    provideLinks(t2, e) {
+      let i = this._bufferService.buffer.lines.get(t2 - 1);
       if (!i) {
         e(void 0);
         return;
@@ -1888,7 +2418,7 @@ PAGE = r"""<!doctype html>
         if (h2 || u !== -1 && c === l - 1) {
           let d = this._oscLinkService.getLinkData(a)?.uri;
           if (d) {
-            let _2 = { start: { x: u + 1, y: t }, end: { x: c + (!h2 && c === l - 1 ? 1 : 0), y: t } }, p = false;
+            let _2 = { start: { x: u + 1, y: t2 }, end: { x: c + (!h2 && c === l - 1 ? 1 : 0), y: t2 } }, p = false;
             if (!n?.allowNonHttpProtocols) try {
               let m = new URL(d);
               ["http:", "https:"].includes(m.protocol) || (p = true);
@@ -1904,8 +2434,8 @@ PAGE = r"""<!doctype html>
     }
   };
   wt = M([S(0, F), S(1, H), S(2, sr)], wt);
-  function Ol(s15, t) {
-    if (confirm(`Do you want to navigate to ${t}?
+  function Ol(s15, t2) {
+    if (confirm(`Do you want to navigate to ${t2}?
 
 WARNING: This link could potentially be dangerous`)) {
       let i = window.open();
@@ -1914,7 +2444,7 @@ WARNING: This link could potentially be dangerous`)) {
           i.opener = null;
         } catch {
         }
-        i.location.href = t;
+        i.location.href = t2;
       } else console.warn("Opening link blocked as opener could not be cleared");
     }
   }
@@ -1928,40 +2458,40 @@ WARNING: This link could potentially be dangerous`)) {
   var lr = ie("LinkProviderService");
   var Wn = class {
     constructor() {
-      this.listeners = [], this.unexpectedErrorHandler = function(t) {
+      this.listeners = [], this.unexpectedErrorHandler = function(t2) {
         setTimeout(() => {
-          throw t.stack ? ar.isErrorNoTelemetry(t) ? new ar(t.message + `
+          throw t2.stack ? ar.isErrorNoTelemetry(t2) ? new ar(t2.message + `
 
-` + t.stack) : new Error(t.message + `
+` + t2.stack) : new Error(t2.message + `
 
-` + t.stack) : t;
+` + t2.stack) : t2;
         }, 0);
       };
     }
-    addListener(t) {
-      return this.listeners.push(t), () => {
-        this._removeListener(t);
+    addListener(t2) {
+      return this.listeners.push(t2), () => {
+        this._removeListener(t2);
       };
     }
-    emit(t) {
+    emit(t2) {
       this.listeners.forEach((e) => {
-        e(t);
+        e(t2);
       });
     }
-    _removeListener(t) {
-      this.listeners.splice(this.listeners.indexOf(t), 1);
+    _removeListener(t2) {
+      this.listeners.splice(this.listeners.indexOf(t2), 1);
     }
-    setUnexpectedErrorHandler(t) {
-      this.unexpectedErrorHandler = t;
+    setUnexpectedErrorHandler(t2) {
+      this.unexpectedErrorHandler = t2;
     }
     getUnexpectedErrorHandler() {
       return this.unexpectedErrorHandler;
     }
-    onUnexpectedError(t) {
-      this.unexpectedErrorHandler(t), this.emit(t);
+    onUnexpectedError(t2) {
+      this.unexpectedErrorHandler(t2), this.emit(t2);
     }
-    onUnexpectedExternalError(t) {
-      this.unexpectedErrorHandler(t);
+    onUnexpectedExternalError(t2) {
+      this.unexpectedErrorHandler(t2);
     }
   };
   var Bl = new Wn();
@@ -1981,50 +2511,50 @@ WARNING: This link could potentially be dangerous`)) {
     return s15 ? new Error(`Illegal argument: ${s15}`) : new Error("Illegal argument");
   }
   var ar = class s4 extends Error {
-    constructor(t) {
-      super(t), this.name = "CodeExpectedError";
+    constructor(t2) {
+      super(t2), this.name = "CodeExpectedError";
     }
-    static fromError(t) {
-      if (t instanceof s4) return t;
+    static fromError(t2) {
+      if (t2 instanceof s4) return t2;
       let e = new s4();
-      return e.message = t.message, e.stack = t.stack, e;
+      return e.message = t2.message, e.stack = t2.stack, e;
     }
-    static isErrorNoTelemetry(t) {
-      return t.name === "CodeExpectedError";
+    static isErrorNoTelemetry(t2) {
+      return t2.name === "CodeExpectedError";
     }
   };
   var Rt = class s5 extends Error {
-    constructor(t) {
-      super(t || "An unexpected bug occurred."), Object.setPrototypeOf(this, s5.prototype);
+    constructor(t2) {
+      super(t2 || "An unexpected bug occurred."), Object.setPrototypeOf(this, s5.prototype);
     }
   };
-  function Fl(s15, t, e = 0, i = s15.length) {
+  function Fl(s15, t2, e = 0, i = s15.length) {
     let r = e, n = i;
     for (; r < n; ) {
       let o2 = Math.floor((r + n) / 2);
-      t(s15[o2]) ? r = o2 + 1 : n = o2;
+      t2(s15[o2]) ? r = o2 + 1 : n = o2;
     }
     return r - 1;
   }
   var cr = class cr2 {
-    constructor(t) {
-      this._array = t;
+    constructor(t2) {
+      this._array = t2;
       this._findLastMonotonousLastIdx = 0;
     }
-    findLastMonotonous(t) {
+    findLastMonotonous(t2) {
       if (cr2.assertInvariants) {
         if (this._prevFindLastPredicate) {
-          for (let i of this._array) if (this._prevFindLastPredicate(i) && !t(i)) throw new Error("MonotonousArray: current predicate must be weaker than (or equal to) the previous predicate.");
+          for (let i of this._array) if (this._prevFindLastPredicate(i) && !t2(i)) throw new Error("MonotonousArray: current predicate must be weaker than (or equal to) the previous predicate.");
         }
-        this._prevFindLastPredicate = t;
+        this._prevFindLastPredicate = t2;
       }
-      let e = Fl(this._array, t, this._findLastMonotonousLastIdx);
+      let e = Fl(this._array, t2, this._findLastMonotonousLastIdx);
       return this._findLastMonotonousLastIdx = e + 1, e === -1 ? void 0 : this._array[e];
     }
   };
   cr.assertInvariants = false;
-  function Se(s15, t = 0) {
-    return s15[s15.length - (1 + t)];
+  function Se(s15, t2 = 0) {
+    return s15[s15.length - (1 + t2)];
   }
   var ro;
   ((l) => {
@@ -2032,10 +2562,10 @@ WARNING: This link could potentially be dangerous`)) {
       return a < 0;
     }
     l.isLessThan = s15;
-    function t(a) {
+    function t2(a) {
       return a <= 0;
     }
-    l.isLessThanOrEqual = t;
+    l.isLessThanOrEqual = t2;
     function e(a) {
       return a > 0;
     }
@@ -2045,50 +2575,50 @@ WARNING: This link could potentially be dangerous`)) {
     }
     l.isNeitherLessOrGreaterThan = i, l.greaterThan = 1, l.lessThan = -1, l.neitherLessOrGreaterThan = 0;
   })(ro ||= {});
-  function no(s15, t) {
-    return (e, i) => t(s15(e), s15(i));
+  function no(s15, t2) {
+    return (e, i) => t2(s15(e), s15(i));
   }
-  var so = (s15, t) => s15 - t;
+  var so = (s15, t2) => s15 - t2;
   var At = class At2 {
-    constructor(t) {
-      this.iterate = t;
+    constructor(t2) {
+      this.iterate = t2;
     }
-    forEach(t) {
-      this.iterate((e) => (t(e), true));
+    forEach(t2) {
+      this.iterate((e) => (t2(e), true));
     }
     toArray() {
-      let t = [];
-      return this.iterate((e) => (t.push(e), true)), t;
+      let t2 = [];
+      return this.iterate((e) => (t2.push(e), true)), t2;
     }
-    filter(t) {
-      return new At2((e) => this.iterate((i) => t(i) ? e(i) : true));
+    filter(t2) {
+      return new At2((e) => this.iterate((i) => t2(i) ? e(i) : true));
     }
-    map(t) {
-      return new At2((e) => this.iterate((i) => e(t(i))));
+    map(t2) {
+      return new At2((e) => this.iterate((i) => e(t2(i))));
     }
-    some(t) {
+    some(t2) {
       let e = false;
-      return this.iterate((i) => (e = t(i), !e)), e;
+      return this.iterate((i) => (e = t2(i), !e)), e;
     }
-    findFirst(t) {
+    findFirst(t2) {
       let e;
-      return this.iterate((i) => t(i) ? (e = i, false) : true), e;
+      return this.iterate((i) => t2(i) ? (e = i, false) : true), e;
     }
-    findLast(t) {
+    findLast(t2) {
       let e;
-      return this.iterate((i) => (t(i) && (e = i), true)), e;
+      return this.iterate((i) => (t2(i) && (e = i), true)), e;
     }
-    findLastMaxBy(t) {
+    findLastMaxBy(t2) {
       let e, i = true;
-      return this.iterate((r) => ((i || ro.isGreaterThan(t(r, e))) && (i = false, e = r), true)), e;
+      return this.iterate((r) => ((i || ro.isGreaterThan(t2(r, e))) && (i = false, e = r), true)), e;
     }
   };
-  At.empty = new At((t) => {
+  At.empty = new At((t2) => {
   });
-  function co(s15, t) {
+  function co(s15, t2) {
     let e = /* @__PURE__ */ Object.create(null);
     for (let i of s15) {
-      let r = t(i), n = e[r];
+      let r = t2(i), n = e[r];
       n || (n = e[r] = []), n.push(i);
     }
     return e;
@@ -2096,39 +2626,39 @@ WARNING: This link could potentially be dangerous`)) {
   var lo;
   var ao;
   var oo = class {
-    constructor(t, e) {
+    constructor(t2, e) {
       this.toKey = e;
       this._map = /* @__PURE__ */ new Map();
       this[lo] = "SetWithKey";
-      for (let i of t) this.add(i);
+      for (let i of t2) this.add(i);
     }
     get size() {
       return this._map.size;
     }
-    add(t) {
-      let e = this.toKey(t);
-      return this._map.set(e, t), this;
+    add(t2) {
+      let e = this.toKey(t2);
+      return this._map.set(e, t2), this;
     }
-    delete(t) {
-      return this._map.delete(this.toKey(t));
+    delete(t2) {
+      return this._map.delete(this.toKey(t2));
     }
-    has(t) {
-      return this._map.has(this.toKey(t));
+    has(t2) {
+      return this._map.has(this.toKey(t2));
     }
     *entries() {
-      for (let t of this._map.values()) yield [t, t];
+      for (let t2 of this._map.values()) yield [t2, t2];
     }
     keys() {
       return this.values();
     }
     *values() {
-      for (let t of this._map.values()) yield t;
+      for (let t2 of this._map.values()) yield t2;
     }
     clear() {
       this._map.clear();
     }
-    forEach(t, e) {
-      this._map.forEach((i) => t.call(e, i, i, this));
+    forEach(t2, e) {
+      this._map.forEach((i) => t2.call(e, i, i, this));
     }
     [(ao = Symbol.iterator, lo = Symbol.toStringTag, ao)]() {
       return this.values();
@@ -2138,31 +2668,31 @@ WARNING: This link could potentially be dangerous`)) {
     constructor() {
       this.map = /* @__PURE__ */ new Map();
     }
-    add(t, e) {
-      let i = this.map.get(t);
-      i || (i = /* @__PURE__ */ new Set(), this.map.set(t, i)), i.add(e);
+    add(t2, e) {
+      let i = this.map.get(t2);
+      i || (i = /* @__PURE__ */ new Set(), this.map.set(t2, i)), i.add(e);
     }
-    delete(t, e) {
-      let i = this.map.get(t);
-      i && (i.delete(e), i.size === 0 && this.map.delete(t));
+    delete(t2, e) {
+      let i = this.map.get(t2);
+      i && (i.delete(e), i.size === 0 && this.map.delete(t2));
     }
-    forEach(t, e) {
-      let i = this.map.get(t);
+    forEach(t2, e) {
+      let i = this.map.get(t2);
       i && i.forEach(e);
     }
-    get(t) {
-      let e = this.map.get(t);
+    get(t2) {
+      let e = this.map.get(t2);
       return e || /* @__PURE__ */ new Set();
     }
   };
-  function Kn(s15, t) {
+  function Kn(s15, t2) {
     let e = this, i = false, r;
     return function() {
       if (i) return r;
-      if (i = true, t) try {
+      if (i = true, t2) try {
         r = s15.apply(e, arguments);
       } finally {
-        t();
+        t2();
       }
       else r = s15.apply(e, arguments);
       return r;
@@ -2174,9 +2704,9 @@ WARNING: This link could potentially be dangerous`)) {
       return I && typeof I == "object" && typeof I[Symbol.iterator] == "function";
     }
     O.is = s15;
-    let t = Object.freeze([]);
+    let t2 = Object.freeze([]);
     function e() {
-      return t;
+      return t2;
     }
     O.empty = e;
     function* i(I) {
@@ -2188,7 +2718,7 @@ WARNING: This link could potentially be dangerous`)) {
     }
     O.wrap = r;
     function n(I) {
-      return I || t;
+      return I || t2;
     }
     O.from = n;
     function* o2(I) {
@@ -2268,35 +2798,35 @@ WARNING: This link could potentially be dangerous`)) {
     constructor() {
       this.livingDisposables = /* @__PURE__ */ new Map();
     }
-    getDisposableData(t) {
-      let e = this.livingDisposables.get(t);
-      return e || (e = { parent: null, source: null, isSingleton: false, value: t, idx: hr2.idx++ }, this.livingDisposables.set(t, e)), e;
+    getDisposableData(t2) {
+      let e = this.livingDisposables.get(t2);
+      return e || (e = { parent: null, source: null, isSingleton: false, value: t2, idx: hr2.idx++ }, this.livingDisposables.set(t2, e)), e;
     }
-    trackDisposable(t) {
-      let e = this.getDisposableData(t);
+    trackDisposable(t2) {
+      let e = this.getDisposableData(t2);
       e.source || (e.source = new Error().stack);
     }
-    setParent(t, e) {
-      let i = this.getDisposableData(t);
+    setParent(t2, e) {
+      let i = this.getDisposableData(t2);
       i.parent = e;
     }
-    markAsDisposed(t) {
-      this.livingDisposables.delete(t);
+    markAsDisposed(t2) {
+      this.livingDisposables.delete(t2);
     }
-    markAsSingleton(t) {
-      this.getDisposableData(t).isSingleton = true;
+    markAsSingleton(t2) {
+      this.getDisposableData(t2).isSingleton = true;
     }
-    getRootParent(t, e) {
-      let i = e.get(t);
+    getRootParent(t2, e) {
+      let i = e.get(t2);
       if (i) return i;
-      let r = t.parent ? this.getRootParent(this.getDisposableData(t.parent), e) : t;
-      return e.set(t, r), r;
+      let r = t2.parent ? this.getRootParent(this.getDisposableData(t2.parent), e) : t2;
+      return e.set(t2, r), r;
     }
     getTrackedDisposables() {
-      let t = /* @__PURE__ */ new Map();
-      return [...this.livingDisposables.entries()].filter(([, i]) => i.source !== null && !this.getRootParent(i, t).isSingleton).flatMap(([i]) => i);
+      let t2 = /* @__PURE__ */ new Map();
+      return [...this.livingDisposables.entries()].filter(([, i]) => i.source !== null && !this.getRootParent(i, t2).isSingleton).flatMap(([i]) => i);
     }
-    computeLeakingDisposables(t = 10, e) {
+    computeLeakingDisposables(t2 = 10, e) {
       let i;
       if (e) i = e;
       else {
@@ -2322,7 +2852,7 @@ WARNING: This link could potentially be dangerous`)) {
       }
       i.sort(no((a) => a.idx, so));
       let o2 = "", l = 0;
-      for (let a of i.slice(0, t)) {
+      for (let a of i.slice(0, t2)) {
         l++;
         let u = r(a), h2 = [];
         for (let c = 0; c < u.length; c++) {
@@ -2345,10 +2875,10 @@ ${h2.join(`
 
 `;
       }
-      return i.length > t && (o2 += `
+      return i.length > t2 && (o2 += `
 
 
-... and ${i.length - t} more leaking disposables
+... and ${i.length - t2} more leaking disposables
 
 `), { leaks: i, details: o2 };
     }
@@ -2360,25 +2890,25 @@ ${h2.join(`
   if (Wl) {
     let s15 = "__is_disposable_tracked__";
     Ul(new class {
-      trackDisposable(t) {
+      trackDisposable(t2) {
         let e = new Error("Potentially leaked disposable").stack;
         setTimeout(() => {
-          t[s15] || console.log(e);
+          t2[s15] || console.log(e);
         }, 3e3);
       }
-      setParent(t, e) {
-        if (t && t !== D.None) try {
-          t[s15] = true;
+      setParent(t2, e) {
+        if (t2 && t2 !== D.None) try {
+          t2[s15] = true;
         } catch {
         }
       }
-      markAsDisposed(t) {
-        if (t && t !== D.None) try {
-          t[s15] = true;
+      markAsDisposed(t2) {
+        if (t2 && t2 !== D.None) try {
+          t2[s15] = true;
         } catch {
         }
       }
-      markAsSingleton(t) {
+      markAsSingleton(t2) {
       }
     }());
   }
@@ -2388,37 +2918,37 @@ ${h2.join(`
   function pr(s15) {
     dt?.markAsDisposed(s15);
   }
-  function vi(s15, t) {
-    dt?.setParent(s15, t);
+  function vi(s15, t2) {
+    dt?.setParent(s15, t2);
   }
-  function Kl(s15, t) {
-    if (dt) for (let e of s15) dt.setParent(e, t);
+  function Kl(s15, t2) {
+    if (dt) for (let e of s15) dt.setParent(e, t2);
   }
   function Gn(s15) {
     return dt?.markAsSingleton(s15), s15;
   }
   function Ne(s15) {
     if (zn.is(s15)) {
-      let t = [];
+      let t2 = [];
       for (let e of s15) if (e) try {
         e.dispose();
       } catch (i) {
-        t.push(i);
+        t2.push(i);
       }
-      if (t.length === 1) throw t[0];
-      if (t.length > 1) throw new AggregateError(t, "Encountered errors while disposing of store");
+      if (t2.length === 1) throw t2[0];
+      if (t2.length > 1) throw new AggregateError(t2, "Encountered errors while disposing of store");
       return Array.isArray(s15) ? [] : s15;
     } else if (s15) return s15.dispose(), s15;
   }
   function ho(...s15) {
-    let t = C(() => Ne(s15));
-    return Kl(s15, t), t;
+    let t2 = C(() => Ne(s15));
+    return Kl(s15, t2), t2;
   }
   function C(s15) {
-    let t = fr({ dispose: Kn(() => {
-      pr(t), s15();
+    let t2 = fr({ dispose: Kn(() => {
+      pr(t2), s15();
     }) });
-    return t;
+    return t2;
   }
   var dr = class dr2 {
     constructor() {
@@ -2439,19 +2969,19 @@ ${h2.join(`
         this._toDispose.clear();
       }
     }
-    add(t) {
-      if (!t) return t;
-      if (t === this) throw new Error("Cannot register a disposable on itself!");
-      return vi(t, this), this._isDisposed ? dr2.DISABLE_DISPOSED_WARNING || console.warn(new Error("Trying to add a disposable to a DisposableStore that has already been disposed of. The added object will be leaked!").stack) : this._toDispose.add(t), t;
+    add(t2) {
+      if (!t2) return t2;
+      if (t2 === this) throw new Error("Cannot register a disposable on itself!");
+      return vi(t2, this), this._isDisposed ? dr2.DISABLE_DISPOSED_WARNING || console.warn(new Error("Trying to add a disposable to a DisposableStore that has already been disposed of. The added object will be leaked!").stack) : this._toDispose.add(t2), t2;
     }
-    delete(t) {
-      if (t) {
-        if (t === this) throw new Error("Cannot dispose a disposable on itself!");
-        this._toDispose.delete(t), t.dispose();
+    delete(t2) {
+      if (t2) {
+        if (t2 === this) throw new Error("Cannot dispose a disposable on itself!");
+        this._toDispose.delete(t2), t2.dispose();
       }
     }
-    deleteAndLeak(t) {
-      t && this._toDispose.has(t) && (this._toDispose.delete(t), vi(t, null));
+    deleteAndLeak(t2) {
+      t2 && this._toDispose.has(t2) && (this._toDispose.delete(t2), vi(t2, null));
     }
   };
   dr.DISABLE_DISPOSED_WARNING = false;
@@ -2464,9 +2994,9 @@ ${h2.join(`
     dispose() {
       pr(this), this._store.dispose();
     }
-    _register(t) {
-      if (t === this) throw new Error("Cannot register a disposable on itself!");
-      return this._store.add(t);
+    _register(t2) {
+      if (t2 === this) throw new Error("Cannot register a disposable on itself!");
+      return this._store.add(t2);
     }
   };
   D.None = Object.freeze({ dispose() {
@@ -2479,8 +3009,8 @@ ${h2.join(`
     get value() {
       return this._isDisposed ? void 0 : this._value;
     }
-    set value(t) {
-      this._isDisposed || t === this._value || (this._value?.dispose(), t && vi(t, this), this._value = t);
+    set value(t2) {
+      this._isDisposed || t2 === this._value || (this._value?.dispose(), t2 && vi(t2, this), this._value = t2);
     }
     clear() {
       this.value = void 0;
@@ -2489,14 +3019,14 @@ ${h2.join(`
       this._isDisposed = true, pr(this), this._value?.dispose(), this._value = void 0;
     }
     clearAndLeak() {
-      let t = this._value;
-      return this._value = void 0, t && vi(t, null), t;
+      let t2 = this._value;
+      return this._value = void 0, t2 && vi(t2, null), t2;
     }
   };
   var fe = typeof window == "object" ? window : globalThis;
   var kt = class kt2 {
-    constructor(t) {
-      this.element = t, this.next = kt2.Undefined, this.prev = kt2.Undefined;
+    constructor(t2) {
+      this.element = t2, this.next = kt2.Undefined, this.prev = kt2.Undefined;
     }
   };
   kt.Undefined = new kt(void 0);
@@ -2514,21 +3044,21 @@ ${h2.join(`
       return this._first === G.Undefined;
     }
     clear() {
-      let t = this._first;
-      for (; t !== G.Undefined; ) {
-        let e = t.next;
-        t.prev = G.Undefined, t.next = G.Undefined, t = e;
+      let t2 = this._first;
+      for (; t2 !== G.Undefined; ) {
+        let e = t2.next;
+        t2.prev = G.Undefined, t2.next = G.Undefined, t2 = e;
       }
       this._first = G.Undefined, this._last = G.Undefined, this._size = 0;
     }
-    unshift(t) {
-      return this._insert(t, false);
+    unshift(t2) {
+      return this._insert(t2, false);
     }
-    push(t) {
-      return this._insert(t, true);
+    push(t2) {
+      return this._insert(t2, true);
     }
-    _insert(t, e) {
-      let i = new G(t);
+    _insert(t2, e) {
+      let i = new G(t2);
       if (this._first === G.Undefined) this._first = i, this._last = i;
       else if (e) {
         let n = this._last;
@@ -2545,35 +3075,35 @@ ${h2.join(`
     }
     shift() {
       if (this._first !== G.Undefined) {
-        let t = this._first.element;
-        return this._remove(this._first), t;
+        let t2 = this._first.element;
+        return this._remove(this._first), t2;
       }
     }
     pop() {
       if (this._last !== G.Undefined) {
-        let t = this._last.element;
-        return this._remove(this._last), t;
+        let t2 = this._last.element;
+        return this._remove(this._last), t2;
       }
     }
-    _remove(t) {
-      if (t.prev !== G.Undefined && t.next !== G.Undefined) {
-        let e = t.prev;
-        e.next = t.next, t.next.prev = e;
-      } else t.prev === G.Undefined && t.next === G.Undefined ? (this._first = G.Undefined, this._last = G.Undefined) : t.next === G.Undefined ? (this._last = this._last.prev, this._last.next = G.Undefined) : t.prev === G.Undefined && (this._first = this._first.next, this._first.prev = G.Undefined);
+    _remove(t2) {
+      if (t2.prev !== G.Undefined && t2.next !== G.Undefined) {
+        let e = t2.prev;
+        e.next = t2.next, t2.next.prev = e;
+      } else t2.prev === G.Undefined && t2.next === G.Undefined ? (this._first = G.Undefined, this._last = G.Undefined) : t2.next === G.Undefined ? (this._last = this._last.prev, this._last.next = G.Undefined) : t2.prev === G.Undefined && (this._first = this._first.next, this._first.prev = G.Undefined);
       this._size -= 1;
     }
     *[Symbol.iterator]() {
-      let t = this._first;
-      for (; t !== G.Undefined; ) yield t.element, t = t.next;
+      let t2 = this._first;
+      for (; t2 !== G.Undefined; ) yield t2.element, t2 = t2.next;
     }
   };
   var zl = globalThis.performance && typeof globalThis.performance.now == "function";
   var mr = class s6 {
-    static create(t) {
-      return new s6(t);
+    static create(t2) {
+      return new s6(t2);
     }
-    constructor(t) {
-      this._now = zl && t === false ? Date.now : globalThis.performance.now.bind(globalThis.performance), this._startTime = this._now(), this._stopTime = -1;
+    constructor(t2) {
+      this._now = zl && t2 === false ? Date.now : globalThis.performance.now.bind(globalThis.performance), this._startTime = this._now(), this._stopTime = -1;
     }
     stop() {
       this._stopTime = this._now();
@@ -2591,7 +3121,7 @@ ${h2.join(`
   var $;
   ((Qe) => {
     Qe.None = () => D.None;
-    function t(y) {
+    function t2(y) {
       if ($l) {
         let { onDidAddListener: T } = y, g = gi.create(), w = 0;
         y.onDidAddListener = () => {
@@ -2649,7 +3179,7 @@ ${h2.join(`
       }, onDidRemoveLastListener() {
         g?.dispose();
       } };
-      T || t(w);
+      T || t2(w);
       let E = new v(w);
       return T?.add(E), E.event;
     }
@@ -2669,7 +3199,7 @@ ${h2.join(`
       }, onDidRemoveLastListener() {
         le = void 0, Z.dispose();
       } };
-      N || t(et);
+      N || t2(et);
       let me = new v(et);
       return N?.add(me), me.event;
     }
@@ -2790,7 +3320,7 @@ ${h2.join(`
         }, onDidRemoveLastListener: () => {
           T.removeObserver(this);
         } };
-        g || t(w), this.emitter = new v(w), g && g.add(this.emitter);
+        g || t2(w), this.emitter = new v(w), g && g.add(this.emitter);
       }
       beginUpdate(T) {
         this._counter++;
@@ -2828,20 +3358,20 @@ ${h2.join(`
     Qe.fromObservableLight = V;
   })($ ||= {});
   var Mt = class Mt2 {
-    constructor(t) {
+    constructor(t2) {
       this.listenerCount = 0;
       this.invocationCount = 0;
       this.elapsedOverall = 0;
       this.durations = [];
-      this.name = `${t}_${Mt2._idPool++}`, Mt2.all.add(this);
+      this.name = `${t2}_${Mt2._idPool++}`, Mt2.all.add(this);
     }
-    start(t) {
-      this._stopWatch = new mr(), this.listenerCount = t;
+    start(t2) {
+      this._stopWatch = new mr(), this.listenerCount = t2;
     }
     stop() {
       if (this._stopWatch) {
-        let t = this._stopWatch.elapsed();
-        this.durations.push(t), this.elapsedOverall += t, this.invocationCount += 1, this._stopWatch = void 0;
+        let t2 = this._stopWatch.elapsed();
+        this.durations.push(t2), this.elapsedOverall += t2, this.invocationCount += 1, this._stopWatch = void 0;
       }
     }
   };
@@ -2849,8 +3379,8 @@ ${h2.join(`
   var $n = Mt;
   var po = -1;
   var br = class br2 {
-    constructor(t, e, i = (br2._idPool++).toString(16).padStart(3, "0")) {
-      this._errorHandler = t;
+    constructor(t2, e, i = (br2._idPool++).toString(16).padStart(3, "0")) {
+      this._errorHandler = t2;
       this.threshold = e;
       this.name = i;
       this._warnCountdown = 0;
@@ -2858,12 +3388,12 @@ ${h2.join(`
     dispose() {
       this._stacks?.clear();
     }
-    check(t, e) {
+    check(t2, e) {
       let i = this.threshold;
       if (i <= 0 || e < i) return;
       this._stacks || (this._stacks = /* @__PURE__ */ new Map());
-      let r = this._stacks.get(t.value) || 0;
-      if (this._stacks.set(t.value, r + 1), this._warnCountdown -= 1, this._warnCountdown <= 0) {
+      let r = this._stacks.get(t2.value) || 0;
+      if (this._stacks.set(t2.value, r + 1), this._warnCountdown -= 1, this._warnCountdown <= 0) {
         this._warnCountdown = i * 0.5;
         let [n, o2] = this.getMostFrequentStack(), l = `[${this.name}] potential listener LEAK detected, having ${e} listeners already. MOST frequent listener (${o2}):`;
         console.warn(l), console.warn(n);
@@ -2871,26 +3401,26 @@ ${h2.join(`
         this._errorHandler(a);
       }
       return () => {
-        let n = this._stacks.get(t.value) || 0;
-        this._stacks.set(t.value, n - 1);
+        let n = this._stacks.get(t2.value) || 0;
+        this._stacks.set(t2.value, n - 1);
       };
     }
     getMostFrequentStack() {
       if (!this._stacks) return;
-      let t, e = 0;
-      for (let [i, r] of this._stacks) (!t || e < r) && (t = [i, r], e = r);
-      return t;
+      let t2, e = 0;
+      for (let [i, r] of this._stacks) (!t2 || e < r) && (t2 = [i, r], e = r);
+      return t2;
     }
   };
   br._idPool = 1;
   var Vn = br;
   var gi = class s7 {
-    constructor(t) {
-      this.value = t;
+    constructor(t2) {
+      this.value = t2;
     }
     static create() {
-      let t = new Error();
-      return new s7(t.stack ?? "");
+      let t2 = new Error();
+      return new s7(t2.stack ?? "");
     }
     print() {
       console.warn(this.value.split(`
@@ -2899,28 +3429,28 @@ ${h2.join(`
     }
   };
   var qn = class extends Error {
-    constructor(t, e) {
-      super(t), this.name = "ListenerLeakError", this.stack = e;
+    constructor(t2, e) {
+      super(t2), this.name = "ListenerLeakError", this.stack = e;
     }
   };
   var Yn = class extends Error {
-    constructor(t, e) {
-      super(t), this.name = "ListenerRefusalError", this.stack = e;
+    constructor(t2, e) {
+      super(t2), this.name = "ListenerRefusalError", this.stack = e;
     }
   };
   var Vl = 0;
   var Pt = class {
-    constructor(t) {
-      this.value = t;
+    constructor(t2) {
+      this.value = t2;
       this.id = Vl++;
     }
   };
   var ql = 2;
-  var Yl = (s15, t) => {
-    if (s15 instanceof Pt) t(s15);
+  var Yl = (s15, t2) => {
+    if (s15 instanceof Pt) t2(s15);
     else for (let e = 0; e < s15.length; e++) {
       let i = s15[e];
-      i && t(i);
+      i && t2(i);
     }
   };
   var _r;
@@ -2929,22 +3459,22 @@ ${h2.join(`
     setInterval(() => {
       s15.length !== 0 && (console.warn("[LEAKING LISTENERS] GC'ed these listeners that were NOT yet disposed:"), console.warn(s15.join(`
 `)), s15.length = 0);
-    }, 3e3), _r = new FinalizationRegistry((t) => {
-      typeof t == "string" && s15.push(t);
+    }, 3e3), _r = new FinalizationRegistry((t2) => {
+      typeof t2 == "string" && s15.push(t2);
     });
   }
   var v = class {
-    constructor(t) {
+    constructor(t2) {
       this._size = 0;
-      this._options = t, this._leakageMon = po > 0 || this._options?.leakWarningThreshold ? new Vn(t?.onListenerError ?? Lt, this._options?.leakWarningThreshold ?? po) : void 0, this._perfMon = this._options?._profName ? new $n(this._options._profName) : void 0, this._deliveryQueue = this._options?.deliveryQueue;
+      this._options = t2, this._leakageMon = po > 0 || this._options?.leakWarningThreshold ? new Vn(t2?.onListenerError ?? Lt, this._options?.leakWarningThreshold ?? po) : void 0, this._perfMon = this._options?._profName ? new $n(this._options._profName) : void 0, this._deliveryQueue = this._options?.deliveryQueue;
     }
     dispose() {
       if (!this._disposed) {
         if (this._disposed = true, this._deliveryQueue?.current === this && this._deliveryQueue.reset(), this._listeners) {
           if (fo) {
-            let t = this._listeners;
+            let t2 = this._listeners;
             queueMicrotask(() => {
-              Yl(t, (e) => e.stack?.print());
+              Yl(t2, (e) => e.stack?.print());
             });
           }
           this._listeners = void 0, this._size = 0;
@@ -2953,7 +3483,7 @@ ${h2.join(`
       }
     }
     get event() {
-      return this._event ??= (t, e, i) => {
+      return this._event ??= (t2, e, i) => {
         if (this._leakageMon && this._size > this._leakageMon.threshold ** 2) {
           let a = `[${this._leakageMon.name}] REFUSES to accept new listeners because it exceeded its threshold by far (${this._size} vs ${this._leakageMon.threshold})`;
           console.warn(a);
@@ -2961,8 +3491,8 @@ ${h2.join(`
           return (this._options?.onListenerError || Lt)(h2), D.None;
         }
         if (this._disposed) return D.None;
-        e && (t = t.bind(e));
-        let r = new Pt(t), n, o2;
+        e && (t2 = t2.bind(e));
+        let r = new Pt(t2), n, o2;
         this._leakageMon && this._size >= Math.ceil(this._leakageMon.threshold * 0.2) && (r.stack = gi.create(), n = this._leakageMon.check(r.stack, this._size + 1)), fo && (r.stack = o2 ?? gi.create()), this._listeners ? this._listeners instanceof Pt ? (this._deliveryQueue ??= new jn(), this._listeners = [this._listeners, r]) : this._listeners.push(r) : (this._options?.onWillAddFirstListener?.(this), this._listeners = r, this._options?.onDidAddFirstListener?.(this)), this._size++;
         let l = C(() => {
           _r?.unregister(l), n?.(), this._removeListener(r);
@@ -2976,13 +3506,13 @@ ${h2.join(`
         return l;
       }, this._event;
     }
-    _removeListener(t) {
+    _removeListener(t2) {
       if (this._options?.onWillRemoveListener?.(this), !this._listeners) return;
       if (this._size === 1) {
         this._listeners = void 0, this._options?.onDidRemoveLastListener?.(this), this._size = 0;
         return;
       }
-      let e = this._listeners, i = e.indexOf(t);
+      let e = this._listeners, i = e.indexOf(t2);
       if (i === -1) throw console.log("disposed?", this._disposed), console.log("size?", this._size), console.log("arr?", JSON.stringify(this._listeners)), new Error("Attempted to dispose unknown listener");
       this._size--, e[i] = void 0;
       let r = this._deliveryQueue.current === this;
@@ -2992,29 +3522,29 @@ ${h2.join(`
         e.length = n;
       }
     }
-    _deliver(t, e) {
-      if (!t) return;
+    _deliver(t2, e) {
+      if (!t2) return;
       let i = this._options?.onListenerError || Lt;
       if (!i) {
-        t.value(e);
+        t2.value(e);
         return;
       }
       try {
-        t.value(e);
+        t2.value(e);
       } catch (r) {
         i(r);
       }
     }
-    _deliverQueue(t) {
-      let e = t.current._listeners;
-      for (; t.i < t.end; ) this._deliver(e[t.i++], t.value);
-      t.reset();
+    _deliverQueue(t2) {
+      let e = t2.current._listeners;
+      for (; t2.i < t2.end; ) this._deliver(e[t2.i++], t2.value);
+      t2.reset();
     }
-    fire(t) {
-      if (this._deliveryQueue?.current && (this._deliverQueue(this._deliveryQueue), this._perfMon?.stop()), this._perfMon?.start(this._size), this._listeners) if (this._listeners instanceof Pt) this._deliver(this._listeners, t);
+    fire(t2) {
+      if (this._deliveryQueue?.current && (this._deliverQueue(this._deliveryQueue), this._perfMon?.stop()), this._perfMon?.start(this._size), this._listeners) if (this._listeners instanceof Pt) this._deliver(this._listeners, t2);
       else {
         let e = this._deliveryQueue;
-        e.enqueue(this, t, this._listeners.length), this._deliverQueue(e);
+        e.enqueue(this, t2, this._listeners.length), this._deliverQueue(e);
       }
       this._perfMon?.stop();
     }
@@ -3027,8 +3557,8 @@ ${h2.join(`
       this.i = -1;
       this.end = 0;
     }
-    enqueue(t, e, i) {
-      this.i = 0, this.end = i, this.current = t, this.value = e;
+    enqueue(t2, e, i) {
+      this.i = 0, this.end = i, this.current = t2, this.value = e;
     }
     reset() {
       this.i = this.end, this.current = void 0, this.value = void 0;
@@ -3044,36 +3574,36 @@ ${h2.join(`
       this.onDidChangeFullscreen = this._onDidChangeFullscreen.event;
       this.mapWindowIdToFullScreen = /* @__PURE__ */ new Map();
     }
-    getZoomLevel(t) {
-      return this.mapWindowIdToZoomLevel.get(this.getWindowId(t)) ?? 0;
+    getZoomLevel(t2) {
+      return this.mapWindowIdToZoomLevel.get(this.getWindowId(t2)) ?? 0;
     }
-    setZoomLevel(t, e) {
-      if (this.getZoomLevel(e) === t) return;
+    setZoomLevel(t2, e) {
+      if (this.getZoomLevel(e) === t2) return;
       let i = this.getWindowId(e);
-      this.mapWindowIdToZoomLevel.set(i, t), this._onDidChangeZoomLevel.fire(i);
+      this.mapWindowIdToZoomLevel.set(i, t2), this._onDidChangeZoomLevel.fire(i);
     }
-    getZoomFactor(t) {
-      return this.mapWindowIdToZoomFactor.get(this.getWindowId(t)) ?? 1;
+    getZoomFactor(t2) {
+      return this.mapWindowIdToZoomFactor.get(this.getWindowId(t2)) ?? 1;
     }
-    setZoomFactor(t, e) {
-      this.mapWindowIdToZoomFactor.set(this.getWindowId(e), t);
+    setZoomFactor(t2, e) {
+      this.mapWindowIdToZoomFactor.set(this.getWindowId(e), t2);
     }
-    setFullscreen(t, e) {
-      if (this.isFullscreen(e) === t) return;
+    setFullscreen(t2, e) {
+      if (this.isFullscreen(e) === t2) return;
       let i = this.getWindowId(e);
-      this.mapWindowIdToFullScreen.set(i, t), this._onDidChangeFullscreen.fire(i);
+      this.mapWindowIdToFullScreen.set(i, t2), this._onDidChangeFullscreen.fire(i);
     }
-    isFullscreen(t) {
-      return !!this.mapWindowIdToFullScreen.get(this.getWindowId(t));
+    isFullscreen(t2) {
+      return !!this.mapWindowIdToFullScreen.get(this.getWindowId(t2));
     }
-    getWindowId(t) {
-      return t.vscodeWindowId;
+    getWindowId(t2) {
+      return t2.vscodeWindowId;
     }
   };
   gr.INSTANCE = new gr();
   var Si = gr;
-  function Xl(s15, t, e) {
-    typeof t == "string" && (t = s15.matchMedia(t)), t.addEventListener("change", e);
+  function Xl(s15, t2, e) {
+    typeof t2 == "string" && (t2 = s15.matchMedia(t2)), t2.addEventListener("change", e);
   }
   var Eu = Si.INSTANCE.onDidChangeZoomLevel;
   function mo(s15) {
@@ -3089,9 +3619,9 @@ ${h2.join(`
   var yu = Ot.indexOf("Android") >= 0;
   var vr = false;
   if (typeof fe.matchMedia == "function") {
-    let s15 = fe.matchMedia("(display-mode: standalone) or (display-mode: window-controls-overlay)"), t = fe.matchMedia("(display-mode: fullscreen)");
+    let s15 = fe.matchMedia("(display-mode: standalone) or (display-mode: window-controls-overlay)"), t2 = fe.matchMedia("(display-mode: fullscreen)");
     vr = s15.matches, Xl(fe, s15, ({ matches: e }) => {
-      vr && t.matches || (vr = e);
+      vr && t2.matches || (vr = e);
     });
   }
   function _o() {
@@ -3122,8 +3652,8 @@ ${h2.join(`
     yr = xe.platform === "win32", xr = xe.platform === "darwin", Ii = xe.platform === "linux", Zl = Ii && !!xe.env.SNAP && !!xe.env.SNAP_REVISION, Jl = So, ea = !!xe.env.CI || !!xe.env.BUILD_ARTIFACTSTAGINGDIRECTORY, Tr = Nt, Ir = Nt;
     let s15 = xe.env.VSCODE_NLS_CONFIG;
     if (s15) try {
-      let t = JSON.parse(s15);
-      Tr = t.userLocale, bo = t.osLocale, Ir = t.resolvedLanguage || Nt, ia = t.languagePack?.translationsConfigFile;
+      let t2 = JSON.parse(s15);
+      Tr = t2.userLocale, bo = t2.osLocale, Ir = t2.resolvedLanguage || Nt, ia = t2.languagePack?.translationsConfigFile;
     } catch {
     }
     vo = true;
@@ -3144,10 +3674,10 @@ ${h2.join(`
       return st;
     }
     i.value = s15;
-    function t() {
+    function t2() {
       return st.length === 2 ? st === "en" : st.length >= 3 ? st[0] === "e" && st[1] === "n" && st[2] === "-" : false;
     }
-    i.isDefaultVariant = t;
+    i.isDefaultVariant = t2;
     function e() {
       return st === "en";
     }
@@ -3166,9 +3696,9 @@ ${h2.join(`
           }
         }
       });
-      let t = 0;
+      let t2 = 0;
       return (e) => {
-        let i = ++t;
+        let i = ++t2;
         s15.push({ id: i, callback: e }), Ve.postMessage({ vscodeScheduleAsyncWork: i }, "*");
       };
     }
@@ -3185,14 +3715,14 @@ ${h2.join(`
     constructor() {
       this._keyCodeToStr = [], this._strToKeyCode = /* @__PURE__ */ Object.create(null);
     }
-    define(t, e) {
-      this._keyCodeToStr[t] = e, this._strToKeyCode[e.toLowerCase()] = t;
+    define(t2, e) {
+      this._keyCodeToStr[t2] = e, this._strToKeyCode[e.toLowerCase()] = t2;
     }
-    keyCodeToStr(t) {
-      return this._keyCodeToStr[t];
+    keyCodeToStr(t2) {
+      return this._keyCodeToStr[t2];
     }
-    strToKeyCode(t) {
-      return this._strToKeyCode[t.toLowerCase()] || 0;
+    strToKeyCode(t2) {
+      return this._strToKeyCode[t2.toLowerCase()] || 0;
     }
   };
   var Jn = new yi();
@@ -3205,10 +3735,10 @@ ${h2.join(`
       return Jn.keyCodeToStr(l);
     }
     o2.toString = s15;
-    function t(l) {
+    function t2(l) {
       return Jn.strToKeyCode(l);
     }
-    o2.fromString = t;
+    o2.fromString = t2;
     function e(l) {
       return To.keyCodeToStr(l);
     }
@@ -3238,19 +3768,19 @@ ${h2.join(`
     o2.toElectronAccelerator = n;
   })(Qn ||= {});
   var Rr = class s8 {
-    constructor(t, e, i, r, n) {
-      this.ctrlKey = t;
+    constructor(t2, e, i, r, n) {
+      this.ctrlKey = t2;
       this.shiftKey = e;
       this.altKey = i;
       this.metaKey = r;
       this.keyCode = n;
     }
-    equals(t) {
-      return t instanceof s8 && this.ctrlKey === t.ctrlKey && this.shiftKey === t.shiftKey && this.altKey === t.altKey && this.metaKey === t.metaKey && this.keyCode === t.keyCode;
+    equals(t2) {
+      return t2 instanceof s8 && this.ctrlKey === t2.ctrlKey && this.shiftKey === t2.shiftKey && this.altKey === t2.altKey && this.metaKey === t2.metaKey && this.keyCode === t2.keyCode;
     }
     getHashCode() {
-      let t = this.ctrlKey ? "1" : "0", e = this.shiftKey ? "1" : "0", i = this.altKey ? "1" : "0", r = this.metaKey ? "1" : "0";
-      return `K${t}${e}${i}${r}${this.keyCode}`;
+      let t2 = this.ctrlKey ? "1" : "0", e = this.shiftKey ? "1" : "0", i = this.altKey ? "1" : "0", r = this.metaKey ? "1" : "0";
+      return `K${t2}${e}${i}${r}${this.keyCode}`;
     }
     isModifierKey() {
       return this.keyCode === 0 || this.keyCode === 5 || this.keyCode === 57 || this.keyCode === 6 || this.keyCode === 4;
@@ -3263,18 +3793,18 @@ ${h2.join(`
     }
   };
   var es = class {
-    constructor(t) {
-      if (t.length === 0) throw eo("chords");
-      this.chords = t;
+    constructor(t2) {
+      if (t2.length === 0) throw eo("chords");
+      this.chords = t2;
     }
     getHashCode() {
-      let t = "";
-      for (let e = 0, i = this.chords.length; e < i; e++) e !== 0 && (t += ";"), t += this.chords[e].getHashCode();
-      return t;
+      let t2 = "";
+      for (let e = 0, i = this.chords.length; e < i; e++) e !== 0 && (t2 += ";"), t2 += this.chords[e].getHashCode();
+      return t2;
     }
-    equals(t) {
-      if (t === null || this.chords.length !== t.chords.length) return false;
-      for (let e = 0; e < this.chords.length; e++) if (!this.chords[e].equals(t.chords[e])) return false;
+    equals(t2) {
+      if (t2 === null || this.chords.length !== t2.chords.length) return false;
+      for (let e = 0; e < this.chords.length; e++) if (!this.chords[e].equals(t2.chords[e])) return false;
       return true;
     }
   };
@@ -3283,9 +3813,9 @@ ${h2.join(`
       let e = String.fromCharCode(s15.charCode).toUpperCase();
       return Qn.fromString(e);
     }
-    let t = s15.keyCode;
-    if (t === 3) return 7;
-    if (Ei) switch (t) {
+    let t2 = s15.keyCode;
+    if (t2 === 3) return 7;
+    if (Ei) switch (t2) {
       case 59:
         return 85;
       case 60:
@@ -3304,19 +3834,19 @@ ${h2.join(`
         break;
     }
     else if (Bt) {
-      if (Te && t === 93) return 57;
-      if (!Te && t === 92) return 57;
+      if (Te && t2 === 93) return 57;
+      if (!Te && t2 === 92) return 57;
     }
-    return yo[t] || 0;
+    return yo[t2] || 0;
   }
   var ua = Te ? 256 : 2048;
   var ha = 512;
   var da = 1024;
   var fa = Te ? 2048 : 256;
   var ft = class {
-    constructor(t) {
+    constructor(t2) {
       this._standardKeyboardEventBrand = true;
-      let e = t;
+      let e = t2;
       this.browserEvent = e, this.target = e.target, this.ctrlKey = e.ctrlKey, this.shiftKey = e.shiftKey, this.altKey = e.altKey, this.metaKey = e.metaKey, this.altGraphKey = e.getModifierState?.("AltGraph"), this.keyCode = ca(e), this.code = e.code, this.ctrlKey = this.ctrlKey || this.keyCode === 5, this.altKey = this.altKey || this.keyCode === 6, this.shiftKey = this.shiftKey || this.keyCode === 4, this.metaKey = this.metaKey || this.keyCode === 57, this._asKeybinding = this._computeKeybinding(), this._asKeyCodeChord = this._computeKeyCodeChord();
     }
     preventDefault() {
@@ -3328,46 +3858,46 @@ ${h2.join(`
     toKeyCodeChord() {
       return this._asKeyCodeChord;
     }
-    equals(t) {
-      return this._asKeybinding === t;
+    equals(t2) {
+      return this._asKeybinding === t2;
     }
     _computeKeybinding() {
-      let t = 0;
-      this.keyCode !== 5 && this.keyCode !== 4 && this.keyCode !== 6 && this.keyCode !== 57 && (t = this.keyCode);
+      let t2 = 0;
+      this.keyCode !== 5 && this.keyCode !== 4 && this.keyCode !== 6 && this.keyCode !== 57 && (t2 = this.keyCode);
       let e = 0;
-      return this.ctrlKey && (e |= ua), this.altKey && (e |= ha), this.shiftKey && (e |= da), this.metaKey && (e |= fa), e |= t, e;
+      return this.ctrlKey && (e |= ua), this.altKey && (e |= ha), this.shiftKey && (e |= da), this.metaKey && (e |= fa), e |= t2, e;
     }
     _computeKeyCodeChord() {
-      let t = 0;
-      return this.keyCode !== 5 && this.keyCode !== 4 && this.keyCode !== 6 && this.keyCode !== 57 && (t = this.keyCode), new Rr(this.ctrlKey, this.shiftKey, this.altKey, this.metaKey, t);
+      let t2 = 0;
+      return this.keyCode !== 5 && this.keyCode !== 4 && this.keyCode !== 6 && this.keyCode !== 57 && (t2 = this.keyCode), new Rr(this.ctrlKey, this.shiftKey, this.altKey, this.metaKey, t2);
     }
   };
   var wo = /* @__PURE__ */ new WeakMap();
   function pa(s15) {
     if (!s15.parent || s15.parent === s15) return null;
     try {
-      let t = s15.location, e = s15.parent.location;
-      if (t.origin !== "null" && e.origin !== "null" && t.origin !== e.origin) return null;
+      let t2 = s15.location, e = s15.parent.location;
+      if (t2.origin !== "null" && e.origin !== "null" && t2.origin !== e.origin) return null;
     } catch {
       return null;
     }
     return s15.parent;
   }
   var Lr = class {
-    static getSameOriginWindowChain(t) {
-      let e = wo.get(t);
+    static getSameOriginWindowChain(t2) {
+      let e = wo.get(t2);
       if (!e) {
-        e = [], wo.set(t, e);
-        let i = t, r;
+        e = [], wo.set(t2, e);
+        let i = t2, r;
         do
           r = pa(i), r ? e.push({ window: new WeakRef(i), iframeElement: i.frameElement || null }) : e.push({ window: new WeakRef(i), iframeElement: null }), i = r;
         while (i);
       }
       return e.slice(0);
     }
-    static getPositionOfChildWindowRelativeToAncestorWindow(t, e) {
-      if (!e || t === e) return { top: 0, left: 0 };
-      let i = 0, r = 0, n = this.getSameOriginWindowChain(t);
+    static getPositionOfChildWindowRelativeToAncestorWindow(t2, e) {
+      if (!e || t2 === e) return { top: 0, left: 0 };
+      let i = 0, r = 0, n = this.getSameOriginWindowChain(t2);
       for (let o2 of n) {
         let l = o2.window.deref();
         if (i += l?.scrollY ?? 0, r += l?.scrollX ?? 0, l === e || !o2.iframeElement) break;
@@ -3378,9 +3908,9 @@ ${h2.join(`
     }
   };
   var qe = class {
-    constructor(t, e) {
+    constructor(t2, e) {
       this.timestamp = Date.now(), this.browserEvent = e, this.leftButton = e.button === 0, this.middleButton = e.button === 1, this.rightButton = e.button === 2, this.buttons = e.buttons, this.target = e.target, this.detail = e.detail || 1, e.type === "dblclick" && (this.detail = 2), this.ctrlKey = e.ctrlKey, this.shiftKey = e.shiftKey, this.altKey = e.altKey, this.metaKey = e.metaKey, typeof e.pageX == "number" ? (this.posx = e.pageX, this.posy = e.pageY) : (this.posx = e.clientX + this.target.ownerDocument.body.scrollLeft + this.target.ownerDocument.documentElement.scrollLeft, this.posy = e.clientY + this.target.ownerDocument.body.scrollTop + this.target.ownerDocument.documentElement.scrollTop);
-      let i = Lr.getPositionOfChildWindowRelativeToAncestorWindow(t, e.view);
+      let i = Lr.getPositionOfChildWindowRelativeToAncestorWindow(t2, e.view);
       this.posx -= i.left, this.posy -= i.top;
     }
     preventDefault() {
@@ -3391,28 +3921,28 @@ ${h2.join(`
     }
   };
   var xi = class {
-    constructor(t, e = 0, i = 0) {
-      this.browserEvent = t || null, this.target = t ? t.target || t.targetNode || t.srcElement : null, this.deltaY = i, this.deltaX = e;
+    constructor(t2, e = 0, i = 0) {
+      this.browserEvent = t2 || null, this.target = t2 ? t2.target || t2.targetNode || t2.srcElement : null, this.deltaY = i, this.deltaX = e;
       let r = false;
       if (Ti) {
         let n = navigator.userAgent.match(/Chrome\/(\d+)/);
         r = (n ? parseInt(n[1]) : 123) <= 122;
       }
-      if (t) {
-        let n = t, o2 = t, l = t.view?.devicePixelRatio || 1;
+      if (t2) {
+        let n = t2, o2 = t2, l = t2.view?.devicePixelRatio || 1;
         if (typeof n.wheelDeltaY < "u") r ? this.deltaY = n.wheelDeltaY / (120 * l) : this.deltaY = n.wheelDeltaY / 120;
         else if (typeof o2.VERTICAL_AXIS < "u" && o2.axis === o2.VERTICAL_AXIS) this.deltaY = -o2.detail / 3;
-        else if (t.type === "wheel") {
-          let a = t;
-          a.deltaMode === a.DOM_DELTA_LINE ? Ei && !Te ? this.deltaY = -t.deltaY / 3 : this.deltaY = -t.deltaY : this.deltaY = -t.deltaY / 40;
+        else if (t2.type === "wheel") {
+          let a = t2;
+          a.deltaMode === a.DOM_DELTA_LINE ? Ei && !Te ? this.deltaY = -t2.deltaY / 3 : this.deltaY = -t2.deltaY : this.deltaY = -t2.deltaY / 40;
         }
         if (typeof n.wheelDeltaX < "u") Sr && wr ? this.deltaX = -(n.wheelDeltaX / 120) : r ? this.deltaX = n.wheelDeltaX / (120 * l) : this.deltaX = n.wheelDeltaX / 120;
-        else if (typeof o2.HORIZONTAL_AXIS < "u" && o2.axis === o2.HORIZONTAL_AXIS) this.deltaX = -t.detail / 3;
-        else if (t.type === "wheel") {
-          let a = t;
-          a.deltaMode === a.DOM_DELTA_LINE ? Ei && !Te ? this.deltaX = -t.deltaX / 3 : this.deltaX = -t.deltaX : this.deltaX = -t.deltaX / 40;
+        else if (typeof o2.HORIZONTAL_AXIS < "u" && o2.axis === o2.HORIZONTAL_AXIS) this.deltaX = -t2.detail / 3;
+        else if (t2.type === "wheel") {
+          let a = t2;
+          a.deltaMode === a.DOM_DELTA_LINE ? Ei && !Te ? this.deltaX = -t2.deltaX / 3 : this.deltaX = -t2.deltaX : this.deltaX = -t2.deltaX / 40;
         }
-        this.deltaY === 0 && this.deltaX === 0 && t.wheelDelta && (r ? this.deltaY = t.wheelDelta / (120 * l) : this.deltaY = t.wheelDelta / 120);
+        this.deltaY === 0 && this.deltaX === 0 && t2.wheelDelta && (r ? this.deltaY = t2.wheelDelta / (120 * l) : this.deltaY = t2.wheelDelta / 120);
       }
     }
     preventDefault() {
@@ -3422,8 +3952,8 @@ ${h2.join(`
       this.browserEvent?.stopPropagation();
     }
   };
-  var Do = Object.freeze(function(s15, t) {
-    let e = setTimeout(s15.bind(t), 0);
+  var Do = Object.freeze(function(s15, t2) {
+    let e = setTimeout(s15.bind(t2), 0);
     return { dispose() {
       clearTimeout(e);
     } };
@@ -3454,9 +3984,9 @@ ${h2.join(`
     }
   };
   var Ye = class {
-    constructor(t, e) {
+    constructor(t2, e) {
       this._isDisposed = false;
-      this._token = -1, typeof t == "function" && typeof e == "number" && this.setIfNotSet(t, e);
+      this._token = -1, typeof t2 == "function" && typeof e == "number" && this.setIfNotSet(t2, e);
     }
     dispose() {
       this.cancel(), this._isDisposed = true;
@@ -3464,16 +3994,16 @@ ${h2.join(`
     cancel() {
       this._token !== -1 && (clearTimeout(this._token), this._token = -1);
     }
-    cancelAndSet(t, e) {
+    cancelAndSet(t2, e) {
       if (this._isDisposed) throw new Rt("Calling 'cancelAndSet' on a disposed TimeoutTimer");
       this.cancel(), this._token = setTimeout(() => {
-        this._token = -1, t();
+        this._token = -1, t2();
       }, e);
     }
-    setIfNotSet(t, e) {
+    setIfNotSet(t2, e) {
       if (this._isDisposed) throw new Rt("Calling 'setIfNotSet' on a disposed TimeoutTimer");
       this._token === -1 && (this._token = setTimeout(() => {
-        this._token = -1, t();
+        this._token = -1, t2();
       }, e));
     }
   };
@@ -3485,11 +4015,11 @@ ${h2.join(`
     cancel() {
       this.disposable?.dispose(), this.disposable = void 0;
     }
-    cancelAndSet(t, e, i = globalThis) {
+    cancelAndSet(t2, e, i = globalThis) {
       if (this.isDisposed) throw new Rt("Calling 'cancelAndSet' on a disposed IntervalTimer");
       this.cancel();
       let r = i.setInterval(() => {
-        t();
+        t2();
       }, e);
       this.disposable = C(() => {
         i.clearInterval(r), this.disposable = void 0;
@@ -3502,11 +4032,11 @@ ${h2.join(`
   var ba;
   var Ar;
   (function() {
-    typeof globalThis.requestIdleCallback != "function" || typeof globalThis.cancelIdleCallback != "function" ? Ar = (s15, t) => {
+    typeof globalThis.requestIdleCallback != "function" || typeof globalThis.cancelIdleCallback != "function" ? Ar = (s15, t2) => {
       Eo(() => {
         if (e) return;
         let i = Date.now() + 15;
-        t(Object.freeze({ didTimeout: true, timeRemaining() {
+        t2(Object.freeze({ didTimeout: true, timeRemaining() {
           return Math.max(0, i - Date.now());
         } }));
       });
@@ -3514,8 +4044,8 @@ ${h2.join(`
       return { dispose() {
         e || (e = true);
       } };
-    } : Ar = (s15, t, e) => {
-      let i = s15.requestIdleCallback(t, typeof e == "number" ? { timeout: e } : void 0), r = false;
+    } : Ar = (s15, t2, e) => {
+      let i = s15.requestIdleCallback(t2, typeof e == "number" ? { timeout: e } : void 0), r = false;
       return { dispose() {
         r || (r = true, s15.cancelIdleCallback(i));
       } };
@@ -3531,7 +4061,7 @@ ${h2.join(`
       return n;
     }
     e.settled = s15;
-    function t(i) {
+    function t2(i) {
       return new Promise(async (r, n) => {
         try {
           await i(r, n);
@@ -3540,36 +4070,36 @@ ${h2.join(`
         }
       });
     }
-    e.withAsyncBody = t;
+    e.withAsyncBody = t2;
   })(va ||= {});
   var _e = class _e2 {
-    static fromArray(t) {
+    static fromArray(t2) {
       return new _e2((e) => {
-        e.emitMany(t);
+        e.emitMany(t2);
       });
     }
-    static fromPromise(t) {
+    static fromPromise(t2) {
       return new _e2(async (e) => {
-        e.emitMany(await t);
+        e.emitMany(await t2);
       });
     }
-    static fromPromises(t) {
+    static fromPromises(t2) {
       return new _e2(async (e) => {
-        await Promise.all(t.map(async (i) => e.emitOne(await i)));
+        await Promise.all(t2.map(async (i) => e.emitOne(await i)));
       });
     }
-    static merge(t) {
+    static merge(t2) {
       return new _e2(async (e) => {
-        await Promise.all(t.map(async (i) => {
+        await Promise.all(t2.map(async (i) => {
           for await (let r of i) e.emitOne(r);
         }));
       });
     }
-    constructor(t, e) {
+    constructor(t2, e) {
       this._state = 0, this._results = [], this._error = null, this._onReturn = e, this._onStateChanged = new v(), queueMicrotask(async () => {
         let i = { emitOne: (r) => this.emitOne(r), emitMany: (r) => this.emitMany(r), reject: (r) => this.reject(r) };
         try {
-          await Promise.resolve(t(i)), this.resolve();
+          await Promise.resolve(t2(i)), this.resolve();
         } catch (r) {
           this.reject(r);
         } finally {
@@ -3578,57 +4108,57 @@ ${h2.join(`
       });
     }
     [Symbol.asyncIterator]() {
-      let t = 0;
+      let t2 = 0;
       return { next: async () => {
         do {
           if (this._state === 2) throw this._error;
-          if (t < this._results.length) return { done: false, value: this._results[t++] };
+          if (t2 < this._results.length) return { done: false, value: this._results[t2++] };
           if (this._state === 1) return { done: true, value: void 0 };
           await $.toPromise(this._onStateChanged.event);
         } while (true);
       }, return: async () => (this._onReturn?.(), { done: true, value: void 0 }) };
     }
-    static map(t, e) {
+    static map(t2, e) {
       return new _e2(async (i) => {
-        for await (let r of t) i.emitOne(e(r));
+        for await (let r of t2) i.emitOne(e(r));
       });
     }
-    map(t) {
-      return _e2.map(this, t);
+    map(t2) {
+      return _e2.map(this, t2);
     }
-    static filter(t, e) {
+    static filter(t2, e) {
       return new _e2(async (i) => {
-        for await (let r of t) e(r) && i.emitOne(r);
+        for await (let r of t2) e(r) && i.emitOne(r);
       });
     }
-    filter(t) {
-      return _e2.filter(this, t);
+    filter(t2) {
+      return _e2.filter(this, t2);
     }
-    static coalesce(t) {
-      return _e2.filter(t, (e) => !!e);
+    static coalesce(t2) {
+      return _e2.filter(t2, (e) => !!e);
     }
     coalesce() {
       return _e2.coalesce(this);
     }
-    static async toPromise(t) {
+    static async toPromise(t2) {
       let e = [];
-      for await (let i of t) e.push(i);
+      for await (let i of t2) e.push(i);
       return e;
     }
     toPromise() {
       return _e2.toPromise(this);
     }
-    emitOne(t) {
-      this._state === 0 && (this._results.push(t), this._onStateChanged.fire());
+    emitOne(t2) {
+      this._state === 0 && (this._results.push(t2), this._onStateChanged.fire());
     }
-    emitMany(t) {
-      this._state === 0 && (this._results = this._results.concat(t), this._onStateChanged.fire());
+    emitMany(t2) {
+      this._state === 0 && (this._results = this._results.concat(t2), this._onStateChanged.fire());
     }
     resolve() {
       this._state === 0 && (this._state = 1, this._onStateChanged.fire());
     }
-    reject(t) {
-      this._state === 0 && (this._state = 2, this._error = t, this._onStateChanged.fire());
+    reject(t2) {
+      this._state === 0 && (this._state = 2, this._error = t2, this._onStateChanged.fire());
     }
   };
   _e.EMPTY = _e.fromArray([]);
@@ -3638,58 +4168,58 @@ ${h2.join(`
   function is(s15) {
     return 56320 <= s15 && s15 <= 57343;
   }
-  function Ao(s15, t) {
-    return (s15 - 55296 << 10) + (t - 56320) + 65536;
+  function Ao(s15, t2) {
+    return (s15 - 55296 << 10) + (t2 - 56320) + 65536;
   }
   function Mo(s15) {
     return ns(s15, 0);
   }
-  function ns(s15, t) {
+  function ns(s15, t2) {
     switch (typeof s15) {
       case "object":
-        return s15 === null ? je(349, t) : Array.isArray(s15) ? Ea(s15, t) : Ta(s15, t);
+        return s15 === null ? je(349, t2) : Array.isArray(s15) ? Ea(s15, t2) : Ta(s15, t2);
       case "string":
-        return Po(s15, t);
+        return Po(s15, t2);
       case "boolean":
-        return Sa(s15, t);
+        return Sa(s15, t2);
       case "number":
-        return je(s15, t);
+        return je(s15, t2);
       case "undefined":
-        return je(937, t);
+        return je(937, t2);
       default:
-        return je(617, t);
+        return je(617, t2);
     }
   }
-  function je(s15, t) {
-    return (t << 5) - t + s15 | 0;
+  function je(s15, t2) {
+    return (t2 << 5) - t2 + s15 | 0;
   }
-  function Sa(s15, t) {
-    return je(s15 ? 433 : 863, t);
+  function Sa(s15, t2) {
+    return je(s15 ? 433 : 863, t2);
   }
-  function Po(s15, t) {
-    t = je(149417, t);
-    for (let e = 0, i = s15.length; e < i; e++) t = je(s15.charCodeAt(e), t);
-    return t;
+  function Po(s15, t2) {
+    t2 = je(149417, t2);
+    for (let e = 0, i = s15.length; e < i; e++) t2 = je(s15.charCodeAt(e), t2);
+    return t2;
   }
-  function Ea(s15, t) {
-    return t = je(104579, t), s15.reduce((e, i) => ns(i, e), t);
+  function Ea(s15, t2) {
+    return t2 = je(104579, t2), s15.reduce((e, i) => ns(i, e), t2);
   }
-  function Ta(s15, t) {
-    return t = je(181387, t), Object.keys(s15).sort().reduce((e, i) => (e = Po(i, e), ns(s15[i], e)), t);
+  function Ta(s15, t2) {
+    return t2 = je(181387, t2), Object.keys(s15).sort().reduce((e, i) => (e = Po(i, e), ns(s15[i], e)), t2);
   }
-  function rs(s15, t, e = 32) {
-    let i = e - t, r = ~((1 << i) - 1);
-    return (s15 << t | (r & s15) >>> i) >>> 0;
+  function rs(s15, t2, e = 32) {
+    let i = e - t2, r = ~((1 << i) - 1);
+    return (s15 << t2 | (r & s15) >>> i) >>> 0;
   }
-  function ko(s15, t = 0, e = s15.byteLength, i = 0) {
-    for (let r = 0; r < e; r++) s15[t + r] = i;
+  function ko(s15, t2 = 0, e = s15.byteLength, i = 0) {
+    for (let r = 0; r < e; r++) s15[t2 + r] = i;
   }
-  function Ia(s15, t, e = "0") {
-    for (; s15.length < t; ) s15 = e + s15;
+  function Ia(s15, t2, e = "0") {
+    for (; s15.length < t2; ) s15 = e + s15;
     return s15;
   }
-  function wi(s15, t = 32) {
-    return s15 instanceof ArrayBuffer ? Array.from(new Uint8Array(s15)).map((e) => e.toString(16).padStart(2, "0")).join("") : Ia((s15 >>> 0).toString(16), t / 4);
+  function wi(s15, t2 = 32) {
+    return s15 instanceof ArrayBuffer ? Array.from(new Uint8Array(s15)).map((e) => e.toString(16).padStart(2, "0")).join("") : Ia((s15 >>> 0).toString(16), t2 / 4);
   }
   var Cr = class Cr2 {
     constructor() {
@@ -3700,42 +4230,42 @@ ${h2.join(`
       this._h4 = 3285377520;
       this._buff = new Uint8Array(67), this._buffDV = new DataView(this._buff.buffer), this._buffLen = 0, this._totalLen = 0, this._leftoverHighSurrogate = 0, this._finished = false;
     }
-    update(t) {
-      let e = t.length;
+    update(t2) {
+      let e = t2.length;
       if (e === 0) return;
       let i = this._buff, r = this._buffLen, n = this._leftoverHighSurrogate, o2, l;
-      for (n !== 0 ? (o2 = n, l = -1, n = 0) : (o2 = t.charCodeAt(0), l = 0); ; ) {
+      for (n !== 0 ? (o2 = n, l = -1, n = 0) : (o2 = t2.charCodeAt(0), l = 0); ; ) {
         let a = o2;
         if (Lo(o2)) if (l + 1 < e) {
-          let u = t.charCodeAt(l + 1);
+          let u = t2.charCodeAt(l + 1);
           is(u) ? (l++, a = Ao(o2, u)) : a = 65533;
         } else {
           n = o2;
           break;
         }
         else is(o2) && (a = 65533);
-        if (r = this._push(i, r, a), l++, l < e) o2 = t.charCodeAt(l);
+        if (r = this._push(i, r, a), l++, l < e) o2 = t2.charCodeAt(l);
         else break;
       }
       this._buffLen = r, this._leftoverHighSurrogate = n;
     }
-    _push(t, e, i) {
-      return i < 128 ? t[e++] = i : i < 2048 ? (t[e++] = 192 | (i & 1984) >>> 6, t[e++] = 128 | (i & 63) >>> 0) : i < 65536 ? (t[e++] = 224 | (i & 61440) >>> 12, t[e++] = 128 | (i & 4032) >>> 6, t[e++] = 128 | (i & 63) >>> 0) : (t[e++] = 240 | (i & 1835008) >>> 18, t[e++] = 128 | (i & 258048) >>> 12, t[e++] = 128 | (i & 4032) >>> 6, t[e++] = 128 | (i & 63) >>> 0), e >= 64 && (this._step(), e -= 64, this._totalLen += 64, t[0] = t[64], t[1] = t[65], t[2] = t[66]), e;
+    _push(t2, e, i) {
+      return i < 128 ? t2[e++] = i : i < 2048 ? (t2[e++] = 192 | (i & 1984) >>> 6, t2[e++] = 128 | (i & 63) >>> 0) : i < 65536 ? (t2[e++] = 224 | (i & 61440) >>> 12, t2[e++] = 128 | (i & 4032) >>> 6, t2[e++] = 128 | (i & 63) >>> 0) : (t2[e++] = 240 | (i & 1835008) >>> 18, t2[e++] = 128 | (i & 258048) >>> 12, t2[e++] = 128 | (i & 4032) >>> 6, t2[e++] = 128 | (i & 63) >>> 0), e >= 64 && (this._step(), e -= 64, this._totalLen += 64, t2[0] = t2[64], t2[1] = t2[65], t2[2] = t2[66]), e;
     }
     digest() {
       return this._finished || (this._finished = true, this._leftoverHighSurrogate && (this._leftoverHighSurrogate = 0, this._buffLen = this._push(this._buff, this._buffLen, 65533)), this._totalLen += this._buffLen, this._wrapUp()), wi(this._h0) + wi(this._h1) + wi(this._h2) + wi(this._h3) + wi(this._h4);
     }
     _wrapUp() {
       this._buff[this._buffLen++] = 128, ko(this._buff, this._buffLen), this._buffLen > 56 && (this._step(), ko(this._buff));
-      let t = 8 * this._totalLen;
-      this._buffDV.setUint32(56, Math.floor(t / 4294967296), false), this._buffDV.setUint32(60, t % 4294967296, false), this._step();
+      let t2 = 8 * this._totalLen;
+      this._buffDV.setUint32(56, Math.floor(t2 / 4294967296), false), this._buffDV.setUint32(60, t2 % 4294967296, false), this._step();
     }
     _step() {
-      let t = Cr2._bigBlock32, e = this._buffDV;
-      for (let c = 0; c < 64; c += 4) t.setUint32(c, e.getUint32(c, false), false);
-      for (let c = 64; c < 320; c += 4) t.setUint32(c, rs(t.getUint32(c - 12, false) ^ t.getUint32(c - 32, false) ^ t.getUint32(c - 56, false) ^ t.getUint32(c - 64, false), 1), false);
+      let t2 = Cr2._bigBlock32, e = this._buffDV;
+      for (let c = 0; c < 64; c += 4) t2.setUint32(c, e.getUint32(c, false), false);
+      for (let c = 64; c < 320; c += 4) t2.setUint32(c, rs(t2.getUint32(c - 12, false) ^ t2.getUint32(c - 32, false) ^ t2.getUint32(c - 56, false) ^ t2.getUint32(c - 64, false), 1), false);
       let i = this._h0, r = this._h1, n = this._h2, o2 = this._h3, l = this._h4, a, u, h2;
-      for (let c = 0; c < 80; c++) c < 20 ? (a = r & n | ~r & o2, u = 1518500249) : c < 40 ? (a = r ^ n ^ o2, u = 1859775393) : c < 60 ? (a = r & n | r & o2 | n & o2, u = 2400959708) : (a = r ^ n ^ o2, u = 3395469782), h2 = rs(i, 5) + a + l + u + t.getUint32(c * 4, false) & 4294967295, l = o2, o2 = n, n = rs(r, 30), r = i, i = h2;
+      for (let c = 0; c < 80; c++) c < 20 ? (a = r & n | ~r & o2, u = 1518500249) : c < 40 ? (a = r ^ n ^ o2, u = 1859775393) : c < 60 ? (a = r & n | r & o2 | n & o2, u = 2400959708) : (a = r ^ n ^ o2, u = 3395469782), h2 = rs(i, 5) + a + l + u + t2.getUint32(c * 4, false) & 4294967295, l = o2, o2 = n, n = rs(r, 30), r = i, i = h2;
       this._h0 = this._h0 + i & 4294967295, this._h1 = this._h1 + r & 4294967295, this._h2 = this._h2 + n & 4294967295, this._h3 = this._h3 + o2 & 4294967295, this._h4 = this._h4 + l & 4294967295;
     }
   };
@@ -3743,11 +4273,11 @@ ${h2.join(`
   var { registerWindow: Bh, getWindow: be, getDocument: Nh, getWindows: Fh, getWindowsCount: Hh, getWindowId: Oo, getWindowById: Wh, hasWindow: Uh, onDidRegisterWindow: No, onWillUnregisterWindow: Kh, onDidUnregisterWindow: zh } = (function() {
     let s15 = /* @__PURE__ */ new Map();
     fe;
-    let t = { window: fe, disposables: new Ee() };
-    s15.set(fe.vscodeWindowId, t);
+    let t2 = { window: fe, disposables: new Ee() };
+    s15.set(fe.vscodeWindowId, t2);
     let e = new v(), i = new v(), r = new v();
     function n(o2, l) {
-      return (typeof o2 == "number" ? s15.get(o2) : void 0) ?? (l ? t : void 0);
+      return (typeof o2 == "number" ? s15.get(o2) : void 0) ?? (l ? t2 : void 0);
     }
     return { onDidRegisterWindow: e.event, onWillUnregisterWindow: r.event, onDidUnregisterWindow: i.event, registerWindow(o2) {
       if (s15.has(o2.vscodeWindowId)) return D.None;
@@ -3775,43 +4305,43 @@ ${h2.join(`
     } };
   })();
   var ss = class {
-    constructor(t, e, i, r) {
-      this._node = t, this._type = e, this._handler = i, this._options = r || false, this._node.addEventListener(this._type, this._handler, this._options);
+    constructor(t2, e, i, r) {
+      this._node = t2, this._type = e, this._handler = i, this._options = r || false, this._node.addEventListener(this._type, this._handler, this._options);
     }
     dispose() {
       this._handler && (this._node.removeEventListener(this._type, this._handler, this._options), this._node = null, this._handler = null);
     }
   };
-  function L(s15, t, e, i) {
-    return new ss(s15, t, e, i);
+  function L(s15, t2, e, i) {
+    return new ss(s15, t2, e, i);
   }
-  function ya(s15, t) {
+  function ya(s15, t2) {
     return function(e) {
-      return t(new qe(s15, e));
+      return t2(new qe(s15, e));
     };
   }
   function xa(s15) {
-    return function(t) {
-      return s15(new ft(t));
+    return function(t2) {
+      return s15(new ft(t2));
     };
   }
-  var os = function(t, e, i, r) {
+  var os = function(t2, e, i, r) {
     let n = i;
-    return e === "click" || e === "mousedown" || e === "contextmenu" ? n = ya(be(t), i) : (e === "keydown" || e === "keypress" || e === "keyup") && (n = xa(i)), L(t, e, n, r);
+    return e === "click" || e === "mousedown" || e === "contextmenu" ? n = ya(be(t2), i) : (e === "keydown" || e === "keypress" || e === "keyup") && (n = xa(i)), L(t2, e, n, r);
   };
   var wa;
   var mt;
   var Mr = class extends kr {
-    constructor(t) {
-      super(), this.defaultTarget = t && be(t);
+    constructor(t2) {
+      super(), this.defaultTarget = t2 && be(t2);
     }
-    cancelAndSet(t, e, i) {
-      return super.cancelAndSet(t, e, i ?? this.defaultTarget);
+    cancelAndSet(t2, e, i) {
+      return super.cancelAndSet(t2, e, i ?? this.defaultTarget);
     }
   };
   var Di = class {
-    constructor(t, e = 0) {
-      this._runner = t, this.priority = e, this._canceled = false;
+    constructor(t2, e = 0) {
+      this._runner = t2, this.priority = e, this._canceled = false;
     }
     dispose() {
       this._canceled = true;
@@ -3819,19 +4349,19 @@ ${h2.join(`
     execute() {
       if (!this._canceled) try {
         this._runner();
-      } catch (t) {
-        Lt(t);
+      } catch (t2) {
+        Lt(t2);
       }
     }
-    static sort(t, e) {
-      return e.priority - t.priority;
+    static sort(t2, e) {
+      return e.priority - t2.priority;
     }
   };
   (function() {
-    let s15 = /* @__PURE__ */ new Map(), t = /* @__PURE__ */ new Map(), e = /* @__PURE__ */ new Map(), i = /* @__PURE__ */ new Map(), r = (n) => {
+    let s15 = /* @__PURE__ */ new Map(), t2 = /* @__PURE__ */ new Map(), e = /* @__PURE__ */ new Map(), i = /* @__PURE__ */ new Map(), r = (n) => {
       e.set(n, false);
       let o2 = s15.get(n) ?? [];
-      for (t.set(n, o2), s15.set(n, []), i.set(n, true); o2.length > 0; ) o2.sort(Di.sort), o2.shift().execute();
+      for (t2.set(n, o2), s15.set(n, []), i.set(n, true); o2.length > 0; ) o2.sort(Di.sort), o2.shift().execute();
       i.set(n, false);
     };
     mt = (n, o2, l = 0) => {
@@ -3840,39 +4370,39 @@ ${h2.join(`
     }, wa = (n, o2, l) => {
       let a = Oo(n);
       if (i.get(a)) {
-        let u = new Di(o2, l), h2 = t.get(a);
-        return h2 || (h2 = [], t.set(a, h2)), h2.push(u), u;
+        let u = new Di(o2, l), h2 = t2.get(a);
+        return h2 || (h2 = [], t2.set(a, h2)), h2.push(u), u;
       } else return mt(n, o2, l);
     };
   })();
   var pt = class pt2 {
-    constructor(t, e) {
-      this.width = t;
+    constructor(t2, e) {
+      this.width = t2;
       this.height = e;
     }
-    with(t = this.width, e = this.height) {
-      return t !== this.width || e !== this.height ? new pt2(t, e) : this;
+    with(t2 = this.width, e = this.height) {
+      return t2 !== this.width || e !== this.height ? new pt2(t2, e) : this;
     }
-    static is(t) {
-      return typeof t == "object" && typeof t.height == "number" && typeof t.width == "number";
+    static is(t2) {
+      return typeof t2 == "object" && typeof t2.height == "number" && typeof t2.width == "number";
     }
-    static lift(t) {
-      return t instanceof pt2 ? t : new pt2(t.width, t.height);
+    static lift(t2) {
+      return t2 instanceof pt2 ? t2 : new pt2(t2.width, t2.height);
     }
-    static equals(t, e) {
-      return t === e ? true : !t || !e ? false : t.width === e.width && t.height === e.height;
+    static equals(t2, e) {
+      return t2 === e ? true : !t2 || !e ? false : t2.width === e.width && t2.height === e.height;
     }
   };
   pt.None = new pt(0, 0);
   function Fo(s15) {
-    let t = s15.getBoundingClientRect(), e = be(s15);
-    return { left: t.left + e.scrollX, top: t.top + e.scrollY, width: t.width, height: t.height };
+    let t2 = s15.getBoundingClientRect(), e = be(s15);
+    return { left: t2.left + e.scrollX, top: t2.top + e.scrollY, width: t2.width, height: t2.height };
   }
   var Gh = new class {
     constructor() {
       this.mutationObservers = /* @__PURE__ */ new Map();
     }
-    observe(s15, t, e) {
+    observe(s15, t2, e) {
       let i = this.mutationObservers.get(s15);
       i || (i = /* @__PURE__ */ new Map(), this.mutationObservers.set(s15, i));
       let r = Mo(e), n = i.get(r);
@@ -3881,7 +4411,7 @@ ${h2.join(`
         let o2 = new v(), l = new MutationObserver((u) => o2.fire(u));
         l.observe(s15, e);
         let a = n = { users: 1, observer: l, onDidMutate: o2.event };
-        t.add(C(() => {
+        t2.add(C(() => {
           a.users -= 1, a.users === 0 && (o2.dispose(), l.disconnect(), i?.delete(r), i?.size === 0 && this.mutationObservers.delete(s15));
         })), i.set(r, n);
       }
@@ -3890,23 +4420,23 @@ ${h2.join(`
   }();
   var Y = { CLICK: "click", AUXCLICK: "auxclick", DBLCLICK: "dblclick", MOUSE_UP: "mouseup", MOUSE_DOWN: "mousedown", MOUSE_OVER: "mouseover", MOUSE_MOVE: "mousemove", MOUSE_OUT: "mouseout", MOUSE_ENTER: "mouseenter", MOUSE_LEAVE: "mouseleave", MOUSE_WHEEL: "wheel", POINTER_UP: "pointerup", POINTER_DOWN: "pointerdown", POINTER_MOVE: "pointermove", POINTER_LEAVE: "pointerleave", CONTEXT_MENU: "contextmenu", WHEEL: "wheel", KEY_DOWN: "keydown", KEY_PRESS: "keypress", KEY_UP: "keyup", LOAD: "load", BEFORE_UNLOAD: "beforeunload", UNLOAD: "unload", PAGE_SHOW: "pageshow", PAGE_HIDE: "pagehide", PASTE: "paste", ABORT: "abort", ERROR: "error", RESIZE: "resize", SCROLL: "scroll", FULLSCREEN_CHANGE: "fullscreenchange", WK_FULLSCREEN_CHANGE: "webkitfullscreenchange", SELECT: "select", CHANGE: "change", SUBMIT: "submit", RESET: "reset", FOCUS: "focus", FOCUS_IN: "focusin", FOCUS_OUT: "focusout", BLUR: "blur", INPUT: "input", STORAGE: "storage", DRAG_START: "dragstart", DRAG: "drag", DRAG_ENTER: "dragenter", DRAG_LEAVE: "dragleave", DRAG_OVER: "dragover", DROP: "drop", DRAG_END: "dragend", ANIMATION_START: Bt ? "webkitAnimationStart" : "animationstart", ANIMATION_END: Bt ? "webkitAnimationEnd" : "animationend", ANIMATION_ITERATION: Bt ? "webkitAnimationIteration" : "animationiteration" };
   var Da = /([\w\-]+)?(#([\w\-]+))?((\.([\w\-]+))*)/;
-  function Ho(s15, t, e, ...i) {
-    let r = Da.exec(t);
+  function Ho(s15, t2, e, ...i) {
+    let r = Da.exec(t2);
     if (!r) throw new Error("Bad use of emmet");
     let n = r[1] || "div", o2;
     return s15 !== "http://www.w3.org/1999/xhtml" ? o2 = document.createElementNS(s15, n) : o2 = document.createElement(n), r[3] && (o2.id = r[3]), r[4] && (o2.className = r[4].replace(/\./g, " ").trim()), e && Object.entries(e).forEach(([l, a]) => {
       typeof a > "u" || (/^on\w+$/.test(l) ? o2[l] = a : l === "selected" ? a && o2.setAttribute(l, "true") : o2.setAttribute(l, a));
     }), o2.append(...i), o2;
   }
-  function Ra(s15, t, ...e) {
-    return Ho("http://www.w3.org/1999/xhtml", s15, t, ...e);
+  function Ra(s15, t2, ...e) {
+    return Ho("http://www.w3.org/1999/xhtml", s15, t2, ...e);
   }
-  Ra.SVG = function(s15, t, ...e) {
-    return Ho("http://www.w3.org/2000/svg", s15, t, ...e);
+  Ra.SVG = function(s15, t2, ...e) {
+    return Ho("http://www.w3.org/2000/svg", s15, t2, ...e);
   };
   var ls = class {
-    constructor(t) {
-      this.domNode = t;
+    constructor(t2) {
+      this.domNode = t2;
       this._maxWidth = "";
       this._width = "";
       this._height = "";
@@ -3937,121 +4467,121 @@ ${h2.join(`
       this._contain = "none";
       this._boxShadow = "";
     }
-    setMaxWidth(t) {
-      let e = Ie(t);
+    setMaxWidth(t2) {
+      let e = Ie(t2);
       this._maxWidth !== e && (this._maxWidth = e, this.domNode.style.maxWidth = this._maxWidth);
     }
-    setWidth(t) {
-      let e = Ie(t);
+    setWidth(t2) {
+      let e = Ie(t2);
       this._width !== e && (this._width = e, this.domNode.style.width = this._width);
     }
-    setHeight(t) {
-      let e = Ie(t);
+    setHeight(t2) {
+      let e = Ie(t2);
       this._height !== e && (this._height = e, this.domNode.style.height = this._height);
     }
-    setTop(t) {
-      let e = Ie(t);
+    setTop(t2) {
+      let e = Ie(t2);
       this._top !== e && (this._top = e, this.domNode.style.top = this._top);
     }
-    setLeft(t) {
-      let e = Ie(t);
+    setLeft(t2) {
+      let e = Ie(t2);
       this._left !== e && (this._left = e, this.domNode.style.left = this._left);
     }
-    setBottom(t) {
-      let e = Ie(t);
+    setBottom(t2) {
+      let e = Ie(t2);
       this._bottom !== e && (this._bottom = e, this.domNode.style.bottom = this._bottom);
     }
-    setRight(t) {
-      let e = Ie(t);
+    setRight(t2) {
+      let e = Ie(t2);
       this._right !== e && (this._right = e, this.domNode.style.right = this._right);
     }
-    setPaddingTop(t) {
-      let e = Ie(t);
+    setPaddingTop(t2) {
+      let e = Ie(t2);
       this._paddingTop !== e && (this._paddingTop = e, this.domNode.style.paddingTop = this._paddingTop);
     }
-    setPaddingLeft(t) {
-      let e = Ie(t);
+    setPaddingLeft(t2) {
+      let e = Ie(t2);
       this._paddingLeft !== e && (this._paddingLeft = e, this.domNode.style.paddingLeft = this._paddingLeft);
     }
-    setPaddingBottom(t) {
-      let e = Ie(t);
+    setPaddingBottom(t2) {
+      let e = Ie(t2);
       this._paddingBottom !== e && (this._paddingBottom = e, this.domNode.style.paddingBottom = this._paddingBottom);
     }
-    setPaddingRight(t) {
-      let e = Ie(t);
+    setPaddingRight(t2) {
+      let e = Ie(t2);
       this._paddingRight !== e && (this._paddingRight = e, this.domNode.style.paddingRight = this._paddingRight);
     }
-    setFontFamily(t) {
-      this._fontFamily !== t && (this._fontFamily = t, this.domNode.style.fontFamily = this._fontFamily);
+    setFontFamily(t2) {
+      this._fontFamily !== t2 && (this._fontFamily = t2, this.domNode.style.fontFamily = this._fontFamily);
     }
-    setFontWeight(t) {
-      this._fontWeight !== t && (this._fontWeight = t, this.domNode.style.fontWeight = this._fontWeight);
+    setFontWeight(t2) {
+      this._fontWeight !== t2 && (this._fontWeight = t2, this.domNode.style.fontWeight = this._fontWeight);
     }
-    setFontSize(t) {
-      let e = Ie(t);
+    setFontSize(t2) {
+      let e = Ie(t2);
       this._fontSize !== e && (this._fontSize = e, this.domNode.style.fontSize = this._fontSize);
     }
-    setFontStyle(t) {
-      this._fontStyle !== t && (this._fontStyle = t, this.domNode.style.fontStyle = this._fontStyle);
+    setFontStyle(t2) {
+      this._fontStyle !== t2 && (this._fontStyle = t2, this.domNode.style.fontStyle = this._fontStyle);
     }
-    setFontFeatureSettings(t) {
-      this._fontFeatureSettings !== t && (this._fontFeatureSettings = t, this.domNode.style.fontFeatureSettings = this._fontFeatureSettings);
+    setFontFeatureSettings(t2) {
+      this._fontFeatureSettings !== t2 && (this._fontFeatureSettings = t2, this.domNode.style.fontFeatureSettings = this._fontFeatureSettings);
     }
-    setFontVariationSettings(t) {
-      this._fontVariationSettings !== t && (this._fontVariationSettings = t, this.domNode.style.fontVariationSettings = this._fontVariationSettings);
+    setFontVariationSettings(t2) {
+      this._fontVariationSettings !== t2 && (this._fontVariationSettings = t2, this.domNode.style.fontVariationSettings = this._fontVariationSettings);
     }
-    setTextDecoration(t) {
-      this._textDecoration !== t && (this._textDecoration = t, this.domNode.style.textDecoration = this._textDecoration);
+    setTextDecoration(t2) {
+      this._textDecoration !== t2 && (this._textDecoration = t2, this.domNode.style.textDecoration = this._textDecoration);
     }
-    setLineHeight(t) {
-      let e = Ie(t);
+    setLineHeight(t2) {
+      let e = Ie(t2);
       this._lineHeight !== e && (this._lineHeight = e, this.domNode.style.lineHeight = this._lineHeight);
     }
-    setLetterSpacing(t) {
-      let e = Ie(t);
+    setLetterSpacing(t2) {
+      let e = Ie(t2);
       this._letterSpacing !== e && (this._letterSpacing = e, this.domNode.style.letterSpacing = this._letterSpacing);
     }
-    setClassName(t) {
-      this._className !== t && (this._className = t, this.domNode.className = this._className);
+    setClassName(t2) {
+      this._className !== t2 && (this._className = t2, this.domNode.className = this._className);
     }
-    toggleClassName(t, e) {
-      this.domNode.classList.toggle(t, e), this._className = this.domNode.className;
+    toggleClassName(t2, e) {
+      this.domNode.classList.toggle(t2, e), this._className = this.domNode.className;
     }
-    setDisplay(t) {
-      this._display !== t && (this._display = t, this.domNode.style.display = this._display);
+    setDisplay(t2) {
+      this._display !== t2 && (this._display = t2, this.domNode.style.display = this._display);
     }
-    setPosition(t) {
-      this._position !== t && (this._position = t, this.domNode.style.position = this._position);
+    setPosition(t2) {
+      this._position !== t2 && (this._position = t2, this.domNode.style.position = this._position);
     }
-    setVisibility(t) {
-      this._visibility !== t && (this._visibility = t, this.domNode.style.visibility = this._visibility);
+    setVisibility(t2) {
+      this._visibility !== t2 && (this._visibility = t2, this.domNode.style.visibility = this._visibility);
     }
-    setColor(t) {
-      this._color !== t && (this._color = t, this.domNode.style.color = this._color);
+    setColor(t2) {
+      this._color !== t2 && (this._color = t2, this.domNode.style.color = this._color);
     }
-    setBackgroundColor(t) {
-      this._backgroundColor !== t && (this._backgroundColor = t, this.domNode.style.backgroundColor = this._backgroundColor);
+    setBackgroundColor(t2) {
+      this._backgroundColor !== t2 && (this._backgroundColor = t2, this.domNode.style.backgroundColor = this._backgroundColor);
     }
-    setLayerHinting(t) {
-      this._layerHint !== t && (this._layerHint = t, this.domNode.style.transform = this._layerHint ? "translate3d(0px, 0px, 0px)" : "");
+    setLayerHinting(t2) {
+      this._layerHint !== t2 && (this._layerHint = t2, this.domNode.style.transform = this._layerHint ? "translate3d(0px, 0px, 0px)" : "");
     }
-    setBoxShadow(t) {
-      this._boxShadow !== t && (this._boxShadow = t, this.domNode.style.boxShadow = t);
+    setBoxShadow(t2) {
+      this._boxShadow !== t2 && (this._boxShadow = t2, this.domNode.style.boxShadow = t2);
     }
-    setContain(t) {
-      this._contain !== t && (this._contain = t, this.domNode.style.contain = this._contain);
+    setContain(t2) {
+      this._contain !== t2 && (this._contain = t2, this.domNode.style.contain = this._contain);
     }
-    setAttribute(t, e) {
-      this.domNode.setAttribute(t, e);
+    setAttribute(t2, e) {
+      this.domNode.setAttribute(t2, e);
     }
-    removeAttribute(t) {
-      this.domNode.removeAttribute(t);
+    removeAttribute(t2) {
+      this.domNode.removeAttribute(t2);
     }
-    appendChild(t) {
-      this.domNode.appendChild(t.domNode);
+    appendChild(t2) {
+      this.domNode.appendChild(t2.domNode);
     }
-    removeChild(t) {
-      this.domNode.removeChild(t.domNode);
+    removeChild(t2) {
+      this.domNode.removeChild(t2.domNode);
     }
   };
   function Ie(s15) {
@@ -4069,27 +4599,27 @@ ${h2.join(`
     dispose() {
       this.stopMonitoring(false), this._hooks.dispose();
     }
-    stopMonitoring(t, e) {
+    stopMonitoring(t2, e) {
       if (!this.isMonitoring()) return;
       this._hooks.clear(), this._pointerMoveCallback = null;
       let i = this._onStopCallback;
-      this._onStopCallback = null, t && i && i(e);
+      this._onStopCallback = null, t2 && i && i(e);
     }
     isMonitoring() {
       return !!this._pointerMoveCallback;
     }
-    startMonitoring(t, e, i, r, n) {
+    startMonitoring(t2, e, i, r, n) {
       this.isMonitoring() && this.stopMonitoring(false), this._pointerMoveCallback = r, this._onStopCallback = n;
-      let o2 = t;
+      let o2 = t2;
       try {
-        t.setPointerCapture(e), this._hooks.add(C(() => {
+        t2.setPointerCapture(e), this._hooks.add(C(() => {
           try {
-            t.releasePointerCapture(e);
+            t2.releasePointerCapture(e);
           } catch {
           }
         }));
       } catch {
-        o2 = be(t);
+        o2 = be(t2);
       }
       this._hooks.add(L(o2, Y.POINTER_MOVE, (l) => {
         if (l.buttons !== i) {
@@ -4100,10 +4630,10 @@ ${h2.join(`
       })), this._hooks.add(L(o2, Y.POINTER_UP, (l) => this.stopMonitoring(true)));
     }
   };
-  function Wo(s15, t, e) {
+  function Wo(s15, t2, e) {
     let i = null, r = null;
     if (typeof e.value == "function" ? (i = "value", r = e.value, r.length !== 0 && console.warn("Memoize should only be used in functions with zero parameters")) : typeof e.get == "function" && (i = "get", r = e.get), !r) throw new Error("not supported");
-    let n = `$memoize$${t}`;
+    let n = `$memoize$${t2}`;
     e[i] = function(...o2) {
       return this.hasOwnProperty(n) || Object.defineProperty(this, n, { configurable: false, enumerable: false, writable: false, value: r.apply(this, o2) }), this[n];
     };
@@ -4218,74 +4748,74 @@ ${h2.join(`
   Q.SCROLL_FRICTION = -5e-3, Q.HOLD_DELAY = 700, Q.CLEAR_TAP_COUNT_TIME = 400, M([Wo], Q, "isTouchDevice", 1);
   var Pr = Q;
   var lt = class extends D {
-    onclick(t, e) {
-      this._register(L(t, Y.CLICK, (i) => e(new qe(be(t), i))));
+    onclick(t2, e) {
+      this._register(L(t2, Y.CLICK, (i) => e(new qe(be(t2), i))));
     }
-    onmousedown(t, e) {
-      this._register(L(t, Y.MOUSE_DOWN, (i) => e(new qe(be(t), i))));
+    onmousedown(t2, e) {
+      this._register(L(t2, Y.MOUSE_DOWN, (i) => e(new qe(be(t2), i))));
     }
-    onmouseover(t, e) {
-      this._register(L(t, Y.MOUSE_OVER, (i) => e(new qe(be(t), i))));
+    onmouseover(t2, e) {
+      this._register(L(t2, Y.MOUSE_OVER, (i) => e(new qe(be(t2), i))));
     }
-    onmouseleave(t, e) {
-      this._register(L(t, Y.MOUSE_LEAVE, (i) => e(new qe(be(t), i))));
+    onmouseleave(t2, e) {
+      this._register(L(t2, Y.MOUSE_LEAVE, (i) => e(new qe(be(t2), i))));
     }
-    onkeydown(t, e) {
-      this._register(L(t, Y.KEY_DOWN, (i) => e(new ft(i))));
+    onkeydown(t2, e) {
+      this._register(L(t2, Y.KEY_DOWN, (i) => e(new ft(i))));
     }
-    onkeyup(t, e) {
-      this._register(L(t, Y.KEY_UP, (i) => e(new ft(i))));
+    onkeyup(t2, e) {
+      this._register(L(t2, Y.KEY_UP, (i) => e(new ft(i))));
     }
-    oninput(t, e) {
-      this._register(L(t, Y.INPUT, e));
+    oninput(t2, e) {
+      this._register(L(t2, Y.INPUT, e));
     }
-    onblur(t, e) {
-      this._register(L(t, Y.BLUR, e));
+    onblur(t2, e) {
+      this._register(L(t2, Y.BLUR, e));
     }
-    onfocus(t, e) {
-      this._register(L(t, Y.FOCUS, e));
+    onfocus(t2, e) {
+      this._register(L(t2, Y.FOCUS, e));
     }
-    onchange(t, e) {
-      this._register(L(t, Y.CHANGE, e));
+    onchange(t2, e) {
+      this._register(L(t2, Y.CHANGE, e));
     }
-    ignoreGesture(t) {
-      return Pr.ignoreTarget(t);
+    ignoreGesture(t2) {
+      return Pr.ignoreTarget(t2);
     }
   };
   var Uo = 11;
   var Or = class extends lt {
-    constructor(t) {
-      super(), this._onActivate = t.onActivate, this.bgDomNode = document.createElement("div"), this.bgDomNode.className = "arrow-background", this.bgDomNode.style.position = "absolute", this.bgDomNode.style.width = t.bgWidth + "px", this.bgDomNode.style.height = t.bgHeight + "px", typeof t.top < "u" && (this.bgDomNode.style.top = "0px"), typeof t.left < "u" && (this.bgDomNode.style.left = "0px"), typeof t.bottom < "u" && (this.bgDomNode.style.bottom = "0px"), typeof t.right < "u" && (this.bgDomNode.style.right = "0px"), this.domNode = document.createElement("div"), this.domNode.className = t.className, this.domNode.style.position = "absolute", this.domNode.style.width = Uo + "px", this.domNode.style.height = Uo + "px", typeof t.top < "u" && (this.domNode.style.top = t.top + "px"), typeof t.left < "u" && (this.domNode.style.left = t.left + "px"), typeof t.bottom < "u" && (this.domNode.style.bottom = t.bottom + "px"), typeof t.right < "u" && (this.domNode.style.right = t.right + "px"), this._pointerMoveMonitor = this._register(new Wt()), this._register(os(this.bgDomNode, Y.POINTER_DOWN, (e) => this._arrowPointerDown(e))), this._register(os(this.domNode, Y.POINTER_DOWN, (e) => this._arrowPointerDown(e))), this._pointerdownRepeatTimer = this._register(new Mr()), this._pointerdownScheduleRepeatTimer = this._register(new Ye());
+    constructor(t2) {
+      super(), this._onActivate = t2.onActivate, this.bgDomNode = document.createElement("div"), this.bgDomNode.className = "arrow-background", this.bgDomNode.style.position = "absolute", this.bgDomNode.style.width = t2.bgWidth + "px", this.bgDomNode.style.height = t2.bgHeight + "px", typeof t2.top < "u" && (this.bgDomNode.style.top = "0px"), typeof t2.left < "u" && (this.bgDomNode.style.left = "0px"), typeof t2.bottom < "u" && (this.bgDomNode.style.bottom = "0px"), typeof t2.right < "u" && (this.bgDomNode.style.right = "0px"), this.domNode = document.createElement("div"), this.domNode.className = t2.className, this.domNode.style.position = "absolute", this.domNode.style.width = Uo + "px", this.domNode.style.height = Uo + "px", typeof t2.top < "u" && (this.domNode.style.top = t2.top + "px"), typeof t2.left < "u" && (this.domNode.style.left = t2.left + "px"), typeof t2.bottom < "u" && (this.domNode.style.bottom = t2.bottom + "px"), typeof t2.right < "u" && (this.domNode.style.right = t2.right + "px"), this._pointerMoveMonitor = this._register(new Wt()), this._register(os(this.bgDomNode, Y.POINTER_DOWN, (e) => this._arrowPointerDown(e))), this._register(os(this.domNode, Y.POINTER_DOWN, (e) => this._arrowPointerDown(e))), this._pointerdownRepeatTimer = this._register(new Mr()), this._pointerdownScheduleRepeatTimer = this._register(new Ye());
     }
-    _arrowPointerDown(t) {
-      if (!t.target || !(t.target instanceof Element)) return;
+    _arrowPointerDown(t2) {
+      if (!t2.target || !(t2.target instanceof Element)) return;
       let e = () => {
-        this._pointerdownRepeatTimer.cancelAndSet(() => this._onActivate(), 1e3 / 24, be(t));
+        this._pointerdownRepeatTimer.cancelAndSet(() => this._onActivate(), 1e3 / 24, be(t2));
       };
-      this._onActivate(), this._pointerdownRepeatTimer.cancel(), this._pointerdownScheduleRepeatTimer.cancelAndSet(e, 200), this._pointerMoveMonitor.startMonitoring(t.target, t.pointerId, t.buttons, (i) => {
+      this._onActivate(), this._pointerdownRepeatTimer.cancel(), this._pointerdownScheduleRepeatTimer.cancelAndSet(e, 200), this._pointerMoveMonitor.startMonitoring(t2.target, t2.pointerId, t2.buttons, (i) => {
       }, () => {
         this._pointerdownRepeatTimer.cancel(), this._pointerdownScheduleRepeatTimer.cancel();
-      }), t.preventDefault();
+      }), t2.preventDefault();
     }
   };
   var cs = class s9 {
-    constructor(t, e, i, r, n, o2, l) {
-      this._forceIntegerValues = t;
+    constructor(t2, e, i, r, n, o2, l) {
+      this._forceIntegerValues = t2;
       this._scrollStateBrand = void 0;
       this._forceIntegerValues && (e = e | 0, i = i | 0, r = r | 0, n = n | 0, o2 = o2 | 0, l = l | 0), this.rawScrollLeft = r, this.rawScrollTop = l, e < 0 && (e = 0), r + e > i && (r = i - e), r < 0 && (r = 0), n < 0 && (n = 0), l + n > o2 && (l = o2 - n), l < 0 && (l = 0), this.width = e, this.scrollWidth = i, this.scrollLeft = r, this.height = n, this.scrollHeight = o2, this.scrollTop = l;
     }
-    equals(t) {
-      return this.rawScrollLeft === t.rawScrollLeft && this.rawScrollTop === t.rawScrollTop && this.width === t.width && this.scrollWidth === t.scrollWidth && this.scrollLeft === t.scrollLeft && this.height === t.height && this.scrollHeight === t.scrollHeight && this.scrollTop === t.scrollTop;
+    equals(t2) {
+      return this.rawScrollLeft === t2.rawScrollLeft && this.rawScrollTop === t2.rawScrollTop && this.width === t2.width && this.scrollWidth === t2.scrollWidth && this.scrollLeft === t2.scrollLeft && this.height === t2.height && this.scrollHeight === t2.scrollHeight && this.scrollTop === t2.scrollTop;
     }
-    withScrollDimensions(t, e) {
-      return new s9(this._forceIntegerValues, typeof t.width < "u" ? t.width : this.width, typeof t.scrollWidth < "u" ? t.scrollWidth : this.scrollWidth, e ? this.rawScrollLeft : this.scrollLeft, typeof t.height < "u" ? t.height : this.height, typeof t.scrollHeight < "u" ? t.scrollHeight : this.scrollHeight, e ? this.rawScrollTop : this.scrollTop);
+    withScrollDimensions(t2, e) {
+      return new s9(this._forceIntegerValues, typeof t2.width < "u" ? t2.width : this.width, typeof t2.scrollWidth < "u" ? t2.scrollWidth : this.scrollWidth, e ? this.rawScrollLeft : this.scrollLeft, typeof t2.height < "u" ? t2.height : this.height, typeof t2.scrollHeight < "u" ? t2.scrollHeight : this.scrollHeight, e ? this.rawScrollTop : this.scrollTop);
     }
-    withScrollPosition(t) {
-      return new s9(this._forceIntegerValues, this.width, this.scrollWidth, typeof t.scrollLeft < "u" ? t.scrollLeft : this.rawScrollLeft, this.height, this.scrollHeight, typeof t.scrollTop < "u" ? t.scrollTop : this.rawScrollTop);
+    withScrollPosition(t2) {
+      return new s9(this._forceIntegerValues, this.width, this.scrollWidth, typeof t2.scrollLeft < "u" ? t2.scrollLeft : this.rawScrollLeft, this.height, this.scrollHeight, typeof t2.scrollTop < "u" ? t2.scrollTop : this.rawScrollTop);
     }
-    createScrollEvent(t, e) {
-      let i = this.width !== t.width, r = this.scrollWidth !== t.scrollWidth, n = this.scrollLeft !== t.scrollLeft, o2 = this.height !== t.height, l = this.scrollHeight !== t.scrollHeight, a = this.scrollTop !== t.scrollTop;
-      return { inSmoothScrolling: e, oldWidth: t.width, oldScrollWidth: t.scrollWidth, oldScrollLeft: t.scrollLeft, width: this.width, scrollWidth: this.scrollWidth, scrollLeft: this.scrollLeft, oldHeight: t.height, oldScrollHeight: t.scrollHeight, oldScrollTop: t.scrollTop, height: this.height, scrollHeight: this.scrollHeight, scrollTop: this.scrollTop, widthChanged: i, scrollWidthChanged: r, scrollLeftChanged: n, heightChanged: o2, scrollHeightChanged: l, scrollTopChanged: a };
+    createScrollEvent(t2, e) {
+      let i = this.width !== t2.width, r = this.scrollWidth !== t2.scrollWidth, n = this.scrollLeft !== t2.scrollLeft, o2 = this.height !== t2.height, l = this.scrollHeight !== t2.scrollHeight, a = this.scrollTop !== t2.scrollTop;
+      return { inSmoothScrolling: e, oldWidth: t2.width, oldScrollWidth: t2.scrollWidth, oldScrollLeft: t2.scrollLeft, width: this.width, scrollWidth: this.scrollWidth, scrollLeft: this.scrollLeft, oldHeight: t2.height, oldScrollHeight: t2.scrollHeight, oldScrollTop: t2.scrollTop, height: this.height, scrollHeight: this.scrollHeight, scrollTop: this.scrollTop, widthChanged: i, scrollWidthChanged: r, scrollLeftChanged: n, heightChanged: o2, scrollHeightChanged: l, scrollTopChanged: a };
     }
   };
   var Ri = class extends D {
@@ -4360,59 +4890,59 @@ ${h2.join(`
     }
   };
   var Br = class {
-    constructor(t, e, i) {
-      this.scrollLeft = t, this.scrollTop = e, this.isDone = i;
+    constructor(t2, e, i) {
+      this.scrollLeft = t2, this.scrollTop = e, this.isDone = i;
     }
   };
-  function as(s15, t) {
-    let e = t - s15;
+  function as(s15, t2) {
+    let e = t2 - s15;
     return function(i) {
       return s15 + e * ka(i);
     };
   }
-  function La(s15, t, e) {
+  function La(s15, t2, e) {
     return function(i) {
-      return i < e ? s15(i / e) : t((i - e) / (1 - e));
+      return i < e ? s15(i / e) : t2((i - e) / (1 - e));
     };
   }
   var Nr = class s10 {
-    constructor(t, e, i, r) {
-      this.from = t, this.to = e, this.duration = r, this.startTime = i, this.animationFrameDisposable = null, this._initAnimations();
+    constructor(t2, e, i, r) {
+      this.from = t2, this.to = e, this.duration = r, this.startTime = i, this.animationFrameDisposable = null, this._initAnimations();
     }
     _initAnimations() {
       this.scrollLeft = this._initAnimation(this.from.scrollLeft, this.to.scrollLeft, this.to.width), this.scrollTop = this._initAnimation(this.from.scrollTop, this.to.scrollTop, this.to.height);
     }
-    _initAnimation(t, e, i) {
-      if (Math.abs(t - e) > 2.5 * i) {
+    _initAnimation(t2, e, i) {
+      if (Math.abs(t2 - e) > 2.5 * i) {
         let n, o2;
-        return t < e ? (n = t + 0.75 * i, o2 = e - 0.75 * i) : (n = t - 0.75 * i, o2 = e + 0.75 * i), La(as(t, n), as(o2, e), 0.33);
+        return t2 < e ? (n = t2 + 0.75 * i, o2 = e - 0.75 * i) : (n = t2 - 0.75 * i, o2 = e + 0.75 * i), La(as(t2, n), as(o2, e), 0.33);
       }
-      return as(t, e);
+      return as(t2, e);
     }
     dispose() {
       this.animationFrameDisposable !== null && (this.animationFrameDisposable.dispose(), this.animationFrameDisposable = null);
     }
-    acceptScrollDimensions(t) {
-      this.to = t.withScrollPosition(this.to), this._initAnimations();
+    acceptScrollDimensions(t2) {
+      this.to = t2.withScrollPosition(this.to), this._initAnimations();
     }
     tick() {
       return this._tick(Date.now());
     }
-    _tick(t) {
-      let e = (t - this.startTime) / this.duration;
+    _tick(t2) {
+      let e = (t2 - this.startTime) / this.duration;
       if (e < 1) {
         let i = this.scrollLeft(e), r = this.scrollTop(e);
         return new Br(i, r, false);
       }
       return new Br(this.to.scrollLeft, this.to.scrollTop, true);
     }
-    combine(t, e, i) {
-      return s10.start(t, e, i);
+    combine(t2, e, i) {
+      return s10.start(t2, e, i);
     }
-    static start(t, e, i) {
+    static start(t2, e, i) {
       i = i + 10;
       let r = Date.now() - 10;
-      return new s10(t, e, r, i);
+      return new s10(t2, e, r, i);
     }
   };
   function Aa(s15) {
@@ -4422,27 +4952,27 @@ ${h2.join(`
     return 1 - Aa(1 - s15);
   }
   var Fr = class extends D {
-    constructor(t, e, i) {
-      super(), this._visibility = t, this._visibleClassName = e, this._invisibleClassName = i, this._domNode = null, this._isVisible = false, this._isNeeded = false, this._rawShouldBeVisible = false, this._shouldBeVisible = false, this._revealTimer = this._register(new Ye());
+    constructor(t2, e, i) {
+      super(), this._visibility = t2, this._visibleClassName = e, this._invisibleClassName = i, this._domNode = null, this._isVisible = false, this._isNeeded = false, this._rawShouldBeVisible = false, this._shouldBeVisible = false, this._revealTimer = this._register(new Ye());
     }
-    setVisibility(t) {
-      this._visibility !== t && (this._visibility = t, this._updateShouldBeVisible());
+    setVisibility(t2) {
+      this._visibility !== t2 && (this._visibility = t2, this._updateShouldBeVisible());
     }
-    setShouldBeVisible(t) {
-      this._rawShouldBeVisible = t, this._updateShouldBeVisible();
+    setShouldBeVisible(t2) {
+      this._rawShouldBeVisible = t2, this._updateShouldBeVisible();
     }
     _applyVisibilitySetting() {
       return this._visibility === 2 ? false : this._visibility === 3 ? true : this._rawShouldBeVisible;
     }
     _updateShouldBeVisible() {
-      let t = this._applyVisibilitySetting();
-      this._shouldBeVisible !== t && (this._shouldBeVisible = t, this.ensureVisibility());
+      let t2 = this._applyVisibilitySetting();
+      this._shouldBeVisible !== t2 && (this._shouldBeVisible = t2, this.ensureVisibility());
     }
-    setIsNeeded(t) {
-      this._isNeeded !== t && (this._isNeeded = t, this.ensureVisibility());
+    setIsNeeded(t2) {
+      this._isNeeded !== t2 && (this._isNeeded = t2, this.ensureVisibility());
     }
-    setDomNode(t) {
-      this._domNode = t, this._domNode.setClassName(this._invisibleClassName), this.setShouldBeVisible(false);
+    setDomNode(t2) {
+      this._domNode = t2, this._domNode.setClassName(this._invisibleClassName), this.setShouldBeVisible(false);
     }
     ensureVisibility() {
       if (!this._isNeeded) {
@@ -4456,34 +4986,34 @@ ${h2.join(`
         this._domNode?.setClassName(this._visibleClassName);
       }, 0));
     }
-    _hide(t) {
-      this._revealTimer.cancel(), this._isVisible && (this._isVisible = false, this._domNode?.setClassName(this._invisibleClassName + (t ? " fade" : "")));
+    _hide(t2) {
+      this._revealTimer.cancel(), this._isVisible && (this._isVisible = false, this._domNode?.setClassName(this._invisibleClassName + (t2 ? " fade" : "")));
     }
   };
   var Ca = 140;
   var Ut = class extends lt {
-    constructor(t) {
-      super(), this._lazyRender = t.lazyRender, this._host = t.host, this._scrollable = t.scrollable, this._scrollByPage = t.scrollByPage, this._scrollbarState = t.scrollbarState, this._visibilityController = this._register(new Fr(t.visibility, "visible scrollbar " + t.extraScrollbarClassName, "invisible scrollbar " + t.extraScrollbarClassName)), this._visibilityController.setIsNeeded(this._scrollbarState.isNeeded()), this._pointerMoveMonitor = this._register(new Wt()), this._shouldRender = true, this.domNode = _t(document.createElement("div")), this.domNode.setAttribute("role", "presentation"), this.domNode.setAttribute("aria-hidden", "true"), this._visibilityController.setDomNode(this.domNode), this.domNode.setPosition("absolute"), this._register(L(this.domNode.domNode, Y.POINTER_DOWN, (e) => this._domNodePointerDown(e)));
+    constructor(t2) {
+      super(), this._lazyRender = t2.lazyRender, this._host = t2.host, this._scrollable = t2.scrollable, this._scrollByPage = t2.scrollByPage, this._scrollbarState = t2.scrollbarState, this._visibilityController = this._register(new Fr(t2.visibility, "visible scrollbar " + t2.extraScrollbarClassName, "invisible scrollbar " + t2.extraScrollbarClassName)), this._visibilityController.setIsNeeded(this._scrollbarState.isNeeded()), this._pointerMoveMonitor = this._register(new Wt()), this._shouldRender = true, this.domNode = _t(document.createElement("div")), this.domNode.setAttribute("role", "presentation"), this.domNode.setAttribute("aria-hidden", "true"), this._visibilityController.setDomNode(this.domNode), this.domNode.setPosition("absolute"), this._register(L(this.domNode.domNode, Y.POINTER_DOWN, (e) => this._domNodePointerDown(e)));
     }
-    _createArrow(t) {
-      let e = this._register(new Or(t));
+    _createArrow(t2) {
+      let e = this._register(new Or(t2));
       this.domNode.domNode.appendChild(e.bgDomNode), this.domNode.domNode.appendChild(e.domNode);
     }
-    _createSlider(t, e, i, r) {
-      this.slider = _t(document.createElement("div")), this.slider.setClassName("slider"), this.slider.setPosition("absolute"), this.slider.setTop(t), this.slider.setLeft(e), typeof i == "number" && this.slider.setWidth(i), typeof r == "number" && this.slider.setHeight(r), this.slider.setLayerHinting(true), this.slider.setContain("strict"), this.domNode.domNode.appendChild(this.slider.domNode), this._register(L(this.slider.domNode, Y.POINTER_DOWN, (n) => {
+    _createSlider(t2, e, i, r) {
+      this.slider = _t(document.createElement("div")), this.slider.setClassName("slider"), this.slider.setPosition("absolute"), this.slider.setTop(t2), this.slider.setLeft(e), typeof i == "number" && this.slider.setWidth(i), typeof r == "number" && this.slider.setHeight(r), this.slider.setLayerHinting(true), this.slider.setContain("strict"), this.domNode.domNode.appendChild(this.slider.domNode), this._register(L(this.slider.domNode, Y.POINTER_DOWN, (n) => {
         n.button === 0 && (n.preventDefault(), this._sliderPointerDown(n));
       })), this.onclick(this.slider.domNode, (n) => {
         n.leftButton && n.stopPropagation();
       });
     }
-    _onElementSize(t) {
-      return this._scrollbarState.setVisibleSize(t) && (this._visibilityController.setIsNeeded(this._scrollbarState.isNeeded()), this._shouldRender = true, this._lazyRender || this.render()), this._shouldRender;
+    _onElementSize(t2) {
+      return this._scrollbarState.setVisibleSize(t2) && (this._visibilityController.setIsNeeded(this._scrollbarState.isNeeded()), this._shouldRender = true, this._lazyRender || this.render()), this._shouldRender;
     }
-    _onElementScrollSize(t) {
-      return this._scrollbarState.setScrollSize(t) && (this._visibilityController.setIsNeeded(this._scrollbarState.isNeeded()), this._shouldRender = true, this._lazyRender || this.render()), this._shouldRender;
+    _onElementScrollSize(t2) {
+      return this._scrollbarState.setScrollSize(t2) && (this._visibilityController.setIsNeeded(this._scrollbarState.isNeeded()), this._shouldRender = true, this._lazyRender || this.render()), this._shouldRender;
     }
-    _onElementScrollPosition(t) {
-      return this._scrollbarState.setScrollPosition(t) && (this._visibilityController.setIsNeeded(this._scrollbarState.isNeeded()), this._shouldRender = true, this._lazyRender || this.render()), this._shouldRender;
+    _onElementScrollPosition(t2) {
+      return this._scrollbarState.setScrollPosition(t2) && (this._visibilityController.setIsNeeded(this._scrollbarState.isNeeded()), this._shouldRender = true, this._lazyRender || this.render()), this._shouldRender;
     }
     beginReveal() {
       this._visibilityController.setShouldBeVisible(true);
@@ -4494,27 +5024,27 @@ ${h2.join(`
     render() {
       this._shouldRender && (this._shouldRender = false, this._renderDomNode(this._scrollbarState.getRectangleLargeSize(), this._scrollbarState.getRectangleSmallSize()), this._updateSlider(this._scrollbarState.getSliderSize(), this._scrollbarState.getArrowSize() + this._scrollbarState.getSliderPosition()));
     }
-    _domNodePointerDown(t) {
-      t.target === this.domNode.domNode && this._onPointerDown(t);
+    _domNodePointerDown(t2) {
+      t2.target === this.domNode.domNode && this._onPointerDown(t2);
     }
-    delegatePointerDown(t) {
-      let e = this.domNode.domNode.getClientRects()[0].top, i = e + this._scrollbarState.getSliderPosition(), r = e + this._scrollbarState.getSliderPosition() + this._scrollbarState.getSliderSize(), n = this._sliderPointerPosition(t);
-      i <= n && n <= r ? t.button === 0 && (t.preventDefault(), this._sliderPointerDown(t)) : this._onPointerDown(t);
+    delegatePointerDown(t2) {
+      let e = this.domNode.domNode.getClientRects()[0].top, i = e + this._scrollbarState.getSliderPosition(), r = e + this._scrollbarState.getSliderPosition() + this._scrollbarState.getSliderSize(), n = this._sliderPointerPosition(t2);
+      i <= n && n <= r ? t2.button === 0 && (t2.preventDefault(), this._sliderPointerDown(t2)) : this._onPointerDown(t2);
     }
-    _onPointerDown(t) {
+    _onPointerDown(t2) {
       let e, i;
-      if (t.target === this.domNode.domNode && typeof t.offsetX == "number" && typeof t.offsetY == "number") e = t.offsetX, i = t.offsetY;
+      if (t2.target === this.domNode.domNode && typeof t2.offsetX == "number" && typeof t2.offsetY == "number") e = t2.offsetX, i = t2.offsetY;
       else {
         let n = Fo(this.domNode.domNode);
-        e = t.pageX - n.left, i = t.pageY - n.top;
+        e = t2.pageX - n.left, i = t2.pageY - n.top;
       }
       let r = this._pointerDownRelativePosition(e, i);
-      this._setDesiredScrollPositionNow(this._scrollByPage ? this._scrollbarState.getDesiredScrollPositionFromOffsetPaged(r) : this._scrollbarState.getDesiredScrollPositionFromOffset(r)), t.button === 0 && (t.preventDefault(), this._sliderPointerDown(t));
+      this._setDesiredScrollPositionNow(this._scrollByPage ? this._scrollbarState.getDesiredScrollPositionFromOffsetPaged(r) : this._scrollbarState.getDesiredScrollPositionFromOffset(r)), t2.button === 0 && (t2.preventDefault(), this._sliderPointerDown(t2));
     }
-    _sliderPointerDown(t) {
-      if (!t.target || !(t.target instanceof Element)) return;
-      let e = this._sliderPointerPosition(t), i = this._sliderOrthogonalPointerPosition(t), r = this._scrollbarState.clone();
-      this.slider.toggleClassName("active", true), this._pointerMoveMonitor.startMonitoring(t.target, t.pointerId, t.buttons, (n) => {
+    _sliderPointerDown(t2) {
+      if (!t2.target || !(t2.target instanceof Element)) return;
+      let e = this._sliderPointerPosition(t2), i = this._sliderOrthogonalPointerPosition(t2), r = this._scrollbarState.clone();
+      this.slider.toggleClassName("active", true), this._pointerMoveMonitor.startMonitoring(t2.target, t2.pointerId, t2.buttons, (n) => {
         let o2 = this._sliderOrthogonalPointerPosition(n), l = Math.abs(o2 - i);
         if (wr && l > Ca) {
           this._setDesiredScrollPositionNow(r.getScrollPosition());
@@ -4526,51 +5056,51 @@ ${h2.join(`
         this.slider.toggleClassName("active", false), this._host.onDragEnd();
       }), this._host.onDragStart();
     }
-    _setDesiredScrollPositionNow(t) {
+    _setDesiredScrollPositionNow(t2) {
       let e = {};
-      this.writeScrollPosition(e, t), this._scrollable.setScrollPositionNow(e);
+      this.writeScrollPosition(e, t2), this._scrollable.setScrollPositionNow(e);
     }
-    updateScrollbarSize(t) {
-      this._updateScrollbarSize(t), this._scrollbarState.setScrollbarSize(t), this._shouldRender = true, this._lazyRender || this.render();
+    updateScrollbarSize(t2) {
+      this._updateScrollbarSize(t2), this._scrollbarState.setScrollbarSize(t2), this._shouldRender = true, this._lazyRender || this.render();
     }
     isNeeded() {
       return this._scrollbarState.isNeeded();
     }
   };
   var Kt = class s11 {
-    constructor(t, e, i, r, n, o2) {
-      this._scrollbarSize = Math.round(e), this._oppositeScrollbarSize = Math.round(i), this._arrowSize = Math.round(t), this._visibleSize = r, this._scrollSize = n, this._scrollPosition = o2, this._computedAvailableSize = 0, this._computedIsNeeded = false, this._computedSliderSize = 0, this._computedSliderRatio = 0, this._computedSliderPosition = 0, this._refreshComputedValues();
+    constructor(t2, e, i, r, n, o2) {
+      this._scrollbarSize = Math.round(e), this._oppositeScrollbarSize = Math.round(i), this._arrowSize = Math.round(t2), this._visibleSize = r, this._scrollSize = n, this._scrollPosition = o2, this._computedAvailableSize = 0, this._computedIsNeeded = false, this._computedSliderSize = 0, this._computedSliderRatio = 0, this._computedSliderPosition = 0, this._refreshComputedValues();
     }
     clone() {
       return new s11(this._arrowSize, this._scrollbarSize, this._oppositeScrollbarSize, this._visibleSize, this._scrollSize, this._scrollPosition);
     }
-    setVisibleSize(t) {
-      let e = Math.round(t);
+    setVisibleSize(t2) {
+      let e = Math.round(t2);
       return this._visibleSize !== e ? (this._visibleSize = e, this._refreshComputedValues(), true) : false;
     }
-    setScrollSize(t) {
-      let e = Math.round(t);
+    setScrollSize(t2) {
+      let e = Math.round(t2);
       return this._scrollSize !== e ? (this._scrollSize = e, this._refreshComputedValues(), true) : false;
     }
-    setScrollPosition(t) {
-      let e = Math.round(t);
+    setScrollPosition(t2) {
+      let e = Math.round(t2);
       return this._scrollPosition !== e ? (this._scrollPosition = e, this._refreshComputedValues(), true) : false;
     }
-    setScrollbarSize(t) {
-      this._scrollbarSize = Math.round(t);
+    setScrollbarSize(t2) {
+      this._scrollbarSize = Math.round(t2);
     }
-    setOppositeScrollbarSize(t) {
-      this._oppositeScrollbarSize = Math.round(t);
+    setOppositeScrollbarSize(t2) {
+      this._oppositeScrollbarSize = Math.round(t2);
     }
-    static _computeValues(t, e, i, r, n) {
-      let o2 = Math.max(0, i - t), l = Math.max(0, o2 - 2 * e), a = r > 0 && r > i;
+    static _computeValues(t2, e, i, r, n) {
+      let o2 = Math.max(0, i - t2), l = Math.max(0, o2 - 2 * e), a = r > 0 && r > i;
       if (!a) return { computedAvailableSize: Math.round(o2), computedIsNeeded: a, computedSliderSize: Math.round(l), computedSliderRatio: 0, computedSliderPosition: 0 };
       let u = Math.round(Math.max(20, Math.floor(i * l / r))), h2 = (l - u) / (r - i), c = n * h2;
       return { computedAvailableSize: Math.round(o2), computedIsNeeded: a, computedSliderSize: Math.round(u), computedSliderRatio: h2, computedSliderPosition: Math.round(c) };
     }
     _refreshComputedValues() {
-      let t = s11._computeValues(this._oppositeScrollbarSize, this._arrowSize, this._visibleSize, this._scrollSize, this._scrollPosition);
-      this._computedAvailableSize = t.computedAvailableSize, this._computedIsNeeded = t.computedIsNeeded, this._computedSliderSize = t.computedSliderSize, this._computedSliderRatio = t.computedSliderRatio, this._computedSliderPosition = t.computedSliderPosition;
+      let t2 = s11._computeValues(this._oppositeScrollbarSize, this._arrowSize, this._visibleSize, this._scrollSize, this._scrollPosition);
+      this._computedAvailableSize = t2.computedAvailableSize, this._computedIsNeeded = t2.computedIsNeeded, this._computedSliderSize = t2.computedSliderSize, this._computedSliderRatio = t2.computedSliderRatio, this._computedSliderPosition = t2.computedSliderPosition;
     }
     getArrowSize() {
       return this._arrowSize;
@@ -4593,96 +5123,96 @@ ${h2.join(`
     getSliderPosition() {
       return this._computedSliderPosition;
     }
-    getDesiredScrollPositionFromOffset(t) {
+    getDesiredScrollPositionFromOffset(t2) {
       if (!this._computedIsNeeded) return 0;
-      let e = t - this._arrowSize - this._computedSliderSize / 2;
+      let e = t2 - this._arrowSize - this._computedSliderSize / 2;
       return Math.round(e / this._computedSliderRatio);
     }
-    getDesiredScrollPositionFromOffsetPaged(t) {
+    getDesiredScrollPositionFromOffsetPaged(t2) {
       if (!this._computedIsNeeded) return 0;
-      let e = t - this._arrowSize, i = this._scrollPosition;
+      let e = t2 - this._arrowSize, i = this._scrollPosition;
       return e < this._computedSliderPosition ? i -= this._visibleSize : i += this._visibleSize, i;
     }
-    getDesiredScrollPositionFromDelta(t) {
+    getDesiredScrollPositionFromDelta(t2) {
       if (!this._computedIsNeeded) return 0;
-      let e = this._computedSliderPosition + t;
+      let e = this._computedSliderPosition + t2;
       return Math.round(e / this._computedSliderRatio);
     }
   };
   var Wr = class extends Ut {
-    constructor(t, e, i) {
-      let r = t.getScrollDimensions(), n = t.getCurrentScrollPosition();
-      if (super({ lazyRender: e.lazyRender, host: i, scrollbarState: new Kt(e.horizontalHasArrows ? e.arrowSize : 0, e.horizontal === 2 ? 0 : e.horizontalScrollbarSize, e.vertical === 2 ? 0 : e.verticalScrollbarSize, r.width, r.scrollWidth, n.scrollLeft), visibility: e.horizontal, extraScrollbarClassName: "horizontal", scrollable: t, scrollByPage: e.scrollByPage }), e.horizontalHasArrows) throw new Error("horizontalHasArrows is not supported in xterm.js");
+    constructor(t2, e, i) {
+      let r = t2.getScrollDimensions(), n = t2.getCurrentScrollPosition();
+      if (super({ lazyRender: e.lazyRender, host: i, scrollbarState: new Kt(e.horizontalHasArrows ? e.arrowSize : 0, e.horizontal === 2 ? 0 : e.horizontalScrollbarSize, e.vertical === 2 ? 0 : e.verticalScrollbarSize, r.width, r.scrollWidth, n.scrollLeft), visibility: e.horizontal, extraScrollbarClassName: "horizontal", scrollable: t2, scrollByPage: e.scrollByPage }), e.horizontalHasArrows) throw new Error("horizontalHasArrows is not supported in xterm.js");
       this._createSlider(Math.floor((e.horizontalScrollbarSize - e.horizontalSliderSize) / 2), 0, void 0, e.horizontalSliderSize);
     }
-    _updateSlider(t, e) {
-      this.slider.setWidth(t), this.slider.setLeft(e);
+    _updateSlider(t2, e) {
+      this.slider.setWidth(t2), this.slider.setLeft(e);
     }
-    _renderDomNode(t, e) {
-      this.domNode.setWidth(t), this.domNode.setHeight(e), this.domNode.setLeft(0), this.domNode.setBottom(0);
+    _renderDomNode(t2, e) {
+      this.domNode.setWidth(t2), this.domNode.setHeight(e), this.domNode.setLeft(0), this.domNode.setBottom(0);
     }
-    onDidScroll(t) {
-      return this._shouldRender = this._onElementScrollSize(t.scrollWidth) || this._shouldRender, this._shouldRender = this._onElementScrollPosition(t.scrollLeft) || this._shouldRender, this._shouldRender = this._onElementSize(t.width) || this._shouldRender, this._shouldRender;
+    onDidScroll(t2) {
+      return this._shouldRender = this._onElementScrollSize(t2.scrollWidth) || this._shouldRender, this._shouldRender = this._onElementScrollPosition(t2.scrollLeft) || this._shouldRender, this._shouldRender = this._onElementSize(t2.width) || this._shouldRender, this._shouldRender;
     }
-    _pointerDownRelativePosition(t, e) {
-      return t;
+    _pointerDownRelativePosition(t2, e) {
+      return t2;
     }
-    _sliderPointerPosition(t) {
-      return t.pageX;
+    _sliderPointerPosition(t2) {
+      return t2.pageX;
     }
-    _sliderOrthogonalPointerPosition(t) {
-      return t.pageY;
+    _sliderOrthogonalPointerPosition(t2) {
+      return t2.pageY;
     }
-    _updateScrollbarSize(t) {
-      this.slider.setHeight(t);
+    _updateScrollbarSize(t2) {
+      this.slider.setHeight(t2);
     }
-    writeScrollPosition(t, e) {
-      t.scrollLeft = e;
+    writeScrollPosition(t2, e) {
+      t2.scrollLeft = e;
     }
-    updateOptions(t) {
-      this.updateScrollbarSize(t.horizontal === 2 ? 0 : t.horizontalScrollbarSize), this._scrollbarState.setOppositeScrollbarSize(t.vertical === 2 ? 0 : t.verticalScrollbarSize), this._visibilityController.setVisibility(t.horizontal), this._scrollByPage = t.scrollByPage;
+    updateOptions(t2) {
+      this.updateScrollbarSize(t2.horizontal === 2 ? 0 : t2.horizontalScrollbarSize), this._scrollbarState.setOppositeScrollbarSize(t2.vertical === 2 ? 0 : t2.verticalScrollbarSize), this._visibilityController.setVisibility(t2.horizontal), this._scrollByPage = t2.scrollByPage;
     }
   };
   var Ur = class extends Ut {
-    constructor(t, e, i) {
-      let r = t.getScrollDimensions(), n = t.getCurrentScrollPosition();
-      if (super({ lazyRender: e.lazyRender, host: i, scrollbarState: new Kt(e.verticalHasArrows ? e.arrowSize : 0, e.vertical === 2 ? 0 : e.verticalScrollbarSize, 0, r.height, r.scrollHeight, n.scrollTop), visibility: e.vertical, extraScrollbarClassName: "vertical", scrollable: t, scrollByPage: e.scrollByPage }), e.verticalHasArrows) throw new Error("horizontalHasArrows is not supported in xterm.js");
+    constructor(t2, e, i) {
+      let r = t2.getScrollDimensions(), n = t2.getCurrentScrollPosition();
+      if (super({ lazyRender: e.lazyRender, host: i, scrollbarState: new Kt(e.verticalHasArrows ? e.arrowSize : 0, e.vertical === 2 ? 0 : e.verticalScrollbarSize, 0, r.height, r.scrollHeight, n.scrollTop), visibility: e.vertical, extraScrollbarClassName: "vertical", scrollable: t2, scrollByPage: e.scrollByPage }), e.verticalHasArrows) throw new Error("horizontalHasArrows is not supported in xterm.js");
       this._createSlider(0, Math.floor((e.verticalScrollbarSize - e.verticalSliderSize) / 2), e.verticalSliderSize, void 0);
     }
-    _updateSlider(t, e) {
-      this.slider.setHeight(t), this.slider.setTop(e);
+    _updateSlider(t2, e) {
+      this.slider.setHeight(t2), this.slider.setTop(e);
     }
-    _renderDomNode(t, e) {
-      this.domNode.setWidth(e), this.domNode.setHeight(t), this.domNode.setRight(0), this.domNode.setTop(0);
+    _renderDomNode(t2, e) {
+      this.domNode.setWidth(e), this.domNode.setHeight(t2), this.domNode.setRight(0), this.domNode.setTop(0);
     }
-    onDidScroll(t) {
-      return this._shouldRender = this._onElementScrollSize(t.scrollHeight) || this._shouldRender, this._shouldRender = this._onElementScrollPosition(t.scrollTop) || this._shouldRender, this._shouldRender = this._onElementSize(t.height) || this._shouldRender, this._shouldRender;
+    onDidScroll(t2) {
+      return this._shouldRender = this._onElementScrollSize(t2.scrollHeight) || this._shouldRender, this._shouldRender = this._onElementScrollPosition(t2.scrollTop) || this._shouldRender, this._shouldRender = this._onElementSize(t2.height) || this._shouldRender, this._shouldRender;
     }
-    _pointerDownRelativePosition(t, e) {
+    _pointerDownRelativePosition(t2, e) {
       return e;
     }
-    _sliderPointerPosition(t) {
-      return t.pageY;
+    _sliderPointerPosition(t2) {
+      return t2.pageY;
     }
-    _sliderOrthogonalPointerPosition(t) {
-      return t.pageX;
+    _sliderOrthogonalPointerPosition(t2) {
+      return t2.pageX;
     }
-    _updateScrollbarSize(t) {
-      this.slider.setWidth(t);
+    _updateScrollbarSize(t2) {
+      this.slider.setWidth(t2);
     }
-    writeScrollPosition(t, e) {
-      t.scrollTop = e;
+    writeScrollPosition(t2, e) {
+      t2.scrollTop = e;
     }
-    updateOptions(t) {
-      this.updateScrollbarSize(t.vertical === 2 ? 0 : t.verticalScrollbarSize), this._scrollbarState.setOppositeScrollbarSize(0), this._visibilityController.setVisibility(t.vertical), this._scrollByPage = t.scrollByPage;
+    updateOptions(t2) {
+      this.updateScrollbarSize(t2.vertical === 2 ? 0 : t2.verticalScrollbarSize), this._scrollbarState.setOppositeScrollbarSize(0), this._visibilityController.setVisibility(t2.vertical), this._scrollByPage = t2.scrollByPage;
     }
   };
   var Ma = 500;
   var Ko = 50;
   var zo = true;
   var us = class {
-    constructor(t, e, i) {
-      this.timestamp = t, this.deltaX = e, this.deltaY = i, this.score = 0;
+    constructor(t2, e, i) {
+      this.timestamp = t2, this.deltaX = e, this.deltaY = i, this.score = 0;
     }
   };
   var zr = class zr2 {
@@ -4691,35 +5221,35 @@ ${h2.join(`
     }
     isPhysicalMouseWheel() {
       if (this._front === -1 && this._rear === -1) return false;
-      let t = 1, e = 0, i = 1, r = this._rear;
+      let t2 = 1, e = 0, i = 1, r = this._rear;
       do {
-        let n = r === this._front ? t : Math.pow(2, -i);
-        if (t -= n, e += this._memory[r].score * n, r === this._front) break;
+        let n = r === this._front ? t2 : Math.pow(2, -i);
+        if (t2 -= n, e += this._memory[r].score * n, r === this._front) break;
         r = (this._capacity + r - 1) % this._capacity, i++;
       } while (true);
       return e <= 0.5;
     }
-    acceptStandardWheelEvent(t) {
+    acceptStandardWheelEvent(t2) {
       if (Ti) {
-        let e = be(t.browserEvent), i = mo(e);
-        this.accept(Date.now(), t.deltaX * i, t.deltaY * i);
-      } else this.accept(Date.now(), t.deltaX, t.deltaY);
+        let e = be(t2.browserEvent), i = mo(e);
+        this.accept(Date.now(), t2.deltaX * i, t2.deltaY * i);
+      } else this.accept(Date.now(), t2.deltaX, t2.deltaY);
     }
-    accept(t, e, i) {
-      let r = null, n = new us(t, e, i);
+    accept(t2, e, i) {
+      let r = null, n = new us(t2, e, i);
       this._front === -1 && this._rear === -1 ? (this._memory[0] = n, this._front = 0, this._rear = 0) : (r = this._memory[this._rear], this._rear = (this._rear + 1) % this._capacity, this._rear === this._front && (this._front = (this._front + 1) % this._capacity), this._memory[this._rear] = n), n.score = this._computeScore(n, r);
     }
-    _computeScore(t, e) {
-      if (Math.abs(t.deltaX) > 0 && Math.abs(t.deltaY) > 0) return 1;
+    _computeScore(t2, e) {
+      if (Math.abs(t2.deltaX) > 0 && Math.abs(t2.deltaY) > 0) return 1;
       let i = 0.5;
-      if ((!this._isAlmostInt(t.deltaX) || !this._isAlmostInt(t.deltaY)) && (i += 0.25), e) {
-        let r = Math.abs(t.deltaX), n = Math.abs(t.deltaY), o2 = Math.abs(e.deltaX), l = Math.abs(e.deltaY), a = Math.max(Math.min(r, o2), 1), u = Math.max(Math.min(n, l), 1), h2 = Math.max(r, o2), c = Math.max(n, l);
+      if ((!this._isAlmostInt(t2.deltaX) || !this._isAlmostInt(t2.deltaY)) && (i += 0.25), e) {
+        let r = Math.abs(t2.deltaX), n = Math.abs(t2.deltaY), o2 = Math.abs(e.deltaX), l = Math.abs(e.deltaY), a = Math.max(Math.min(r, o2), 1), u = Math.max(Math.min(n, l), 1), h2 = Math.max(r, o2), c = Math.max(n, l);
         h2 % a === 0 && c % u === 0 && (i -= 0.5);
       }
       return Math.min(Math.max(i, 0), 1);
     }
-    _isAlmostInt(t) {
-      return Math.abs(Math.round(t) - t) < 0.01;
+    _isAlmostInt(t2) {
+      return Math.abs(Math.round(t2) - t2) < 0.01;
     }
   };
   zr.INSTANCE = new zr();
@@ -4838,19 +5368,19 @@ ${h2.join(`
     }
   };
   var Kr = class extends ds {
-    constructor(t, e, i) {
-      super(t, e, i);
+    constructor(t2, e, i) {
+      super(t2, e, i);
     }
-    setScrollPosition(t) {
-      t.reuseAnimation ? this._scrollable.setScrollPositionSmooth(t, t.reuseAnimation) : this._scrollable.setScrollPositionNow(t);
+    setScrollPosition(t2) {
+      t2.reuseAnimation ? this._scrollable.setScrollPositionSmooth(t2, t2.reuseAnimation) : this._scrollable.setScrollPositionNow(t2);
     }
     getScrollPosition() {
       return this._scrollable.getCurrentScrollPosition();
     }
   };
   function Pa(s15) {
-    let t = { lazyRender: typeof s15.lazyRender < "u" ? s15.lazyRender : false, className: typeof s15.className < "u" ? s15.className : "", useShadows: typeof s15.useShadows < "u" ? s15.useShadows : true, handleMouseWheel: typeof s15.handleMouseWheel < "u" ? s15.handleMouseWheel : true, flipAxes: typeof s15.flipAxes < "u" ? s15.flipAxes : false, consumeMouseWheelIfScrollbarIsNeeded: typeof s15.consumeMouseWheelIfScrollbarIsNeeded < "u" ? s15.consumeMouseWheelIfScrollbarIsNeeded : false, alwaysConsumeMouseWheel: typeof s15.alwaysConsumeMouseWheel < "u" ? s15.alwaysConsumeMouseWheel : false, scrollYToX: typeof s15.scrollYToX < "u" ? s15.scrollYToX : false, mouseWheelScrollSensitivity: typeof s15.mouseWheelScrollSensitivity < "u" ? s15.mouseWheelScrollSensitivity : 1, fastScrollSensitivity: typeof s15.fastScrollSensitivity < "u" ? s15.fastScrollSensitivity : 5, scrollPredominantAxis: typeof s15.scrollPredominantAxis < "u" ? s15.scrollPredominantAxis : true, mouseWheelSmoothScroll: typeof s15.mouseWheelSmoothScroll < "u" ? s15.mouseWheelSmoothScroll : true, arrowSize: typeof s15.arrowSize < "u" ? s15.arrowSize : 11, listenOnDomNode: typeof s15.listenOnDomNode < "u" ? s15.listenOnDomNode : null, horizontal: typeof s15.horizontal < "u" ? s15.horizontal : 1, horizontalScrollbarSize: typeof s15.horizontalScrollbarSize < "u" ? s15.horizontalScrollbarSize : 10, horizontalSliderSize: typeof s15.horizontalSliderSize < "u" ? s15.horizontalSliderSize : 0, horizontalHasArrows: typeof s15.horizontalHasArrows < "u" ? s15.horizontalHasArrows : false, vertical: typeof s15.vertical < "u" ? s15.vertical : 1, verticalScrollbarSize: typeof s15.verticalScrollbarSize < "u" ? s15.verticalScrollbarSize : 10, verticalHasArrows: typeof s15.verticalHasArrows < "u" ? s15.verticalHasArrows : false, verticalSliderSize: typeof s15.verticalSliderSize < "u" ? s15.verticalSliderSize : 0, scrollByPage: typeof s15.scrollByPage < "u" ? s15.scrollByPage : false };
-    return t.horizontalSliderSize = typeof s15.horizontalSliderSize < "u" ? s15.horizontalSliderSize : t.horizontalScrollbarSize, t.verticalSliderSize = typeof s15.verticalSliderSize < "u" ? s15.verticalSliderSize : t.verticalScrollbarSize, Te && (t.className += " mac"), t;
+    let t2 = { lazyRender: typeof s15.lazyRender < "u" ? s15.lazyRender : false, className: typeof s15.className < "u" ? s15.className : "", useShadows: typeof s15.useShadows < "u" ? s15.useShadows : true, handleMouseWheel: typeof s15.handleMouseWheel < "u" ? s15.handleMouseWheel : true, flipAxes: typeof s15.flipAxes < "u" ? s15.flipAxes : false, consumeMouseWheelIfScrollbarIsNeeded: typeof s15.consumeMouseWheelIfScrollbarIsNeeded < "u" ? s15.consumeMouseWheelIfScrollbarIsNeeded : false, alwaysConsumeMouseWheel: typeof s15.alwaysConsumeMouseWheel < "u" ? s15.alwaysConsumeMouseWheel : false, scrollYToX: typeof s15.scrollYToX < "u" ? s15.scrollYToX : false, mouseWheelScrollSensitivity: typeof s15.mouseWheelScrollSensitivity < "u" ? s15.mouseWheelScrollSensitivity : 1, fastScrollSensitivity: typeof s15.fastScrollSensitivity < "u" ? s15.fastScrollSensitivity : 5, scrollPredominantAxis: typeof s15.scrollPredominantAxis < "u" ? s15.scrollPredominantAxis : true, mouseWheelSmoothScroll: typeof s15.mouseWheelSmoothScroll < "u" ? s15.mouseWheelSmoothScroll : true, arrowSize: typeof s15.arrowSize < "u" ? s15.arrowSize : 11, listenOnDomNode: typeof s15.listenOnDomNode < "u" ? s15.listenOnDomNode : null, horizontal: typeof s15.horizontal < "u" ? s15.horizontal : 1, horizontalScrollbarSize: typeof s15.horizontalScrollbarSize < "u" ? s15.horizontalScrollbarSize : 10, horizontalSliderSize: typeof s15.horizontalSliderSize < "u" ? s15.horizontalSliderSize : 0, horizontalHasArrows: typeof s15.horizontalHasArrows < "u" ? s15.horizontalHasArrows : false, vertical: typeof s15.vertical < "u" ? s15.vertical : 1, verticalScrollbarSize: typeof s15.verticalScrollbarSize < "u" ? s15.verticalScrollbarSize : 10, verticalHasArrows: typeof s15.verticalHasArrows < "u" ? s15.verticalHasArrows : false, verticalSliderSize: typeof s15.verticalSliderSize < "u" ? s15.verticalSliderSize : 0, scrollByPage: typeof s15.scrollByPage < "u" ? s15.scrollByPage : false };
+    return t2.horizontalSliderSize = typeof s15.horizontalSliderSize < "u" ? s15.horizontalSliderSize : t2.horizontalScrollbarSize, t2.verticalSliderSize = typeof s15.verticalSliderSize < "u" ? s15.verticalSliderSize : t2.verticalScrollbarSize, Te && (t2.className += " mac"), t2;
   }
   var zt = class extends D {
     constructor(e, i, r, n, o2, l, a, u) {
@@ -4973,33 +5503,33 @@ ${h2.join(`
     clear() {
       this._zones.length = 0, this._zonePoolIndex = 0;
     }
-    addDecoration(t) {
-      if (t.options.overviewRulerOptions) {
-        for (let e of this._zones) if (e.color === t.options.overviewRulerOptions.color && e.position === t.options.overviewRulerOptions.position) {
-          if (this._lineIntersectsZone(e, t.marker.line)) return;
-          if (this._lineAdjacentToZone(e, t.marker.line, t.options.overviewRulerOptions.position)) {
-            this._addLineToZone(e, t.marker.line);
+    addDecoration(t2) {
+      if (t2.options.overviewRulerOptions) {
+        for (let e of this._zones) if (e.color === t2.options.overviewRulerOptions.color && e.position === t2.options.overviewRulerOptions.position) {
+          if (this._lineIntersectsZone(e, t2.marker.line)) return;
+          if (this._lineAdjacentToZone(e, t2.marker.line, t2.options.overviewRulerOptions.position)) {
+            this._addLineToZone(e, t2.marker.line);
             return;
           }
         }
         if (this._zonePoolIndex < this._zonePool.length) {
-          this._zonePool[this._zonePoolIndex].color = t.options.overviewRulerOptions.color, this._zonePool[this._zonePoolIndex].position = t.options.overviewRulerOptions.position, this._zonePool[this._zonePoolIndex].startBufferLine = t.marker.line, this._zonePool[this._zonePoolIndex].endBufferLine = t.marker.line, this._zones.push(this._zonePool[this._zonePoolIndex++]);
+          this._zonePool[this._zonePoolIndex].color = t2.options.overviewRulerOptions.color, this._zonePool[this._zonePoolIndex].position = t2.options.overviewRulerOptions.position, this._zonePool[this._zonePoolIndex].startBufferLine = t2.marker.line, this._zonePool[this._zonePoolIndex].endBufferLine = t2.marker.line, this._zones.push(this._zonePool[this._zonePoolIndex++]);
           return;
         }
-        this._zones.push({ color: t.options.overviewRulerOptions.color, position: t.options.overviewRulerOptions.position, startBufferLine: t.marker.line, endBufferLine: t.marker.line }), this._zonePool.push(this._zones[this._zones.length - 1]), this._zonePoolIndex++;
+        this._zones.push({ color: t2.options.overviewRulerOptions.color, position: t2.options.overviewRulerOptions.position, startBufferLine: t2.marker.line, endBufferLine: t2.marker.line }), this._zonePool.push(this._zones[this._zones.length - 1]), this._zonePoolIndex++;
       }
     }
-    setPadding(t) {
-      this._linePadding = t;
+    setPadding(t2) {
+      this._linePadding = t2;
     }
-    _lineIntersectsZone(t, e) {
-      return e >= t.startBufferLine && e <= t.endBufferLine;
+    _lineIntersectsZone(t2, e) {
+      return e >= t2.startBufferLine && e <= t2.endBufferLine;
     }
-    _lineAdjacentToZone(t, e, i) {
-      return e >= t.startBufferLine - this._linePadding[i || "full"] && e <= t.endBufferLine + this._linePadding[i || "full"];
+    _lineAdjacentToZone(t2, e, i) {
+      return e >= t2.startBufferLine - this._linePadding[i || "full"] && e <= t2.endBufferLine + this._linePadding[i || "full"];
     }
-    _addLineToZone(t, e) {
-      t.startBufferLine = Math.min(t.startBufferLine, e), t.endBufferLine = Math.max(t.endBufferLine, e);
+    _addLineToZone(t2, e) {
+      t2.startBufferLine = Math.min(t2.startBufferLine, e), t2.endBufferLine = Math.max(t2.endBufferLine, e);
     }
   };
   var We = { full: 0, left: 0, center: 0, right: 0 };
@@ -5078,10 +5608,10 @@ ${h2.join(`
   var Ai;
   ((g) => (g.PAD = "", g.HOP = "", g.BPH = "", g.NBH = "", g.IND = "", g.NEL = "", g.SSA = "", g.ESA = "", g.HTS = "", g.HTJ = "", g.VTS = "", g.PLD = "", g.PLU = "", g.RI = "", g.SS2 = "", g.SS3 = "", g.DCS = "", g.PU1 = "", g.PU2 = "", g.STS = "", g.CCH = "", g.MW = "", g.SPA = "", g.EPA = "", g.SOS = "", g.SGCI = "", g.SCI = "", g.CSI = "", g.ST = "", g.OSC = "", g.PM = "", g.APC = ""))(Ai ||= {});
   var fs;
-  ((t) => t.ST = `${b.ESC}\\`)(fs ||= {});
+  ((t2) => t2.ST = `${b.ESC}\\`)(fs ||= {});
   var $t = class {
-    constructor(t, e, i, r, n, o2) {
-      this._textarea = t;
+    constructor(t2, e, i, r, n, o2) {
+      this._textarea = t2;
       this._compositionView = e;
       this._bufferService = i;
       this._optionsService = r;
@@ -5095,23 +5625,23 @@ ${h2.join(`
     compositionstart() {
       this._isComposing = true, this._compositionPosition.start = this._textarea.value.length, this._compositionView.textContent = "", this._dataAlreadySent = "", this._compositionView.classList.add("active");
     }
-    compositionupdate(t) {
-      this._compositionView.textContent = t.data, this.updateCompositionElements(), setTimeout(() => {
+    compositionupdate(t2) {
+      this._compositionView.textContent = t2.data, this.updateCompositionElements(), setTimeout(() => {
         this._compositionPosition.end = this._textarea.value.length;
       }, 0);
     }
     compositionend() {
       this._finalizeComposition(true);
     }
-    keydown(t) {
+    keydown(t2) {
       if (this._isComposing || this._isSendingComposition) {
-        if (t.keyCode === 20 || t.keyCode === 229 || t.keyCode === 16 || t.keyCode === 17 || t.keyCode === 18) return false;
+        if (t2.keyCode === 20 || t2.keyCode === 229 || t2.keyCode === 16 || t2.keyCode === 17 || t2.keyCode === 18) return false;
         this._finalizeComposition(false);
       }
-      return t.keyCode === 229 ? (this._handleAnyTextareaChanges(), false) : true;
+      return t2.keyCode === 229 ? (this._handleAnyTextareaChanges(), false) : true;
     }
-    _finalizeComposition(t) {
-      if (this._compositionView.classList.remove("active"), this._isComposing = false, t) {
+    _finalizeComposition(t2) {
+      if (this._compositionView.classList.remove("active"), this._isComposing = false, t2) {
         let e = { start: this._compositionPosition.start, end: this._compositionPosition.end };
         this._isSendingComposition = true, setTimeout(() => {
           if (this._isSendingComposition) {
@@ -5127,15 +5657,15 @@ ${h2.join(`
       }
     }
     _handleAnyTextareaChanges() {
-      let t = this._textarea.value;
+      let t2 = this._textarea.value;
       setTimeout(() => {
         if (!this._isComposing) {
-          let e = this._textarea.value, i = e.replace(t, "");
-          this._dataAlreadySent = i, e.length > t.length ? this._coreService.triggerDataEvent(i, true) : e.length < t.length ? this._coreService.triggerDataEvent(`${b.DEL}`, true) : e.length === t.length && e !== t && this._coreService.triggerDataEvent(e, true);
+          let e = this._textarea.value, i = e.replace(t2, "");
+          this._dataAlreadySent = i, e.length > t2.length ? this._coreService.triggerDataEvent(i, true) : e.length < t2.length ? this._coreService.triggerDataEvent(`${b.DEL}`, true) : e.length === t2.length && e !== t2 && this._coreService.triggerDataEvent(e, true);
         }
       }, 0);
     }
-    updateCompositionElements(t) {
+    updateCompositionElements(t2) {
       if (this._isComposing) {
         if (this._bufferService.buffer.isCursorInViewport) {
           let e = Math.min(this._bufferService.buffer.x, this._bufferService.cols - 1), i = this._renderService.dimensions.css.cell.height, r = this._bufferService.buffer.y * this._renderService.dimensions.css.cell.height, n = e * this._renderService.dimensions.css.cell.width;
@@ -5143,7 +5673,7 @@ ${h2.join(`
           let o2 = this._compositionView.getBoundingClientRect();
           this._textarea.style.left = n + "px", this._textarea.style.top = r + "px", this._textarea.style.width = Math.max(o2.width, 1) + "px", this._textarea.style.height = Math.max(o2.height, 1) + "px", this._textarea.style.lineHeight = o2.height + "px";
         }
-        t || setTimeout(() => this.updateCompositionElements(true), 0);
+        t2 || setTimeout(() => this.updateCompositionElements(true), 0);
       }
     }
   };
@@ -5159,10 +5689,10 @@ ${h2.join(`
       return l !== void 0 ? `#${vt(r)}${vt(n)}${vt(o2)}${vt(l)}` : `#${vt(r)}${vt(n)}${vt(o2)}`;
     }
     i.toCss = s15;
-    function t(r, n, o2, l = 255) {
+    function t2(r, n, o2, l = 255) {
       return (r << 24 | n << 16 | o2 << 8 | l) >>> 0;
     }
-    i.toRgba = t;
+    i.toRgba = t2;
     function e(r, n, o2, l) {
       return { css: i.toCss(r, n, o2, l), rgba: i.toRgba(r, n, o2, l) };
     }
@@ -5178,10 +5708,10 @@ ${h2.join(`
       return { css: f, rgba: A };
     }
     l.blend = s15;
-    function t(a) {
+    function t2(a) {
       return (a.rgba & 255) === 255;
     }
-    l.isOpaque = t;
+    l.isOpaque = t2;
     function e(a, u, h2) {
       let c = $r.ensureContrastRatio(a.rgba, u.rgba, h2);
       if (c) return j.toColor(c >> 24 & 255, c >> 16 & 255, c >> 8 & 255);
@@ -5207,12 +5737,12 @@ ${h2.join(`
   })(U ||= {});
   var z;
   ((i) => {
-    let s15, t;
+    let s15, t2;
     try {
       let r = document.createElement("canvas");
       r.width = 1, r.height = 1;
       let n = r.getContext("2d", { willReadFrequently: true });
-      n && (s15 = n, s15.globalCompositeOperation = "copy", t = s15.createLinearGradient(0, 0, 1, 1));
+      n && (s15 = n, s15.globalCompositeOperation = "copy", t2 = s15.createLinearGradient(0, 0, 1, 1));
     } catch {
     }
     function e(r) {
@@ -5228,8 +5758,8 @@ ${h2.join(`
       }
       let n = r.match(/rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*(,\s*(0|1|\d?\.(\d+))\s*)?\)/);
       if (n) return ue = parseInt(n[1]), he = parseInt(n[2]), de = parseInt(n[3]), J = Math.round((n[5] === void 0 ? 1 : parseFloat(n[5])) * 255), j.toColor(ue, he, de, J);
-      if (!s15 || !t) throw new Error("css.toColor: Unsupported css format");
-      if (s15.fillStyle = t, s15.fillStyle = r, typeof s15.fillStyle != "string") throw new Error("css.toColor: Unsupported css format");
+      if (!s15 || !t2) throw new Error("css.toColor: Unsupported css format");
+      if (s15.fillStyle = t2, s15.fillStyle = r, typeof s15.fillStyle != "string") throw new Error("css.toColor: Unsupported css format");
       if (s15.fillRect(0, 0, 1, 1), [ue, he, de, J] = s15.getImageData(0, 0, 1, 1).data, J !== 255) throw new Error("css.toColor: Unsupported css format");
       return { rgba: j.toRgba(ue, he, de, J), css: r };
     }
@@ -5238,14 +5768,14 @@ ${h2.join(`
   var ve;
   ((e) => {
     function s15(i) {
-      return t(i >> 16 & 255, i >> 8 & 255, i & 255);
+      return t2(i >> 16 & 255, i >> 8 & 255, i & 255);
     }
     e.relativeLuminance = s15;
-    function t(i, r, n) {
+    function t2(i, r, n) {
       let o2 = i / 255, l = r / 255, a = n / 255, u = o2 <= 0.03928 ? o2 / 12.92 : Math.pow((o2 + 0.055) / 1.055, 2.4), h2 = l <= 0.03928 ? l / 12.92 : Math.pow((l + 0.055) / 1.055, 2.4), c = a <= 0.03928 ? a / 12.92 : Math.pow((a + 0.055) / 1.055, 2.4);
       return u * 0.2126 + h2 * 0.7152 + c * 0.0722;
     }
-    e.relativeLuminance2 = t;
+    e.relativeLuminance2 = t2;
   })(ve ||= {});
   var $r;
   ((n) => {
@@ -5255,7 +5785,7 @@ ${h2.join(`
       return ue = c + Math.round((a - c) * J), he = d + Math.round((u - d) * J), de = _2 + Math.round((h2 - _2) * J), j.toRgba(ue, he, de);
     }
     n.blend = s15;
-    function t(o2, l, a) {
+    function t2(o2, l, a) {
       let u = ve.relativeLuminance(o2 >> 8), h2 = ve.relativeLuminance(l >> 8);
       if (Xe(u, h2) < a) {
         if (h2 < u) {
@@ -5274,7 +5804,7 @@ ${h2.join(`
         return d;
       }
     }
-    n.ensureContrastRatio = t;
+    n.ensureContrastRatio = t2;
     function e(o2, l, a) {
       let u = o2 >> 24 & 255, h2 = o2 >> 16 & 255, c = o2 >> 8 & 255, d = l >> 24 & 255, _2 = l >> 16 & 255, p = l >> 8 & 255, m = Xe(ve.relativeLuminance2(d, _2, p), ve.relativeLuminance2(u, h2, c));
       for (; m < a && (d > 0 || _2 > 0 || p > 0); ) d -= Math.max(0, Math.ceil(d * 0.1)), _2 -= Math.max(0, Math.ceil(_2 * 0.1)), p -= Math.max(0, Math.ceil(p * 0.1)), m = Xe(ve.relativeLuminance2(d, _2, p), ve.relativeLuminance2(u, h2, c));
@@ -5293,11 +5823,11 @@ ${h2.join(`
     n.toChannels = r;
   })($r ||= {});
   function vt(s15) {
-    let t = s15.toString(16);
-    return t.length < 2 ? "0" + t : t;
+    let t2 = s15.toString(16);
+    return t2.length < 2 ? "0" + t2 : t2;
   }
-  function Xe(s15, t) {
-    return s15 < t ? (t + 0.05) / (s15 + 0.05) : (s15 + 0.05) / (t + 0.05);
+  function Xe(s15, t2) {
+    return s15 < t2 ? (t2 + 0.05) / (s15 + 0.05) : (s15 + 0.05) / (t2 + 0.05);
   }
   var Vr = class extends De {
     constructor(e, i, r) {
@@ -5326,23 +5856,23 @@ ${h2.join(`
     }
   };
   var ct = class {
-    constructor(t) {
-      this._bufferService = t;
+    constructor(t2) {
+      this._bufferService = t2;
       this._characterJoiners = [];
       this._nextCharacterJoinerId = 0;
       this._workCell = new q();
     }
-    register(t) {
-      let e = { id: this._nextCharacterJoinerId++, handler: t };
+    register(t2) {
+      let e = { id: this._nextCharacterJoinerId++, handler: t2 };
       return this._characterJoiners.push(e), e.id;
     }
-    deregister(t) {
-      for (let e = 0; e < this._characterJoiners.length; e++) if (this._characterJoiners[e].id === t) return this._characterJoiners.splice(e, 1), true;
+    deregister(t2) {
+      for (let e = 0; e < this._characterJoiners.length; e++) if (this._characterJoiners[e].id === t2) return this._characterJoiners.splice(e, 1), true;
       return false;
     }
-    getJoinedCharacters(t) {
+    getJoinedCharacters(t2) {
       if (this._characterJoiners.length === 0) return [];
-      let e = this._bufferService.buffer.lines.get(t);
+      let e = this._bufferService.buffer.lines.get(t2);
       if (!e || e.length === 0) return [];
       let i = [], r = e.translateToString(true), n = 0, o2 = 0, l = 0, a = e.getFg(0), u = e.getBg(0);
       for (let h2 = 0; h2 < e.getTrimmedLength(); h2++) if (e.loadCell(h2, this._workCell), this._workCell.getWidth() !== 0) {
@@ -5361,8 +5891,8 @@ ${h2.join(`
       }
       return i;
     }
-    _getJoinedRanges(t, e, i, r, n) {
-      let o2 = t.substring(e, i), l = [];
+    _getJoinedRanges(t2, e, i, r, n) {
+      let o2 = t2.substring(e, i), l = [];
       try {
         l = this._characterJoiners[0].handler(o2);
       } catch (a) {
@@ -5376,14 +5906,14 @@ ${h2.join(`
       }
       return this._stringRangesToCellRanges(l, r, n), l;
     }
-    _stringRangesToCellRanges(t, e, i) {
-      let r = 0, n = false, o2 = 0, l = t[r];
+    _stringRangesToCellRanges(t2, e, i) {
+      let r = 0, n = false, o2 = 0, l = t2[r];
       if (l) {
         for (let a = i; a < this._bufferService.cols; a++) {
           let u = e.getWidth(a), h2 = e.getString(a).length || we.length;
           if (u !== 0) {
             if (!n && l[0] <= o2 && (l[0] = a, n = true), l[1] <= o2) {
-              if (l[1] = a, l = t[++r], !l) break;
+              if (l[1] = a, l = t2[++r], !l) break;
               l[0] <= o2 ? (l[0] = a, n = true) : n = false;
             }
             o2 += h2;
@@ -5392,22 +5922,22 @@ ${h2.join(`
         l && (l[1] = this._bufferService.cols);
       }
     }
-    static _mergeRanges(t, e) {
+    static _mergeRanges(t2, e) {
       let i = false;
-      for (let r = 0; r < t.length; r++) {
-        let n = t[r];
+      for (let r = 0; r < t2.length; r++) {
+        let n = t2[r];
         if (i) {
-          if (e[1] <= n[0]) return t[r - 1][1] = e[1], t;
-          if (e[1] <= n[1]) return t[r - 1][1] = Math.max(e[1], n[1]), t.splice(r, 1), t;
-          t.splice(r, 1), r--;
+          if (e[1] <= n[0]) return t2[r - 1][1] = e[1], t2;
+          if (e[1] <= n[1]) return t2[r - 1][1] = Math.max(e[1], n[1]), t2.splice(r, 1), t2;
+          t2.splice(r, 1), r--;
         } else {
-          if (e[1] <= n[0]) return t.splice(r, 0, e), t;
-          if (e[1] <= n[1]) return n[0] = Math.min(e[0], n[0]), t;
+          if (e[1] <= n[0]) return t2.splice(r, 0, e), t2;
+          if (e[1] <= n[1]) return n[0] = Math.min(e[0], n[0]), t2;
           e[0] < n[1] && (n[0] = Math.min(e[0], n[0]), i = true);
           continue;
         }
       }
-      return i ? t[t.length - 1][1] = e[1] : t.push(e), t;
+      return i ? t2[t2.length - 1][1] = e[1] : t2.push(e), t2;
     }
   };
   ct = M([S(0, F)], ct);
@@ -5427,8 +5957,8 @@ ${h2.join(`
     return { width: 0, height: 0 };
   }
   var Vt = class {
-    constructor(t, e, i, r, n, o2, l) {
-      this._document = t;
+    constructor(t2, e, i, r, n, o2, l) {
+      this._document = t2;
       this._characterJoinerService = e;
       this._optionsService = i;
       this._coreBrowserService = r;
@@ -5439,22 +5969,22 @@ ${h2.join(`
       this._columnSelectMode = false;
       this.defaultSpacing = 0;
     }
-    handleSelectionChanged(t, e, i) {
-      this._selectionStart = t, this._selectionEnd = e, this._columnSelectMode = i;
+    handleSelectionChanged(t2, e, i) {
+      this._selectionStart = t2, this._selectionEnd = e, this._columnSelectMode = i;
     }
-    createRow(t, e, i, r, n, o2, l, a, u, h2, c) {
-      let d = [], _2 = this._characterJoinerService.getJoinedCharacters(e), p = this._themeService.colors, m = t.getNoBgTrimmedLength();
+    createRow(t2, e, i, r, n, o2, l, a, u, h2, c) {
+      let d = [], _2 = this._characterJoinerService.getJoinedCharacters(e), p = this._themeService.colors, m = t2.getNoBgTrimmedLength();
       i && m < o2 + 1 && (m = o2 + 1);
       let f, A = 0, R = "", O = 0, I = 0, k = 0, P = 0, oe = false, Me = 0, Pe = false, Ke = 0, di = 0, V = [], Qe = h2 !== -1 && c !== -1;
       for (let y = 0; y < m; y++) {
-        t.loadCell(y, this._workCell);
+        t2.loadCell(y, this._workCell);
         let T = this._workCell.getWidth();
         if (T === 0) continue;
         let g = false, w = y >= di, E = y, x = this._workCell;
         if (_2.length > 0 && y === _2[0][0] && w) {
           let W = _2.shift(), An = this._isCellInSelection(W[0], e);
           for (O = W[0] + 1; O < W[1]; O++) w &&= An === this._isCellInSelection(O, e);
-          w &&= !i || o2 < W[0] || o2 >= W[1], w ? (g = true, x = new Vr(this._workCell, t.translateToString(true, W[0], W[1]), W[1] - W[0]), E = W[1] - 1, T = x.getWidth()) : di = W[1];
+          w &&= !i || o2 < W[0] || o2 >= W[1], w ? (g = true, x = new Vr(this._workCell, t2.translateToString(true, W[0], W[1]), W[1] - W[0]), E = W[1] - 1, T = x.getWidth()) : di = W[1];
         }
         let N = this._isCellInSelection(y, e), Z = i && y === o2, te = Qe && y >= h2 && y <= c, Oe = false;
         this._decorationService.forEachDecorationAtCell(y, e, void 0, (W) => {
@@ -5532,47 +6062,47 @@ ${h2.join(`
       }
       return f && A && (f.textContent = R), d;
     }
-    _applyMinimumContrast(t, e, i, r, n, o2) {
+    _applyMinimumContrast(t2, e, i, r, n, o2) {
       if (this._optionsService.rawOptions.minimumContrastRatio === 1 || $o(r.getCode())) return false;
       let l = this._getContrastCache(r), a;
       if (!n && !o2 && (a = l.getColor(e.rgba, i.rgba)), a === void 0) {
         let u = this._optionsService.rawOptions.minimumContrastRatio / (r.isDim() ? 2 : 1);
         a = U.ensureContrastRatio(n || e, o2 || i, u), l.setColor((n || e).rgba, (o2 || i).rgba, a ?? null);
       }
-      return a ? (this._addStyle(t, `color:${a.css}`), true) : false;
+      return a ? (this._addStyle(t2, `color:${a.css}`), true) : false;
     }
-    _getContrastCache(t) {
-      return t.isDim() ? this._themeService.colors.halfContrastCache : this._themeService.colors.contrastCache;
+    _getContrastCache(t2) {
+      return t2.isDim() ? this._themeService.colors.halfContrastCache : this._themeService.colors.contrastCache;
     }
-    _addStyle(t, e) {
-      t.setAttribute("style", `${t.getAttribute("style") || ""}${e};`);
+    _addStyle(t2, e) {
+      t2.setAttribute("style", `${t2.getAttribute("style") || ""}${e};`);
     }
-    _isCellInSelection(t, e) {
+    _isCellInSelection(t2, e) {
       let i = this._selectionStart, r = this._selectionEnd;
-      return !i || !r ? false : this._columnSelectMode ? i[0] <= r[0] ? t >= i[0] && e >= i[1] && t < r[0] && e <= r[1] : t < i[0] && e >= i[1] && t >= r[0] && e <= r[1] : e > i[1] && e < r[1] || i[1] === r[1] && e === i[1] && t >= i[0] && t < r[0] || i[1] < r[1] && e === r[1] && t < r[0] || i[1] < r[1] && e === i[1] && t >= i[0];
+      return !i || !r ? false : this._columnSelectMode ? i[0] <= r[0] ? t2 >= i[0] && e >= i[1] && t2 < r[0] && e <= r[1] : t2 < i[0] && e >= i[1] && t2 >= r[0] && e <= r[1] : e > i[1] && e < r[1] || i[1] === r[1] && e === i[1] && t2 >= i[0] && t2 < r[0] || i[1] < r[1] && e === r[1] && t2 < r[0] || i[1] < r[1] && e === i[1] && t2 >= i[0];
     }
   };
   Vt = M([S(1, or), S(2, H), S(3, ae), S(4, ge), S(5, Be), S(6, Re)], Vt);
-  function qo(s15, t, e) {
-    for (; s15.length < e; ) s15 = t + s15;
+  function qo(s15, t2, e) {
+    for (; s15.length < e; ) s15 = t2 + s15;
     return s15;
   }
   var Yr = class {
-    constructor(t, e) {
+    constructor(t2, e) {
       this._flat = new Float32Array(256);
       this._font = "";
       this._fontSize = 0;
       this._weight = "normal";
       this._weightBold = "bold";
       this._measureElements = [];
-      this._container = t.createElement("div"), this._container.classList.add("xterm-width-cache-measure-container"), this._container.setAttribute("aria-hidden", "true"), this._container.style.whiteSpace = "pre", this._container.style.fontKerning = "none";
-      let i = t.createElement("span");
+      this._container = t2.createElement("div"), this._container.classList.add("xterm-width-cache-measure-container"), this._container.setAttribute("aria-hidden", "true"), this._container.style.whiteSpace = "pre", this._container.style.fontKerning = "none";
+      let i = t2.createElement("span");
       i.classList.add("xterm-char-measure-element");
-      let r = t.createElement("span");
+      let r = t2.createElement("span");
       r.classList.add("xterm-char-measure-element"), r.style.fontWeight = "bold";
-      let n = t.createElement("span");
+      let n = t2.createElement("span");
       n.classList.add("xterm-char-measure-element"), n.style.fontStyle = "italic";
-      let o2 = t.createElement("span");
+      let o2 = t2.createElement("span");
       o2.classList.add("xterm-char-measure-element"), o2.style.fontWeight = "bold", o2.style.fontStyle = "italic", this._measureElements = [i, r, n, o2], this._container.appendChild(i), this._container.appendChild(r), this._container.appendChild(n), this._container.appendChild(o2), e.appendChild(this._container), this.clear();
     }
     dispose() {
@@ -5581,28 +6111,28 @@ ${h2.join(`
     clear() {
       this._flat.fill(-9999), this._holey = /* @__PURE__ */ new Map();
     }
-    setFont(t, e, i, r) {
-      t === this._font && e === this._fontSize && i === this._weight && r === this._weightBold || (this._font = t, this._fontSize = e, this._weight = i, this._weightBold = r, this._container.style.fontFamily = this._font, this._container.style.fontSize = `${this._fontSize}px`, this._measureElements[0].style.fontWeight = `${i}`, this._measureElements[1].style.fontWeight = `${r}`, this._measureElements[2].style.fontWeight = `${i}`, this._measureElements[3].style.fontWeight = `${r}`, this.clear());
+    setFont(t2, e, i, r) {
+      t2 === this._font && e === this._fontSize && i === this._weight && r === this._weightBold || (this._font = t2, this._fontSize = e, this._weight = i, this._weightBold = r, this._container.style.fontFamily = this._font, this._container.style.fontSize = `${this._fontSize}px`, this._measureElements[0].style.fontWeight = `${i}`, this._measureElements[1].style.fontWeight = `${r}`, this._measureElements[2].style.fontWeight = `${i}`, this._measureElements[3].style.fontWeight = `${r}`, this.clear());
     }
-    get(t, e, i) {
+    get(t2, e, i) {
       let r = 0;
-      if (!e && !i && t.length === 1 && (r = t.charCodeAt(0)) < 256) {
+      if (!e && !i && t2.length === 1 && (r = t2.charCodeAt(0)) < 256) {
         if (this._flat[r] !== -9999) return this._flat[r];
-        let l = this._measure(t, 0);
+        let l = this._measure(t2, 0);
         return l > 0 && (this._flat[r] = l), l;
       }
-      let n = t;
+      let n = t2;
       e && (n += "B"), i && (n += "I");
       let o2 = this._holey.get(n);
       if (o2 === void 0) {
         let l = 0;
-        e && (l |= 1), i && (l |= 2), o2 = this._measure(t, l), o2 > 0 && this._holey.set(n, o2);
+        e && (l |= 1), i && (l |= 2), o2 = this._measure(t2, l), o2 > 0 && this._holey.set(n, o2);
       }
       return o2;
     }
-    _measure(t, e) {
+    _measure(t2, e) {
       let i = this._measureElements[e];
-      return i.textContent = t.repeat(32), i.offsetWidth / 32;
+      return i.textContent = t2.repeat(32), i.offsetWidth / 32;
     }
   };
   var ms = class {
@@ -5612,20 +6142,20 @@ ${h2.join(`
     clear() {
       this.hasSelection = false, this.columnSelectMode = false, this.viewportStartRow = 0, this.viewportEndRow = 0, this.viewportCappedStartRow = 0, this.viewportCappedEndRow = 0, this.startCol = 0, this.endCol = 0, this.selectionStart = void 0, this.selectionEnd = void 0;
     }
-    update(t, e, i, r = false) {
+    update(t2, e, i, r = false) {
       if (this.selectionStart = e, this.selectionEnd = i, !e || !i || e[0] === i[0] && e[1] === i[1]) {
         this.clear();
         return;
       }
-      let n = t.buffers.active.ydisp, o2 = e[1] - n, l = i[1] - n, a = Math.max(o2, 0), u = Math.min(l, t.rows - 1);
-      if (a >= t.rows || u < 0) {
+      let n = t2.buffers.active.ydisp, o2 = e[1] - n, l = i[1] - n, a = Math.max(o2, 0), u = Math.min(l, t2.rows - 1);
+      if (a >= t2.rows || u < 0) {
         this.clear();
         return;
       }
       this.hasSelection = true, this.columnSelectMode = r, this.viewportStartRow = o2, this.viewportEndRow = l, this.viewportCappedStartRow = a, this.viewportCappedEndRow = u, this.startCol = e[0], this.endCol = i[0];
     }
-    isCellSelected(t, e, i) {
-      return this.hasSelection ? (i -= t.buffer.active.viewportY, this.columnSelectMode ? this.startCol <= this.endCol ? e >= this.startCol && i >= this.viewportCappedStartRow && e < this.endCol && i <= this.viewportCappedEndRow : e < this.startCol && i >= this.viewportCappedStartRow && e >= this.endCol && i <= this.viewportCappedEndRow : i > this.viewportStartRow && i < this.viewportEndRow || this.viewportStartRow === this.viewportEndRow && i === this.viewportStartRow && e >= this.startCol && e < this.endCol || this.viewportStartRow < this.viewportEndRow && i === this.viewportEndRow && e < this.endCol || this.viewportStartRow < this.viewportEndRow && i === this.viewportStartRow && e >= this.startCol) : false;
+    isCellSelected(t2, e, i) {
+      return this.hasSelection ? (i -= t2.buffer.active.viewportY, this.columnSelectMode ? this.startCol <= this.endCol ? e >= this.startCol && i >= this.viewportCappedStartRow && e < this.endCol && i <= this.viewportCappedEndRow : e < this.startCol && i >= this.viewportCappedStartRow && e >= this.endCol && i <= this.viewportCappedEndRow : i > this.viewportStartRow && i < this.viewportEndRow || this.viewportStartRow === this.viewportEndRow && i === this.viewportStartRow && e >= this.startCol && e < this.endCol || this.viewportStartRow < this.viewportEndRow && i === this.viewportEndRow && e < this.endCol || this.viewportStartRow < this.viewportEndRow && i === this.viewportStartRow && e >= this.startCol) : false;
     }
   };
   function Yo() {
@@ -5889,54 +6419,54 @@ ${h2.join(`
       } };
     }
   };
-  function Ci(s15, t, e) {
+  function Ci(s15, t2, e) {
     let i = e.getBoundingClientRect(), r = s15.getComputedStyle(e), n = parseInt(r.getPropertyValue("padding-left")), o2 = parseInt(r.getPropertyValue("padding-top"));
-    return [t.clientX - i.left - n, t.clientY - i.top - o2];
+    return [t2.clientX - i.left - n, t2.clientY - i.top - o2];
   }
-  function Xo(s15, t, e, i, r, n, o2, l, a) {
+  function Xo(s15, t2, e, i, r, n, o2, l, a) {
     if (!n) return;
-    let u = Ci(s15, t, e);
+    let u = Ci(s15, t2, e);
     if (u) return u[0] = Math.ceil((u[0] + (a ? o2 / 2 : 0)) / o2), u[1] = Math.ceil(u[1] / l), u[0] = Math.min(Math.max(u[0], 1), i + (a ? 1 : 0)), u[1] = Math.min(Math.max(u[1], 1), r), u;
   }
   var Xt = class {
-    constructor(t, e) {
-      this._renderService = t;
+    constructor(t2, e) {
+      this._renderService = t2;
       this._charSizeService = e;
     }
-    getCoords(t, e, i, r, n) {
-      return Xo(window, t, e, i, r, this._charSizeService.hasValidSize, this._renderService.dimensions.css.cell.width, this._renderService.dimensions.css.cell.height, n);
+    getCoords(t2, e, i, r, n) {
+      return Xo(window, t2, e, i, r, this._charSizeService.hasValidSize, this._renderService.dimensions.css.cell.width, this._renderService.dimensions.css.cell.height, n);
     }
-    getMouseReportCoords(t, e) {
-      let i = Ci(window, t, e);
+    getMouseReportCoords(t2, e) {
+      let i = Ci(window, t2, e);
       if (this._charSizeService.hasValidSize) return i[0] = Math.min(Math.max(i[0], 0), this._renderService.dimensions.css.canvas.width - 1), i[1] = Math.min(Math.max(i[1], 0), this._renderService.dimensions.css.canvas.height - 1), { col: Math.floor(i[0] / this._renderService.dimensions.css.cell.width), row: Math.floor(i[1] / this._renderService.dimensions.css.cell.height), x: Math.floor(i[0]), y: Math.floor(i[1]) };
     }
   };
   Xt = M([S(0, ce), S(1, nt)], Xt);
   var en = class {
-    constructor(t, e) {
-      this._renderCallback = t;
+    constructor(t2, e) {
+      this._renderCallback = t2;
       this._coreBrowserService = e;
       this._refreshCallbacks = [];
     }
     dispose() {
       this._animationFrame && (this._coreBrowserService.window.cancelAnimationFrame(this._animationFrame), this._animationFrame = void 0);
     }
-    addRefreshCallback(t) {
-      return this._refreshCallbacks.push(t), this._animationFrame || (this._animationFrame = this._coreBrowserService.window.requestAnimationFrame(() => this._innerRefresh())), this._animationFrame;
+    addRefreshCallback(t2) {
+      return this._refreshCallbacks.push(t2), this._animationFrame || (this._animationFrame = this._coreBrowserService.window.requestAnimationFrame(() => this._innerRefresh())), this._animationFrame;
     }
-    refresh(t, e, i) {
-      this._rowCount = i, t = t !== void 0 ? t : 0, e = e !== void 0 ? e : this._rowCount - 1, this._rowStart = this._rowStart !== void 0 ? Math.min(this._rowStart, t) : t, this._rowEnd = this._rowEnd !== void 0 ? Math.max(this._rowEnd, e) : e, !this._animationFrame && (this._animationFrame = this._coreBrowserService.window.requestAnimationFrame(() => this._innerRefresh()));
+    refresh(t2, e, i) {
+      this._rowCount = i, t2 = t2 !== void 0 ? t2 : 0, e = e !== void 0 ? e : this._rowCount - 1, this._rowStart = this._rowStart !== void 0 ? Math.min(this._rowStart, t2) : t2, this._rowEnd = this._rowEnd !== void 0 ? Math.max(this._rowEnd, e) : e, !this._animationFrame && (this._animationFrame = this._coreBrowserService.window.requestAnimationFrame(() => this._innerRefresh()));
     }
     _innerRefresh() {
       if (this._animationFrame = void 0, this._rowStart === void 0 || this._rowEnd === void 0 || this._rowCount === void 0) {
         this._runRefreshCallbacks();
         return;
       }
-      let t = Math.max(this._rowStart, 0), e = Math.min(this._rowEnd, this._rowCount - 1);
-      this._rowStart = void 0, this._rowEnd = void 0, this._renderCallback(t, e), this._runRefreshCallbacks();
+      let t2 = Math.max(this._rowStart, 0), e = Math.min(this._rowEnd, this._rowCount - 1);
+      this._rowStart = void 0, this._rowEnd = void 0, this._renderCallback(t2, e), this._runRefreshCallbacks();
     }
     _runRefreshCallbacks() {
-      for (let t of this._refreshCallbacks) t(0);
+      for (let t2 of this._refreshCallbacks) t2(0);
       this._refreshCallbacks = [];
     }
   };
@@ -5964,8 +6494,8 @@ ${h2.join(`
       this._tasks = [];
       this._i = 0;
     }
-    enqueue(t) {
-      this._tasks.push(t), this._start();
+    enqueue(t2) {
+      this._tasks.push(t2), this._start();
     }
     flush() {
       for (; this._i < this._tasks.length; ) this._tasks[this._i]() || this._i++;
@@ -5977,11 +6507,11 @@ ${h2.join(`
     _start() {
       this._idleCallback || (this._idleCallback = this._requestCallback(this._process.bind(this)));
     }
-    _process(t) {
+    _process(t2) {
       this._idleCallback = void 0;
-      let e = 0, i = 0, r = t.timeRemaining(), n = 0;
+      let e = 0, i = 0, r = t2.timeRemaining(), n = 0;
       for (; this._i < this._tasks.length; ) {
-        if (e = performance.now(), this._tasks[this._i]() || this._i++, e = Math.max(1, performance.now() - e), i = Math.max(e, i), n = t.timeRemaining(), i * 1.5 > n) {
+        if (e = performance.now(), this._tasks[this._i]() || this._i++, e = Math.max(1, performance.now() - e), i = Math.max(e, i), n = t2.timeRemaining(), i * 1.5 > n) {
           r - e < -20 && console.warn(`task queue exceeded allotted deadline by ${Math.abs(Math.round(r - e))}ms`), this._start();
           return;
         }
@@ -5991,23 +6521,23 @@ ${h2.join(`
     }
   };
   var Is = class extends rn {
-    _requestCallback(t) {
-      return setTimeout(() => t(this._createDeadline(16)));
+    _requestCallback(t2) {
+      return setTimeout(() => t2(this._createDeadline(16)));
     }
-    _cancelCallback(t) {
-      clearTimeout(t);
+    _cancelCallback(t2) {
+      clearTimeout(t2);
     }
-    _createDeadline(t) {
-      let e = performance.now() + t;
+    _createDeadline(t2) {
+      let e = performance.now() + t2;
       return { timeRemaining: () => Math.max(0, e - performance.now()) };
     }
   };
   var ys = class extends rn {
-    _requestCallback(t) {
-      return requestIdleCallback(t);
+    _requestCallback(t2) {
+      return requestIdleCallback(t2);
     }
-    _cancelCallback(t) {
-      cancelIdleCallback(t);
+    _cancelCallback(t2) {
+      cancelIdleCallback(t2);
     }
   };
   var Jt = !Mi && "requestIdleCallback" in window ? ys : Is;
@@ -6015,8 +6545,8 @@ ${h2.join(`
     constructor() {
       this._queue = new Jt();
     }
-    set(t) {
-      this._queue.clear(), this._queue.enqueue(t);
+    set(t2) {
+      this._queue.clear(), this._queue.enqueue(t2);
     }
     flush() {
       this._queue.flush();
@@ -6136,94 +6666,94 @@ ${h2.join(`
   };
   Qt = M([S(2, H), S(3, nt), S(4, ge), S(5, Be), S(6, F), S(7, ae), S(8, Re)], Qt);
   var xs = class {
-    constructor(t, e, i) {
-      this._coreBrowserService = t;
+    constructor(t2, e, i) {
+      this._coreBrowserService = t2;
       this._coreService = e;
       this._onTimeout = i;
       this._start = 0;
       this._end = 0;
       this._isBuffering = false;
     }
-    bufferRows(t, e) {
-      this._isBuffering ? (this._start = Math.min(this._start, t), this._end = Math.max(this._end, e)) : (this._start = t, this._end = e, this._isBuffering = true), this._timeout === void 0 && (this._timeout = this._coreBrowserService.window.setTimeout(() => {
+    bufferRows(t2, e) {
+      this._isBuffering ? (this._start = Math.min(this._start, t2), this._end = Math.max(this._end, e)) : (this._start = t2, this._end = e, this._isBuffering = true), this._timeout === void 0 && (this._timeout = this._coreBrowserService.window.setTimeout(() => {
         this._timeout = void 0, this._coreService.decPrivateModes.synchronizedOutput = false, this._onTimeout();
       }, 1e3));
     }
     flush() {
       if (this._timeout !== void 0 && (this._coreBrowserService.window.clearTimeout(this._timeout), this._timeout = void 0), !this._isBuffering) return;
-      let t = { start: this._start, end: this._end };
-      return this._isBuffering = false, t;
+      let t2 = { start: this._start, end: this._end };
+      return this._isBuffering = false, t2;
     }
     dispose() {
       this._timeout !== void 0 && (this._coreBrowserService.window.clearTimeout(this._timeout), this._timeout = void 0);
     }
   };
-  function Jo(s15, t, e, i) {
+  function Jo(s15, t2, e, i) {
     let r = e.buffer.x, n = e.buffer.y;
-    if (!e.buffer.hasScrollback) return Ga(r, n, s15, t, e, i) + sn(n, t, e, i) + $a(r, n, s15, t, e, i);
+    if (!e.buffer.hasScrollback) return Ga(r, n, s15, t2, e, i) + sn(n, t2, e, i) + $a(r, n, s15, t2, e, i);
     let o2;
-    if (n === t) return o2 = r > s15 ? "D" : "C", Fi(Math.abs(r - s15), Ni(o2, i));
-    o2 = n > t ? "D" : "C";
-    let l = Math.abs(n - t), a = za(n > t ? s15 : r, e) + (l - 1) * e.cols + 1 + Ka(n > t ? r : s15, e);
+    if (n === t2) return o2 = r > s15 ? "D" : "C", Fi(Math.abs(r - s15), Ni(o2, i));
+    o2 = n > t2 ? "D" : "C";
+    let l = Math.abs(n - t2), a = za(n > t2 ? s15 : r, e) + (l - 1) * e.cols + 1 + Ka(n > t2 ? r : s15, e);
     return Fi(a, Ni(o2, i));
   }
-  function Ka(s15, t) {
+  function Ka(s15, t2) {
     return s15 - 1;
   }
-  function za(s15, t) {
-    return t.cols - s15;
+  function za(s15, t2) {
+    return t2.cols - s15;
   }
-  function Ga(s15, t, e, i, r, n) {
-    return sn(t, i, r, n).length === 0 ? "" : Fi(el(s15, t, s15, t - gt(t, r), false, r).length, Ni("D", n));
+  function Ga(s15, t2, e, i, r, n) {
+    return sn(t2, i, r, n).length === 0 ? "" : Fi(el(s15, t2, s15, t2 - gt(t2, r), false, r).length, Ni("D", n));
   }
-  function sn(s15, t, e, i) {
-    let r = s15 - gt(s15, e), n = t - gt(t, e), o2 = Math.abs(r - n) - Va(s15, t, e);
-    return Fi(o2, Ni(Qo(s15, t), i));
+  function sn(s15, t2, e, i) {
+    let r = s15 - gt(s15, e), n = t2 - gt(t2, e), o2 = Math.abs(r - n) - Va(s15, t2, e);
+    return Fi(o2, Ni(Qo(s15, t2), i));
   }
-  function $a(s15, t, e, i, r, n) {
+  function $a(s15, t2, e, i, r, n) {
     let o2;
-    sn(t, i, r, n).length > 0 ? o2 = i - gt(i, r) : o2 = t;
-    let l = i, a = qa(s15, t, e, i, r, n);
+    sn(t2, i, r, n).length > 0 ? o2 = i - gt(i, r) : o2 = t2;
+    let l = i, a = qa(s15, t2, e, i, r, n);
     return Fi(el(s15, o2, e, l, a === "C", r).length, Ni(a, n));
   }
-  function Va(s15, t, e) {
-    let i = 0, r = s15 - gt(s15, e), n = t - gt(t, e);
+  function Va(s15, t2, e) {
+    let i = 0, r = s15 - gt(s15, e), n = t2 - gt(t2, e);
     for (let o2 = 0; o2 < Math.abs(r - n); o2++) {
-      let l = Qo(s15, t) === "A" ? -1 : 1;
+      let l = Qo(s15, t2) === "A" ? -1 : 1;
       e.buffer.lines.get(r + l * o2)?.isWrapped && i++;
     }
     return i;
   }
-  function gt(s15, t) {
-    let e = 0, i = t.buffer.lines.get(s15), r = i?.isWrapped;
-    for (; r && s15 >= 0 && s15 < t.rows; ) e++, i = t.buffer.lines.get(--s15), r = i?.isWrapped;
+  function gt(s15, t2) {
+    let e = 0, i = t2.buffer.lines.get(s15), r = i?.isWrapped;
+    for (; r && s15 >= 0 && s15 < t2.rows; ) e++, i = t2.buffer.lines.get(--s15), r = i?.isWrapped;
     return e;
   }
-  function qa(s15, t, e, i, r, n) {
+  function qa(s15, t2, e, i, r, n) {
     let o2;
-    return sn(e, i, r, n).length > 0 ? o2 = i - gt(i, r) : o2 = t, s15 < e && o2 <= i || s15 >= e && o2 < i ? "C" : "D";
+    return sn(e, i, r, n).length > 0 ? o2 = i - gt(i, r) : o2 = t2, s15 < e && o2 <= i || s15 >= e && o2 < i ? "C" : "D";
   }
-  function Qo(s15, t) {
-    return s15 > t ? "A" : "B";
+  function Qo(s15, t2) {
+    return s15 > t2 ? "A" : "B";
   }
-  function el(s15, t, e, i, r, n) {
-    let o2 = s15, l = t, a = "";
+  function el(s15, t2, e, i, r, n) {
+    let o2 = s15, l = t2, a = "";
     for (; (o2 !== e || l !== i) && l >= 0 && l < n.buffer.lines.length; ) o2 += r ? 1 : -1, r && o2 > n.cols - 1 ? (a += n.buffer.translateBufferLineToString(l, false, s15, o2), o2 = 0, s15 = 0, l++) : !r && o2 < 0 && (a += n.buffer.translateBufferLineToString(l, false, 0, s15 + 1), o2 = n.cols - 1, s15 = o2, l--);
     return a + n.buffer.translateBufferLineToString(l, false, s15, o2);
   }
-  function Ni(s15, t) {
-    let e = t ? "O" : "[";
+  function Ni(s15, t2) {
+    let e = t2 ? "O" : "[";
     return b.ESC + e + s15;
   }
-  function Fi(s15, t) {
+  function Fi(s15, t2) {
     s15 = Math.floor(s15);
     let e = "";
-    for (let i = 0; i < s15; i++) e += t;
+    for (let i = 0; i < s15; i++) e += t2;
     return e;
   }
   var on = class {
-    constructor(t) {
-      this._bufferService = t;
+    constructor(t2) {
+      this._bufferService = t2;
       this.isSelectAllActive = false;
       this.selectionStartLength = 0;
     }
@@ -6237,27 +6767,27 @@ ${h2.join(`
       if (this.isSelectAllActive) return [this._bufferService.cols, this._bufferService.buffer.ybase + this._bufferService.rows - 1];
       if (this.selectionStart) {
         if (!this.selectionEnd || this.areSelectionValuesReversed()) {
-          let t = this.selectionStart[0] + this.selectionStartLength;
-          return t > this._bufferService.cols ? t % this._bufferService.cols === 0 ? [this._bufferService.cols, this.selectionStart[1] + Math.floor(t / this._bufferService.cols) - 1] : [t % this._bufferService.cols, this.selectionStart[1] + Math.floor(t / this._bufferService.cols)] : [t, this.selectionStart[1]];
+          let t2 = this.selectionStart[0] + this.selectionStartLength;
+          return t2 > this._bufferService.cols ? t2 % this._bufferService.cols === 0 ? [this._bufferService.cols, this.selectionStart[1] + Math.floor(t2 / this._bufferService.cols) - 1] : [t2 % this._bufferService.cols, this.selectionStart[1] + Math.floor(t2 / this._bufferService.cols)] : [t2, this.selectionStart[1]];
         }
         if (this.selectionStartLength && this.selectionEnd[1] === this.selectionStart[1]) {
-          let t = this.selectionStart[0] + this.selectionStartLength;
-          return t > this._bufferService.cols ? [t % this._bufferService.cols, this.selectionStart[1] + Math.floor(t / this._bufferService.cols)] : [Math.max(t, this.selectionEnd[0]), this.selectionEnd[1]];
+          let t2 = this.selectionStart[0] + this.selectionStartLength;
+          return t2 > this._bufferService.cols ? [t2 % this._bufferService.cols, this.selectionStart[1] + Math.floor(t2 / this._bufferService.cols)] : [Math.max(t2, this.selectionEnd[0]), this.selectionEnd[1]];
         }
         return this.selectionEnd;
       }
     }
     areSelectionValuesReversed() {
-      let t = this.selectionStart, e = this.selectionEnd;
-      return !t || !e ? false : t[1] > e[1] || t[1] === e[1] && t[0] > e[0];
+      let t2 = this.selectionStart, e = this.selectionEnd;
+      return !t2 || !e ? false : t2[1] > e[1] || t2[1] === e[1] && t2[0] > e[0];
     }
-    handleTrim(t) {
-      return this.selectionStart && (this.selectionStart[1] -= t), this.selectionEnd && (this.selectionEnd[1] -= t), this.selectionEnd && this.selectionEnd[1] < 0 ? (this.clearSelection(), true) : (this.selectionStart && this.selectionStart[1] < 0 && (this.selectionStart[1] = 0), false);
+    handleTrim(t2) {
+      return this.selectionStart && (this.selectionStart[1] -= t2), this.selectionEnd && (this.selectionEnd[1] -= t2), this.selectionEnd && this.selectionEnd[1] < 0 ? (this.clearSelection(), true) : (this.selectionStart && this.selectionStart[1] < 0 && (this.selectionStart[1] = 0), false);
     }
   };
-  function ws(s15, t) {
+  function ws(s15, t2) {
     if (s15.start.y > s15.end.y) throw new Error(`Buffer range end (${s15.end.x}, ${s15.end.y}) cannot be before start (${s15.start.x}, ${s15.start.y})`);
-    return t * (s15.end.y - s15.start.y) + (s15.end.x - s15.start.x + 1);
+    return t2 * (s15.end.y - s15.start.y) + (s15.end.x - s15.start.x + 1);
   }
   var Ds = 50;
   var Ya = 15;
@@ -6563,11 +7093,11 @@ ${h2.join(`
     constructor() {
       this._data = {};
     }
-    set(t, e, i) {
-      this._data[t] || (this._data[t] = {}), this._data[t][e] = i;
+    set(t2, e, i) {
+      this._data[t2] || (this._data[t2] = {}), this._data[t2][e] = i;
     }
-    get(t, e) {
-      return this._data[t] ? this._data[t][e] : void 0;
+    get(t2, e) {
+      return this._data[t2] ? this._data[t2][e] : void 0;
     }
     clear() {
       this._data = {};
@@ -6578,26 +7108,26 @@ ${h2.join(`
       this._color = new Hi();
       this._css = new Hi();
     }
-    setCss(t, e, i) {
-      this._css.set(t, e, i);
+    setCss(t2, e, i) {
+      this._css.set(t2, e, i);
     }
-    getCss(t, e) {
-      return this._css.get(t, e);
+    getCss(t2, e) {
+      return this._css.get(t2, e);
     }
-    setColor(t, e, i) {
-      this._color.set(t, e, i);
+    setColor(t2, e, i) {
+      this._color.set(t2, e, i);
     }
-    getColor(t, e) {
-      return this._color.get(t, e);
+    getColor(t2, e) {
+      return this._color.get(t2, e);
     }
     clear() {
       this._color.clear(), this._css.clear();
     }
   };
   var re = Object.freeze((() => {
-    let s15 = [z.toColor("#2e3436"), z.toColor("#cc0000"), z.toColor("#4e9a06"), z.toColor("#c4a000"), z.toColor("#3465a4"), z.toColor("#75507b"), z.toColor("#06989a"), z.toColor("#d3d7cf"), z.toColor("#555753"), z.toColor("#ef2929"), z.toColor("#8ae234"), z.toColor("#fce94f"), z.toColor("#729fcf"), z.toColor("#ad7fa8"), z.toColor("#34e2e2"), z.toColor("#eeeeec")], t = [0, 95, 135, 175, 215, 255];
+    let s15 = [z.toColor("#2e3436"), z.toColor("#cc0000"), z.toColor("#4e9a06"), z.toColor("#c4a000"), z.toColor("#3465a4"), z.toColor("#75507b"), z.toColor("#06989a"), z.toColor("#d3d7cf"), z.toColor("#555753"), z.toColor("#ef2929"), z.toColor("#8ae234"), z.toColor("#fce94f"), z.toColor("#729fcf"), z.toColor("#ad7fa8"), z.toColor("#34e2e2"), z.toColor("#eeeeec")], t2 = [0, 95, 135, 175, 215, 255];
     for (let e = 0; e < 216; e++) {
-      let i = t[e / 36 % 6 | 0], r = t[e / 6 % 6 | 0], n = t[e % 6];
+      let i = t2[e / 36 % 6 | 0], r = t2[e / 6 % 6 | 0], n = t2[e % 6];
       s15.push({ css: j.toCss(i, r, n), rgba: j.toRgba(i, r, n) });
     }
     for (let e = 0; e < 24; e++) {
@@ -6663,30 +7193,30 @@ ${h2.join(`
     }
   };
   ti = M([S(0, H)], ti);
-  function K(s15, t) {
+  function K(s15, t2) {
     if (s15 !== void 0) try {
       return z.toColor(s15);
     } catch {
     }
-    return t;
+    return t2;
   }
   var Rs = class {
-    constructor(...t) {
+    constructor(...t2) {
       this._entries = /* @__PURE__ */ new Map();
-      for (let [e, i] of t) this.set(e, i);
+      for (let [e, i] of t2) this.set(e, i);
     }
-    set(t, e) {
-      let i = this._entries.get(t);
-      return this._entries.set(t, e), i;
+    set(t2, e) {
+      let i = this._entries.get(t2);
+      return this._entries.set(t2, e), i;
     }
-    forEach(t) {
-      for (let [e, i] of this._entries.entries()) t(e, i);
+    forEach(t2) {
+      for (let [e, i] of this._entries.entries()) t2(e, i);
     }
-    has(t) {
-      return this._entries.has(t);
+    has(t2) {
+      return this._entries.has(t2);
     }
-    get(t) {
-      return this._entries.get(t);
+    get(t2) {
+      return this._entries.get(t2);
     }
   };
   var ln = class {
@@ -6694,22 +7224,22 @@ ${h2.join(`
       this._services = new Rs();
       this._services.set(xt, this);
     }
-    setService(t, e) {
-      this._services.set(t, e);
+    setService(t2, e) {
+      this._services.set(t2, e);
     }
-    getService(t) {
-      return this._services.get(t);
+    getService(t2) {
+      return this._services.get(t2);
     }
-    createInstance(t, ...e) {
-      let i = Xs(t).sort((o2, l) => o2.index - l.index), r = [];
+    createInstance(t2, ...e) {
+      let i = Xs(t2).sort((o2, l) => o2.index - l.index), r = [];
       for (let o2 of i) {
         let l = this._services.get(o2.id);
-        if (!l) throw new Error(`[createInstance] ${t.name} depends on UNKNOWN service ${o2.id._id}.`);
+        if (!l) throw new Error(`[createInstance] ${t2.name} depends on UNKNOWN service ${o2.id._id}.`);
         r.push(l);
       }
       let n = i.length > 0 ? i[0].index : e.length;
-      if (e.length !== n) throw new Error(`[createInstance] First service dependency of ${t.name} at position ${n + 1} conflicts with ${e.length} static arguments`);
-      return new t(...e, ...r);
+      if (e.length !== n) throw new Error(`[createInstance] First service dependency of ${t2.name} at position ${n + 1} conflicts with ${e.length} static arguments`);
+      return new t2(...e, ...r);
     }
   };
   var ec = { trace: 0, debug: 1, info: 2, warn: 3, error: 4, off: 5 };
@@ -6833,167 +7363,167 @@ ${h2.join(`
   var an = 0;
   var Ls = 2;
   var Ze = class s12 {
-    constructor(t, e, i = false) {
+    constructor(t2, e, i = false) {
       this.isWrapped = i;
       this._combined = {};
       this._extendedAttrs = {};
-      this._data = new Uint32Array(t * B);
+      this._data = new Uint32Array(t2 * B);
       let r = e || q.fromCharData([0, ir, 1, 0]);
-      for (let n = 0; n < t; ++n) this.setCell(n, r);
-      this.length = t;
+      for (let n = 0; n < t2; ++n) this.setCell(n, r);
+      this.length = t2;
     }
-    get(t) {
-      let e = this._data[t * B + 0], i = e & 2097151;
-      return [this._data[t * B + 1], e & 2097152 ? this._combined[t] : i ? Ce(i) : "", e >> 22, e & 2097152 ? this._combined[t].charCodeAt(this._combined[t].length - 1) : i];
+    get(t2) {
+      let e = this._data[t2 * B + 0], i = e & 2097151;
+      return [this._data[t2 * B + 1], e & 2097152 ? this._combined[t2] : i ? Ce(i) : "", e >> 22, e & 2097152 ? this._combined[t2].charCodeAt(this._combined[t2].length - 1) : i];
     }
-    set(t, e) {
-      this._data[t * B + 1] = e[0], e[1].length > 1 ? (this._combined[t] = e[1], this._data[t * B + 0] = t | 2097152 | e[2] << 22) : this._data[t * B + 0] = e[1].charCodeAt(0) | e[2] << 22;
+    set(t2, e) {
+      this._data[t2 * B + 1] = e[0], e[1].length > 1 ? (this._combined[t2] = e[1], this._data[t2 * B + 0] = t2 | 2097152 | e[2] << 22) : this._data[t2 * B + 0] = e[1].charCodeAt(0) | e[2] << 22;
     }
-    getWidth(t) {
-      return this._data[t * B + 0] >> 22;
+    getWidth(t2) {
+      return this._data[t2 * B + 0] >> 22;
     }
-    hasWidth(t) {
-      return this._data[t * B + 0] & 12582912;
+    hasWidth(t2) {
+      return this._data[t2 * B + 0] & 12582912;
     }
-    getFg(t) {
-      return this._data[t * B + 1];
+    getFg(t2) {
+      return this._data[t2 * B + 1];
     }
-    getBg(t) {
-      return this._data[t * B + 2];
+    getBg(t2) {
+      return this._data[t2 * B + 2];
     }
-    hasContent(t) {
-      return this._data[t * B + 0] & 4194303;
+    hasContent(t2) {
+      return this._data[t2 * B + 0] & 4194303;
     }
-    getCodePoint(t) {
-      let e = this._data[t * B + 0];
-      return e & 2097152 ? this._combined[t].charCodeAt(this._combined[t].length - 1) : e & 2097151;
+    getCodePoint(t2) {
+      let e = this._data[t2 * B + 0];
+      return e & 2097152 ? this._combined[t2].charCodeAt(this._combined[t2].length - 1) : e & 2097151;
     }
-    isCombined(t) {
-      return this._data[t * B + 0] & 2097152;
+    isCombined(t2) {
+      return this._data[t2 * B + 0] & 2097152;
     }
-    getString(t) {
-      let e = this._data[t * B + 0];
-      return e & 2097152 ? this._combined[t] : e & 2097151 ? Ce(e & 2097151) : "";
+    getString(t2) {
+      let e = this._data[t2 * B + 0];
+      return e & 2097152 ? this._combined[t2] : e & 2097151 ? Ce(e & 2097151) : "";
     }
-    isProtected(t) {
-      return this._data[t * B + 2] & 536870912;
+    isProtected(t2) {
+      return this._data[t2 * B + 2] & 536870912;
     }
-    loadCell(t, e) {
-      return an = t * B, e.content = this._data[an + 0], e.fg = this._data[an + 1], e.bg = this._data[an + 2], e.content & 2097152 && (e.combinedData = this._combined[t]), e.bg & 268435456 && (e.extended = this._extendedAttrs[t]), e;
+    loadCell(t2, e) {
+      return an = t2 * B, e.content = this._data[an + 0], e.fg = this._data[an + 1], e.bg = this._data[an + 2], e.content & 2097152 && (e.combinedData = this._combined[t2]), e.bg & 268435456 && (e.extended = this._extendedAttrs[t2]), e;
     }
-    setCell(t, e) {
-      e.content & 2097152 && (this._combined[t] = e.combinedData), e.bg & 268435456 && (this._extendedAttrs[t] = e.extended), this._data[t * B + 0] = e.content, this._data[t * B + 1] = e.fg, this._data[t * B + 2] = e.bg;
+    setCell(t2, e) {
+      e.content & 2097152 && (this._combined[t2] = e.combinedData), e.bg & 268435456 && (this._extendedAttrs[t2] = e.extended), this._data[t2 * B + 0] = e.content, this._data[t2 * B + 1] = e.fg, this._data[t2 * B + 2] = e.bg;
     }
-    setCellFromCodepoint(t, e, i, r) {
-      r.bg & 268435456 && (this._extendedAttrs[t] = r.extended), this._data[t * B + 0] = e | i << 22, this._data[t * B + 1] = r.fg, this._data[t * B + 2] = r.bg;
+    setCellFromCodepoint(t2, e, i, r) {
+      r.bg & 268435456 && (this._extendedAttrs[t2] = r.extended), this._data[t2 * B + 0] = e | i << 22, this._data[t2 * B + 1] = r.fg, this._data[t2 * B + 2] = r.bg;
     }
-    addCodepointToCell(t, e, i) {
-      let r = this._data[t * B + 0];
-      r & 2097152 ? this._combined[t] += Ce(e) : r & 2097151 ? (this._combined[t] = Ce(r & 2097151) + Ce(e), r &= -2097152, r |= 2097152) : r = e | 1 << 22, i && (r &= -12582913, r |= i << 22), this._data[t * B + 0] = r;
+    addCodepointToCell(t2, e, i) {
+      let r = this._data[t2 * B + 0];
+      r & 2097152 ? this._combined[t2] += Ce(e) : r & 2097151 ? (this._combined[t2] = Ce(r & 2097151) + Ce(e), r &= -2097152, r |= 2097152) : r = e | 1 << 22, i && (r &= -12582913, r |= i << 22), this._data[t2 * B + 0] = r;
     }
-    insertCells(t, e, i) {
-      if (t %= this.length, t && this.getWidth(t - 1) === 2 && this.setCellFromCodepoint(t - 1, 0, 1, i), e < this.length - t) {
+    insertCells(t2, e, i) {
+      if (t2 %= this.length, t2 && this.getWidth(t2 - 1) === 2 && this.setCellFromCodepoint(t2 - 1, 0, 1, i), e < this.length - t2) {
         let r = new q();
-        for (let n = this.length - t - e - 1; n >= 0; --n) this.setCell(t + e + n, this.loadCell(t + n, r));
-        for (let n = 0; n < e; ++n) this.setCell(t + n, i);
-      } else for (let r = t; r < this.length; ++r) this.setCell(r, i);
+        for (let n = this.length - t2 - e - 1; n >= 0; --n) this.setCell(t2 + e + n, this.loadCell(t2 + n, r));
+        for (let n = 0; n < e; ++n) this.setCell(t2 + n, i);
+      } else for (let r = t2; r < this.length; ++r) this.setCell(r, i);
       this.getWidth(this.length - 1) === 2 && this.setCellFromCodepoint(this.length - 1, 0, 1, i);
     }
-    deleteCells(t, e, i) {
-      if (t %= this.length, e < this.length - t) {
+    deleteCells(t2, e, i) {
+      if (t2 %= this.length, e < this.length - t2) {
         let r = new q();
-        for (let n = 0; n < this.length - t - e; ++n) this.setCell(t + n, this.loadCell(t + e + n, r));
+        for (let n = 0; n < this.length - t2 - e; ++n) this.setCell(t2 + n, this.loadCell(t2 + e + n, r));
         for (let n = this.length - e; n < this.length; ++n) this.setCell(n, i);
-      } else for (let r = t; r < this.length; ++r) this.setCell(r, i);
-      t && this.getWidth(t - 1) === 2 && this.setCellFromCodepoint(t - 1, 0, 1, i), this.getWidth(t) === 0 && !this.hasContent(t) && this.setCellFromCodepoint(t, 0, 1, i);
+      } else for (let r = t2; r < this.length; ++r) this.setCell(r, i);
+      t2 && this.getWidth(t2 - 1) === 2 && this.setCellFromCodepoint(t2 - 1, 0, 1, i), this.getWidth(t2) === 0 && !this.hasContent(t2) && this.setCellFromCodepoint(t2, 0, 1, i);
     }
-    replaceCells(t, e, i, r = false) {
+    replaceCells(t2, e, i, r = false) {
       if (r) {
-        for (t && this.getWidth(t - 1) === 2 && !this.isProtected(t - 1) && this.setCellFromCodepoint(t - 1, 0, 1, i), e < this.length && this.getWidth(e - 1) === 2 && !this.isProtected(e) && this.setCellFromCodepoint(e, 0, 1, i); t < e && t < this.length; ) this.isProtected(t) || this.setCell(t, i), t++;
+        for (t2 && this.getWidth(t2 - 1) === 2 && !this.isProtected(t2 - 1) && this.setCellFromCodepoint(t2 - 1, 0, 1, i), e < this.length && this.getWidth(e - 1) === 2 && !this.isProtected(e) && this.setCellFromCodepoint(e, 0, 1, i); t2 < e && t2 < this.length; ) this.isProtected(t2) || this.setCell(t2, i), t2++;
         return;
       }
-      for (t && this.getWidth(t - 1) === 2 && this.setCellFromCodepoint(t - 1, 0, 1, i), e < this.length && this.getWidth(e - 1) === 2 && this.setCellFromCodepoint(e, 0, 1, i); t < e && t < this.length; ) this.setCell(t++, i);
+      for (t2 && this.getWidth(t2 - 1) === 2 && this.setCellFromCodepoint(t2 - 1, 0, 1, i), e < this.length && this.getWidth(e - 1) === 2 && this.setCellFromCodepoint(e, 0, 1, i); t2 < e && t2 < this.length; ) this.setCell(t2++, i);
     }
-    resize(t, e) {
-      if (t === this.length) return this._data.length * 4 * Ls < this._data.buffer.byteLength;
-      let i = t * B;
-      if (t > this.length) {
+    resize(t2, e) {
+      if (t2 === this.length) return this._data.length * 4 * Ls < this._data.buffer.byteLength;
+      let i = t2 * B;
+      if (t2 > this.length) {
         if (this._data.buffer.byteLength >= i * 4) this._data = new Uint32Array(this._data.buffer, 0, i);
         else {
           let r = new Uint32Array(i);
           r.set(this._data), this._data = r;
         }
-        for (let r = this.length; r < t; ++r) this.setCell(r, e);
+        for (let r = this.length; r < t2; ++r) this.setCell(r, e);
       } else {
         this._data = this._data.subarray(0, i);
         let r = Object.keys(this._combined);
         for (let o2 = 0; o2 < r.length; o2++) {
           let l = parseInt(r[o2], 10);
-          l >= t && delete this._combined[l];
+          l >= t2 && delete this._combined[l];
         }
         let n = Object.keys(this._extendedAttrs);
         for (let o2 = 0; o2 < n.length; o2++) {
           let l = parseInt(n[o2], 10);
-          l >= t && delete this._extendedAttrs[l];
+          l >= t2 && delete this._extendedAttrs[l];
         }
       }
-      return this.length = t, i * 4 * Ls < this._data.buffer.byteLength;
+      return this.length = t2, i * 4 * Ls < this._data.buffer.byteLength;
     }
     cleanupMemory() {
       if (this._data.length * 4 * Ls < this._data.buffer.byteLength) {
-        let t = new Uint32Array(this._data.length);
-        return t.set(this._data), this._data = t, 1;
+        let t2 = new Uint32Array(this._data.length);
+        return t2.set(this._data), this._data = t2, 1;
       }
       return 0;
     }
-    fill(t, e = false) {
+    fill(t2, e = false) {
       if (e) {
-        for (let i = 0; i < this.length; ++i) this.isProtected(i) || this.setCell(i, t);
+        for (let i = 0; i < this.length; ++i) this.isProtected(i) || this.setCell(i, t2);
         return;
       }
       this._combined = {}, this._extendedAttrs = {};
-      for (let i = 0; i < this.length; ++i) this.setCell(i, t);
+      for (let i = 0; i < this.length; ++i) this.setCell(i, t2);
     }
-    copyFrom(t) {
-      this.length !== t.length ? this._data = new Uint32Array(t._data) : this._data.set(t._data), this.length = t.length, this._combined = {};
-      for (let e in t._combined) this._combined[e] = t._combined[e];
+    copyFrom(t2) {
+      this.length !== t2.length ? this._data = new Uint32Array(t2._data) : this._data.set(t2._data), this.length = t2.length, this._combined = {};
+      for (let e in t2._combined) this._combined[e] = t2._combined[e];
       this._extendedAttrs = {};
-      for (let e in t._extendedAttrs) this._extendedAttrs[e] = t._extendedAttrs[e];
-      this.isWrapped = t.isWrapped;
+      for (let e in t2._extendedAttrs) this._extendedAttrs[e] = t2._extendedAttrs[e];
+      this.isWrapped = t2.isWrapped;
     }
     clone() {
-      let t = new s12(0);
-      t._data = new Uint32Array(this._data), t.length = this.length;
-      for (let e in this._combined) t._combined[e] = this._combined[e];
-      for (let e in this._extendedAttrs) t._extendedAttrs[e] = this._extendedAttrs[e];
-      return t.isWrapped = this.isWrapped, t;
+      let t2 = new s12(0);
+      t2._data = new Uint32Array(this._data), t2.length = this.length;
+      for (let e in this._combined) t2._combined[e] = this._combined[e];
+      for (let e in this._extendedAttrs) t2._extendedAttrs[e] = this._extendedAttrs[e];
+      return t2.isWrapped = this.isWrapped, t2;
     }
     getTrimmedLength() {
-      for (let t = this.length - 1; t >= 0; --t) if (this._data[t * B + 0] & 4194303) return t + (this._data[t * B + 0] >> 22);
+      for (let t2 = this.length - 1; t2 >= 0; --t2) if (this._data[t2 * B + 0] & 4194303) return t2 + (this._data[t2 * B + 0] >> 22);
       return 0;
     }
     getNoBgTrimmedLength() {
-      for (let t = this.length - 1; t >= 0; --t) if (this._data[t * B + 0] & 4194303 || this._data[t * B + 2] & 50331648) return t + (this._data[t * B + 0] >> 22);
+      for (let t2 = this.length - 1; t2 >= 0; --t2) if (this._data[t2 * B + 0] & 4194303 || this._data[t2 * B + 2] & 50331648) return t2 + (this._data[t2 * B + 0] >> 22);
       return 0;
     }
-    copyCellsFrom(t, e, i, r, n) {
-      let o2 = t._data;
+    copyCellsFrom(t2, e, i, r, n) {
+      let o2 = t2._data;
       if (n) for (let a = r - 1; a >= 0; a--) {
         for (let u = 0; u < B; u++) this._data[(i + a) * B + u] = o2[(e + a) * B + u];
-        o2[(e + a) * B + 2] & 268435456 && (this._extendedAttrs[i + a] = t._extendedAttrs[e + a]);
+        o2[(e + a) * B + 2] & 268435456 && (this._extendedAttrs[i + a] = t2._extendedAttrs[e + a]);
       }
       else for (let a = 0; a < r; a++) {
         for (let u = 0; u < B; u++) this._data[(i + a) * B + u] = o2[(e + a) * B + u];
-        o2[(e + a) * B + 2] & 268435456 && (this._extendedAttrs[i + a] = t._extendedAttrs[e + a]);
+        o2[(e + a) * B + 2] & 268435456 && (this._extendedAttrs[i + a] = t2._extendedAttrs[e + a]);
       }
-      let l = Object.keys(t._combined);
+      let l = Object.keys(t2._combined);
       for (let a = 0; a < l.length; a++) {
         let u = parseInt(l[a], 10);
-        u >= e && (this._combined[u - e + i] = t._combined[u]);
+        u >= e && (this._combined[u - e + i] = t2._combined[u]);
       }
     }
-    translateToString(t, e, i, r) {
-      e = e ?? 0, i = i ?? this.length, t && (i = Math.min(i, this.getTrimmedLength())), r && (r.length = 0);
+    translateToString(t2, e, i, r) {
+      e = e ?? 0, i = i ?? this.length, t2 && (i = Math.min(i, this.getTrimmedLength())), r && (r.length = 0);
       let n = "";
       for (; e < i; ) {
         let o2 = this._data[e * B + 0], l = o2 & 2097151, a = o2 & 2097152 ? this._combined[e] : l ? Ce(l) : we;
@@ -7003,7 +7533,7 @@ ${h2.join(`
       return r && r.push(e), n;
     }
   };
-  function sl(s15, t, e, i, r, n) {
+  function sl(s15, t2, e, i, r, n) {
     let o2 = [];
     for (let l = 0; l < s15.length - 1; l++) {
       let a = l, u = s15.get(++a);
@@ -7014,9 +7544,9 @@ ${h2.join(`
         l += h2.length - 1;
         continue;
       }
-      let c = 0, d = ri(h2, c, t), _2 = 1, p = 0;
+      let c = 0, d = ri(h2, c, t2), _2 = 1, p = 0;
       for (; _2 < h2.length; ) {
-        let f = ri(h2, _2, t), A = f - p, R = e - d, O = Math.min(A, R);
+        let f = ri(h2, _2, t2), A = f - p, R = e - d, O = Math.min(A, R);
         h2[c].copyCellsFrom(h2[_2], p, d, O, false), d += O, d === e && (c++, d = 0), p += O, p === f && (_2++, p = 0), d === 0 && c !== 0 && h2[c - 1].getWidth(e - 1) === 2 && (h2[c].copyCellsFrom(h2[c - 1], e - 1, d++, 1, false), h2[c - 1].setCell(e - 1, r));
       }
       h2[c].replaceCells(d, e, r);
@@ -7026,29 +7556,29 @@ ${h2.join(`
     }
     return o2;
   }
-  function ol(s15, t) {
-    let e = [], i = 0, r = t[i], n = 0;
+  function ol(s15, t2) {
+    let e = [], i = 0, r = t2[i], n = 0;
     for (let o2 = 0; o2 < s15.length; o2++) if (r === o2) {
-      let l = t[++i];
-      s15.onDeleteEmitter.fire({ index: o2 - n, amount: l }), o2 += l - 1, n += l, r = t[++i];
+      let l = t2[++i];
+      s15.onDeleteEmitter.fire({ index: o2 - n, amount: l }), o2 += l - 1, n += l, r = t2[++i];
     } else e.push(o2);
     return { layout: e, countRemoved: n };
   }
-  function ll(s15, t) {
+  function ll(s15, t2) {
     let e = [];
-    for (let i = 0; i < t.length; i++) e.push(s15.get(t[i]));
+    for (let i = 0; i < t2.length; i++) e.push(s15.get(t2[i]));
     for (let i = 0; i < e.length; i++) s15.set(i, e[i]);
-    s15.length = t.length;
+    s15.length = t2.length;
   }
-  function al(s15, t, e) {
-    let i = [], r = s15.map((a, u) => ri(s15, u, t)).reduce((a, u) => a + u), n = 0, o2 = 0, l = 0;
+  function al(s15, t2, e) {
+    let i = [], r = s15.map((a, u) => ri(s15, u, t2)).reduce((a, u) => a + u), n = 0, o2 = 0, l = 0;
     for (; l < r; ) {
       if (r - l < e) {
         i.push(r - l);
         break;
       }
       n += e;
-      let a = ri(s15, o2, t);
+      let a = ri(s15, o2, t2);
       n > a && (n -= a, o2++);
       let u = s15[o2].getWidth(n - 1) === 2;
       u && n--;
@@ -7057,14 +7587,14 @@ ${h2.join(`
     }
     return i;
   }
-  function ri(s15, t, e) {
-    if (t === s15.length - 1) return s15[t].getTrimmedLength();
-    let i = !s15[t].hasContent(e - 1) && s15[t].getWidth(e - 1) === 1, r = s15[t + 1].getWidth(0) === 2;
+  function ri(s15, t2, e) {
+    if (t2 === s15.length - 1) return s15[t2].getTrimmedLength();
+    let i = !s15[t2].hasContent(e - 1) && s15[t2].getWidth(e - 1) === 1, r = s15[t2 + 1].getWidth(0) === 2;
     return i && r ? e - 1 : e;
   }
   var un = class un2 {
-    constructor(t) {
-      this.line = t;
+    constructor(t2) {
+      this.line = t2;
       this.isDisposed = false;
       this._disposables = [];
       this._id = un2._nextId++;
@@ -7077,8 +7607,8 @@ ${h2.join(`
     dispose() {
       this.isDisposed || (this.isDisposed = true, this.line = -1, this._onDispose.fire(), Ne(this._disposables), this._disposables.length = 0);
     }
-    register(t) {
-      return this._disposables.push(t), t;
+    register(t2) {
+      return this._disposables.push(t2), t2;
     }
   };
   un._nextId = 1;
@@ -7100,8 +7630,8 @@ ${h2.join(`
   ne["="] = { "#": "ù", "@": "à", "[": "é", "\\": "ç", "]": "ê", "^": "î", _: "è", "`": "ô", "{": "ä", "|": "ö", "}": "ü", "~": "û" };
   var cl = 4294967295;
   var $i = class {
-    constructor(t, e, i) {
-      this._hasScrollback = t;
+    constructor(t2, e, i) {
+      this._hasScrollback = t2;
       this._optionsService = e;
       this._bufferService = i;
       this.ydisp = 0;
@@ -7121,14 +7651,14 @@ ${h2.join(`
       this._memoryCleanupPosition = 0;
       this._cols = this._bufferService.cols, this._rows = this._bufferService.rows, this.lines = new zi(this._getCorrectBufferLength(this._rows)), this.scrollTop = 0, this.scrollBottom = this._rows - 1, this.setupTabStops();
     }
-    getNullCell(t) {
-      return t ? (this._nullCell.fg = t.fg, this._nullCell.bg = t.bg, this._nullCell.extended = t.extended) : (this._nullCell.fg = 0, this._nullCell.bg = 0, this._nullCell.extended = new rt()), this._nullCell;
+    getNullCell(t2) {
+      return t2 ? (this._nullCell.fg = t2.fg, this._nullCell.bg = t2.bg, this._nullCell.extended = t2.extended) : (this._nullCell.fg = 0, this._nullCell.bg = 0, this._nullCell.extended = new rt()), this._nullCell;
     }
-    getWhitespaceCell(t) {
-      return t ? (this._whitespaceCell.fg = t.fg, this._whitespaceCell.bg = t.bg, this._whitespaceCell.extended = t.extended) : (this._whitespaceCell.fg = 0, this._whitespaceCell.bg = 0, this._whitespaceCell.extended = new rt()), this._whitespaceCell;
+    getWhitespaceCell(t2) {
+      return t2 ? (this._whitespaceCell.fg = t2.fg, this._whitespaceCell.bg = t2.bg, this._whitespaceCell.extended = t2.extended) : (this._whitespaceCell.fg = 0, this._whitespaceCell.bg = 0, this._whitespaceCell.extended = new rt()), this._whitespaceCell;
     }
-    getBlankLine(t, e) {
-      return new Ze(this._bufferService.cols, this.getNullCell(t), e);
+    getBlankLine(t2, e) {
+      return new Ze(this._bufferService.cols, this.getNullCell(t2), e);
     }
     get hasScrollback() {
       return this._hasScrollback && this.lines.maxLength > this._rows;
@@ -7137,75 +7667,75 @@ ${h2.join(`
       let e = this.ybase + this.y - this.ydisp;
       return e >= 0 && e < this._rows;
     }
-    _getCorrectBufferLength(t) {
-      if (!this._hasScrollback) return t;
-      let e = t + this._optionsService.rawOptions.scrollback;
+    _getCorrectBufferLength(t2) {
+      if (!this._hasScrollback) return t2;
+      let e = t2 + this._optionsService.rawOptions.scrollback;
       return e > cl ? cl : e;
     }
-    fillViewportRows(t) {
+    fillViewportRows(t2) {
       if (this.lines.length === 0) {
-        t === void 0 && (t = X);
+        t2 === void 0 && (t2 = X);
         let e = this._rows;
-        for (; e--; ) this.lines.push(this.getBlankLine(t));
+        for (; e--; ) this.lines.push(this.getBlankLine(t2));
       }
     }
     clear() {
       this.ydisp = 0, this.ybase = 0, this.y = 0, this.x = 0, this.lines = new zi(this._getCorrectBufferLength(this._rows)), this.scrollTop = 0, this.scrollBottom = this._rows - 1, this.setupTabStops();
     }
-    resize(t, e) {
+    resize(t2, e) {
       let i = this.getNullCell(X), r = 0, n = this._getCorrectBufferLength(e);
       if (n > this.lines.maxLength && (this.lines.maxLength = n), this.lines.length > 0) {
-        if (this._cols < t) for (let l = 0; l < this.lines.length; l++) r += +this.lines.get(l).resize(t, i);
+        if (this._cols < t2) for (let l = 0; l < this.lines.length; l++) r += +this.lines.get(l).resize(t2, i);
         let o2 = 0;
-        if (this._rows < e) for (let l = this._rows; l < e; l++) this.lines.length < e + this.ybase && (this._optionsService.rawOptions.windowsMode || this._optionsService.rawOptions.windowsPty.backend !== void 0 || this._optionsService.rawOptions.windowsPty.buildNumber !== void 0 ? this.lines.push(new Ze(t, i)) : this.ybase > 0 && this.lines.length <= this.ybase + this.y + o2 + 1 ? (this.ybase--, o2++, this.ydisp > 0 && this.ydisp--) : this.lines.push(new Ze(t, i)));
+        if (this._rows < e) for (let l = this._rows; l < e; l++) this.lines.length < e + this.ybase && (this._optionsService.rawOptions.windowsMode || this._optionsService.rawOptions.windowsPty.backend !== void 0 || this._optionsService.rawOptions.windowsPty.buildNumber !== void 0 ? this.lines.push(new Ze(t2, i)) : this.ybase > 0 && this.lines.length <= this.ybase + this.y + o2 + 1 ? (this.ybase--, o2++, this.ydisp > 0 && this.ydisp--) : this.lines.push(new Ze(t2, i)));
         else for (let l = this._rows; l > e; l--) this.lines.length > e + this.ybase && (this.lines.length > this.ybase + this.y + 1 ? this.lines.pop() : (this.ybase++, this.ydisp++));
         if (n < this.lines.maxLength) {
           let l = this.lines.length - n;
           l > 0 && (this.lines.trimStart(l), this.ybase = Math.max(this.ybase - l, 0), this.ydisp = Math.max(this.ydisp - l, 0), this.savedY = Math.max(this.savedY - l, 0)), this.lines.maxLength = n;
         }
-        this.x = Math.min(this.x, t - 1), this.y = Math.min(this.y, e - 1), o2 && (this.y += o2), this.savedX = Math.min(this.savedX, t - 1), this.scrollTop = 0;
+        this.x = Math.min(this.x, t2 - 1), this.y = Math.min(this.y, e - 1), o2 && (this.y += o2), this.savedX = Math.min(this.savedX, t2 - 1), this.scrollTop = 0;
       }
-      if (this.scrollBottom = e - 1, this._isReflowEnabled && (this._reflow(t, e), this._cols > t)) for (let o2 = 0; o2 < this.lines.length; o2++) r += +this.lines.get(o2).resize(t, i);
-      this._cols = t, this._rows = e, this._memoryCleanupQueue.clear(), r > 0.1 * this.lines.length && (this._memoryCleanupPosition = 0, this._memoryCleanupQueue.enqueue(() => this._batchedMemoryCleanup()));
+      if (this.scrollBottom = e - 1, this._isReflowEnabled && (this._reflow(t2, e), this._cols > t2)) for (let o2 = 0; o2 < this.lines.length; o2++) r += +this.lines.get(o2).resize(t2, i);
+      this._cols = t2, this._rows = e, this._memoryCleanupQueue.clear(), r > 0.1 * this.lines.length && (this._memoryCleanupPosition = 0, this._memoryCleanupQueue.enqueue(() => this._batchedMemoryCleanup()));
     }
     _batchedMemoryCleanup() {
-      let t = true;
-      this._memoryCleanupPosition >= this.lines.length && (this._memoryCleanupPosition = 0, t = false);
+      let t2 = true;
+      this._memoryCleanupPosition >= this.lines.length && (this._memoryCleanupPosition = 0, t2 = false);
       let e = 0;
       for (; this._memoryCleanupPosition < this.lines.length; ) if (e += this.lines.get(this._memoryCleanupPosition++).cleanupMemory(), e > 100) return true;
-      return t;
+      return t2;
     }
     get _isReflowEnabled() {
-      let t = this._optionsService.rawOptions.windowsPty;
-      return t && t.buildNumber ? this._hasScrollback && t.backend === "conpty" && t.buildNumber >= 21376 : this._hasScrollback && !this._optionsService.rawOptions.windowsMode;
+      let t2 = this._optionsService.rawOptions.windowsPty;
+      return t2 && t2.buildNumber ? this._hasScrollback && t2.backend === "conpty" && t2.buildNumber >= 21376 : this._hasScrollback && !this._optionsService.rawOptions.windowsMode;
     }
-    _reflow(t, e) {
-      this._cols !== t && (t > this._cols ? this._reflowLarger(t, e) : this._reflowSmaller(t, e));
+    _reflow(t2, e) {
+      this._cols !== t2 && (t2 > this._cols ? this._reflowLarger(t2, e) : this._reflowSmaller(t2, e));
     }
-    _reflowLarger(t, e) {
-      let i = this._optionsService.rawOptions.reflowCursorLine, r = sl(this.lines, this._cols, t, this.ybase + this.y, this.getNullCell(X), i);
+    _reflowLarger(t2, e) {
+      let i = this._optionsService.rawOptions.reflowCursorLine, r = sl(this.lines, this._cols, t2, this.ybase + this.y, this.getNullCell(X), i);
       if (r.length > 0) {
         let n = ol(this.lines, r);
-        ll(this.lines, n.layout), this._reflowLargerAdjustViewport(t, e, n.countRemoved);
+        ll(this.lines, n.layout), this._reflowLargerAdjustViewport(t2, e, n.countRemoved);
       }
     }
-    _reflowLargerAdjustViewport(t, e, i) {
+    _reflowLargerAdjustViewport(t2, e, i) {
       let r = this.getNullCell(X), n = i;
-      for (; n-- > 0; ) this.ybase === 0 ? (this.y > 0 && this.y--, this.lines.length < e && this.lines.push(new Ze(t, r))) : (this.ydisp === this.ybase && this.ydisp--, this.ybase--);
+      for (; n-- > 0; ) this.ybase === 0 ? (this.y > 0 && this.y--, this.lines.length < e && this.lines.push(new Ze(t2, r))) : (this.ydisp === this.ybase && this.ydisp--, this.ybase--);
       this.savedY = Math.max(this.savedY - i, 0);
     }
-    _reflowSmaller(t, e) {
+    _reflowSmaller(t2, e) {
       let i = this._optionsService.rawOptions.reflowCursorLine, r = this.getNullCell(X), n = [], o2 = 0;
       for (let l = this.lines.length - 1; l >= 0; l--) {
         let a = this.lines.get(l);
-        if (!a || !a.isWrapped && a.getTrimmedLength() <= t) continue;
+        if (!a || !a.isWrapped && a.getTrimmedLength() <= t2) continue;
         let u = [a];
         for (; a.isWrapped && l > 0; ) a = this.lines.get(--l), u.unshift(a);
         if (!i) {
           let I = this.ybase + this.y;
           if (I >= l && I < l + u.length) continue;
         }
-        let h2 = u[u.length - 1].getTrimmedLength(), c = al(u, this._cols, t), d = c.length - u.length, _2;
+        let h2 = u[u.length - 1].getTrimmedLength(), c = al(u, this._cols, t2), d = c.length - u.length, _2;
         this.ybase === 0 && this.y !== this.lines.length - 1 ? _2 = Math.max(0, this.y - this.lines.maxLength + d) : _2 = Math.max(0, this.lines.length - this.lines.maxLength + d);
         let p = [];
         for (let I = 0; I < d; I++) {
@@ -7225,7 +7755,7 @@ ${h2.join(`
             R = ri(u, k, this._cols);
           }
         }
-        for (let I = 0; I < u.length; I++) c[I] < t && u[I].setCell(c[I], r);
+        for (let I = 0; I < u.length; I++) c[I] < t2 && u[I].setCell(c[I], r);
         let O = d - _2;
         for (; O-- > 0; ) this.ybase === 0 ? this.y < e - 1 ? (this.y++, this.lines.pop()) : (this.ybase++, this.ydisp++) : this.ybase < Math.min(this.lines.maxLength, this.lines.length + o2) - e && (this.ybase === this.ydisp && this.ydisp++, this.ybase++);
         this.savedY = Math.min(this.savedY + d, this.ybase + e - 1);
@@ -7246,39 +7776,39 @@ ${h2.join(`
         m > 0 && this.lines.onTrimEmitter.fire(m);
       }
     }
-    translateBufferLineToString(t, e, i = 0, r) {
-      let n = this.lines.get(t);
+    translateBufferLineToString(t2, e, i = 0, r) {
+      let n = this.lines.get(t2);
       return n ? n.translateToString(e, i, r) : "";
     }
-    getWrappedRangeForLine(t) {
-      let e = t, i = t;
+    getWrappedRangeForLine(t2) {
+      let e = t2, i = t2;
       for (; e > 0 && this.lines.get(e).isWrapped; ) e--;
       for (; i + 1 < this.lines.length && this.lines.get(i + 1).isWrapped; ) i++;
       return { first: e, last: i };
     }
-    setupTabStops(t) {
-      for (t != null ? this.tabs[t] || (t = this.prevStop(t)) : (this.tabs = {}, t = 0); t < this._cols; t += this._optionsService.rawOptions.tabStopWidth) this.tabs[t] = true;
+    setupTabStops(t2) {
+      for (t2 != null ? this.tabs[t2] || (t2 = this.prevStop(t2)) : (this.tabs = {}, t2 = 0); t2 < this._cols; t2 += this._optionsService.rawOptions.tabStopWidth) this.tabs[t2] = true;
     }
-    prevStop(t) {
-      for (t == null && (t = this.x); !this.tabs[--t] && t > 0; ) ;
-      return t >= this._cols ? this._cols - 1 : t < 0 ? 0 : t;
+    prevStop(t2) {
+      for (t2 == null && (t2 = this.x); !this.tabs[--t2] && t2 > 0; ) ;
+      return t2 >= this._cols ? this._cols - 1 : t2 < 0 ? 0 : t2;
     }
-    nextStop(t) {
-      for (t == null && (t = this.x); !this.tabs[++t] && t < this._cols; ) ;
-      return t >= this._cols ? this._cols - 1 : t < 0 ? 0 : t;
+    nextStop(t2) {
+      for (t2 == null && (t2 = this.x); !this.tabs[++t2] && t2 < this._cols; ) ;
+      return t2 >= this._cols ? this._cols - 1 : t2 < 0 ? 0 : t2;
     }
-    clearMarkers(t) {
+    clearMarkers(t2) {
       this._isClearing = true;
-      for (let e = 0; e < this.markers.length; e++) this.markers[e].line === t && (this.markers[e].dispose(), this.markers.splice(e--, 1));
+      for (let e = 0; e < this.markers.length; e++) this.markers[e].line === t2 && (this.markers[e].dispose(), this.markers.splice(e--, 1));
       this._isClearing = false;
     }
     clearAllMarkers() {
       this._isClearing = true;
-      for (let t = 0; t < this.markers.length; t++) this.markers[t].dispose();
+      for (let t2 = 0; t2 < this.markers.length; t2++) this.markers[t2].dispose();
       this.markers.length = 0, this._isClearing = false;
     }
-    addMarker(t) {
-      let e = new cn(t);
+    addMarker(t2) {
+      let e = new cn(t2);
       return this.markers.push(e), e.register(this.lines.onTrim((i) => {
         e.line -= i, e.line < 0 && e.dispose();
       })), e.register(this.lines.onInsert((i) => {
@@ -7287,8 +7817,8 @@ ${h2.join(`
         e.line >= i.index && e.line < i.index + i.amount && e.dispose(), e.line > i.index && (e.line -= i.amount);
       })), e.register(e.onDispose(() => this._removeMarker(e))), e;
     }
-    _removeMarker(t) {
-      this._isClearing || this.markers.splice(this.markers.indexOf(t), 1);
+    _removeMarker(t2) {
+      this._isClearing || this.markers.splice(this.markers.indexOf(t2), 1);
     }
   };
   var hn = class extends D {
@@ -7457,10 +7987,10 @@ ${h2.join(`
   function sc(s15) {
     return s15 === "block" || s15 === "underline" || s15 === "bar";
   }
-  function oi(s15, t = 5) {
+  function oi(s15, t2 = 5) {
     if (typeof s15 != "object") return s15;
     let e = Array.isArray(s15) ? [] : {};
-    for (let i in s15) e[i] = t <= 1 ? s15[i] : s15[i] && oi(s15[i], t - 1);
+    for (let i in s15) e[i] = t2 <= 1 ? s15[i] : s15[i] && oi(s15[i], t2 - 1);
     return e;
   }
   var ul = Object.freeze({ insertMode: false });
@@ -7497,20 +8027,20 @@ ${h2.join(`
   };
   li = M([S(0, F), S(1, nr), S(2, H)], li);
   var dl = { NONE: { events: 0, restrict: () => false }, X10: { events: 1, restrict: (s15) => s15.button === 4 || s15.action !== 1 ? false : (s15.ctrl = false, s15.alt = false, s15.shift = false, true) }, VT200: { events: 19, restrict: (s15) => s15.action !== 32 }, DRAG: { events: 23, restrict: (s15) => !(s15.action === 32 && s15.button === 3) }, ANY: { events: 31, restrict: (s15) => true } };
-  function Ms(s15, t) {
+  function Ms(s15, t2) {
     let e = (s15.ctrl ? 16 : 0) | (s15.shift ? 4 : 0) | (s15.alt ? 8 : 0);
-    return s15.button === 4 ? (e |= 64, e |= s15.action) : (e |= s15.button & 3, s15.button & 4 && (e |= 64), s15.button & 8 && (e |= 128), s15.action === 32 ? e |= 32 : s15.action === 0 && !t && (e |= 3)), e;
+    return s15.button === 4 ? (e |= 64, e |= s15.action) : (e |= s15.button & 3, s15.button & 4 && (e |= 64), s15.button & 8 && (e |= 128), s15.action === 32 ? e |= 32 : s15.action === 0 && !t2 && (e |= 3)), e;
   }
   var Ps = String.fromCharCode;
   var fl = { DEFAULT: (s15) => {
-    let t = [Ms(s15, false) + 32, s15.col + 32, s15.row + 32];
-    return t[0] > 255 || t[1] > 255 || t[2] > 255 ? "" : `\x1B[M${Ps(t[0])}${Ps(t[1])}${Ps(t[2])}`;
+    let t2 = [Ms(s15, false) + 32, s15.col + 32, s15.row + 32];
+    return t2[0] > 255 || t2[1] > 255 || t2[2] > 255 ? "" : `\x1B[M${Ps(t2[0])}${Ps(t2[1])}${Ps(t2[2])}`;
   }, SGR: (s15) => {
-    let t = s15.action === 0 && s15.button !== 4 ? "m" : "M";
-    return `\x1B[<${Ms(s15, true)};${s15.col};${s15.row}${t}`;
+    let t2 = s15.action === 0 && s15.button !== 4 ? "m" : "M";
+    return `\x1B[<${Ms(s15, true)};${s15.col};${s15.row}${t2}`;
   }, SGR_PIXELS: (s15) => {
-    let t = s15.action === 0 && s15.button !== 4 ? "m" : "M";
-    return `\x1B[<${Ms(s15, true)};${s15.x};${s15.y}${t}`;
+    let t2 = s15.action === 0 && s15.button !== 4 ? "m" : "M";
+    return `\x1B[<${Ms(s15, true)};${s15.x};${s15.y}${t2}`;
   } };
   var ai = class extends D {
     constructor(e, i, r) {
@@ -7583,11 +8113,11 @@ ${h2.join(`
   var Os = [[768, 879], [1155, 1158], [1160, 1161], [1425, 1469], [1471, 1471], [1473, 1474], [1476, 1477], [1479, 1479], [1536, 1539], [1552, 1557], [1611, 1630], [1648, 1648], [1750, 1764], [1767, 1768], [1770, 1773], [1807, 1807], [1809, 1809], [1840, 1866], [1958, 1968], [2027, 2035], [2305, 2306], [2364, 2364], [2369, 2376], [2381, 2381], [2385, 2388], [2402, 2403], [2433, 2433], [2492, 2492], [2497, 2500], [2509, 2509], [2530, 2531], [2561, 2562], [2620, 2620], [2625, 2626], [2631, 2632], [2635, 2637], [2672, 2673], [2689, 2690], [2748, 2748], [2753, 2757], [2759, 2760], [2765, 2765], [2786, 2787], [2817, 2817], [2876, 2876], [2879, 2879], [2881, 2883], [2893, 2893], [2902, 2902], [2946, 2946], [3008, 3008], [3021, 3021], [3134, 3136], [3142, 3144], [3146, 3149], [3157, 3158], [3260, 3260], [3263, 3263], [3270, 3270], [3276, 3277], [3298, 3299], [3393, 3395], [3405, 3405], [3530, 3530], [3538, 3540], [3542, 3542], [3633, 3633], [3636, 3642], [3655, 3662], [3761, 3761], [3764, 3769], [3771, 3772], [3784, 3789], [3864, 3865], [3893, 3893], [3895, 3895], [3897, 3897], [3953, 3966], [3968, 3972], [3974, 3975], [3984, 3991], [3993, 4028], [4038, 4038], [4141, 4144], [4146, 4146], [4150, 4151], [4153, 4153], [4184, 4185], [4448, 4607], [4959, 4959], [5906, 5908], [5938, 5940], [5970, 5971], [6002, 6003], [6068, 6069], [6071, 6077], [6086, 6086], [6089, 6099], [6109, 6109], [6155, 6157], [6313, 6313], [6432, 6434], [6439, 6440], [6450, 6450], [6457, 6459], [6679, 6680], [6912, 6915], [6964, 6964], [6966, 6970], [6972, 6972], [6978, 6978], [7019, 7027], [7616, 7626], [7678, 7679], [8203, 8207], [8234, 8238], [8288, 8291], [8298, 8303], [8400, 8431], [12330, 12335], [12441, 12442], [43014, 43014], [43019, 43019], [43045, 43046], [64286, 64286], [65024, 65039], [65056, 65059], [65279, 65279], [65529, 65531]];
   var ac = [[68097, 68099], [68101, 68102], [68108, 68111], [68152, 68154], [68159, 68159], [119143, 119145], [119155, 119170], [119173, 119179], [119210, 119213], [119362, 119364], [917505, 917505], [917536, 917631], [917760, 917999]];
   var se;
-  function cc(s15, t) {
-    let e = 0, i = t.length - 1, r;
-    if (s15 < t[0][0] || s15 > t[i][1]) return false;
-    for (; i >= e; ) if (r = e + i >> 1, s15 > t[r][1]) e = r + 1;
-    else if (s15 < t[r][0]) i = r - 1;
+  function cc(s15, t2) {
+    let e = 0, i = t2.length - 1, r;
+    if (s15 < t2[0][0] || s15 > t2[i][1]) return false;
+    for (; i >= e; ) if (r = e + i >> 1, s15 > t2[r][1]) e = r + 1;
+    else if (s15 < t2[r][0]) i = r - 1;
     else return true;
     return false;
   }
@@ -7596,14 +8126,14 @@ ${h2.join(`
       this.version = "6";
       if (!se) {
         se = new Uint8Array(65536), se.fill(1), se[0] = 0, se.fill(0, 1, 32), se.fill(0, 127, 160), se.fill(2, 4352, 4448), se[9001] = 2, se[9002] = 2, se.fill(2, 11904, 42192), se[12351] = 1, se.fill(2, 44032, 55204), se.fill(2, 63744, 64256), se.fill(2, 65040, 65050), se.fill(2, 65072, 65136), se.fill(2, 65280, 65377), se.fill(2, 65504, 65511);
-        for (let t = 0; t < Os.length; ++t) se.fill(0, Os[t][0], Os[t][1] + 1);
+        for (let t2 = 0; t2 < Os.length; ++t2) se.fill(0, Os[t2][0], Os[t2][1] + 1);
       }
     }
-    wcwidth(t) {
-      return t < 32 ? 0 : t < 127 ? 1 : t < 65536 ? se[t] : cc(t, ac) ? 0 : t >= 131072 && t <= 196605 || t >= 196608 && t <= 262141 ? 2 : 1;
+    wcwidth(t2) {
+      return t2 < 32 ? 0 : t2 < 127 ? 1 : t2 < 65536 ? se[t2] : cc(t2, ac) ? 0 : t2 >= 131072 && t2 <= 196605 || t2 >= 196608 && t2 <= 262141 ? 2 : 1;
     }
-    charProperties(t, e) {
-      let i = this.wcwidth(t), r = i === 0 && e !== 0;
+    charProperties(t2, e) {
+      let i = this.wcwidth(t2), r = i === 0 && e !== 0;
       if (r) {
         let n = Ae.extractWidth(e);
         n === 0 ? r = false : n > i && (i = n);
@@ -7617,20 +8147,20 @@ ${h2.join(`
       this._active = "";
       this._onChange = new v();
       this.onChange = this._onChange.event;
-      let t = new fn();
-      this.register(t), this._active = t.version, this._activeProvider = t;
+      let t2 = new fn();
+      this.register(t2), this._active = t2.version, this._activeProvider = t2;
     }
-    static extractShouldJoin(t) {
-      return (t & 1) !== 0;
+    static extractShouldJoin(t2) {
+      return (t2 & 1) !== 0;
     }
-    static extractWidth(t) {
-      return t >> 1 & 3;
+    static extractWidth(t2) {
+      return t2 >> 1 & 3;
     }
-    static extractCharKind(t) {
-      return t >> 3;
+    static extractCharKind(t2) {
+      return t2 >> 3;
     }
-    static createPropertyValue(t, e, i = false) {
-      return (t & 16777215) << 3 | (e & 3) << 1 | (i ? 1 : 0);
+    static createPropertyValue(t2, e, i = false) {
+      return (t2 & 16777215) << 3 | (e & 3) << 1 | (i ? 1 : 0);
     }
     dispose() {
       this._onChange.dispose();
@@ -7641,23 +8171,23 @@ ${h2.join(`
     get activeVersion() {
       return this._active;
     }
-    set activeVersion(t) {
-      if (!this._providers[t]) throw new Error(`unknown Unicode version "${t}"`);
-      this._active = t, this._activeProvider = this._providers[t], this._onChange.fire(t);
+    set activeVersion(t2) {
+      if (!this._providers[t2]) throw new Error(`unknown Unicode version "${t2}"`);
+      this._active = t2, this._activeProvider = this._providers[t2], this._onChange.fire(t2);
     }
-    register(t) {
-      this._providers[t.version] = t;
+    register(t2) {
+      this._providers[t2.version] = t2;
     }
-    wcwidth(t) {
-      return this._activeProvider.wcwidth(t);
+    wcwidth(t2) {
+      return this._activeProvider.wcwidth(t2);
     }
-    getStringCellWidth(t) {
-      let e = 0, i = 0, r = t.length;
+    getStringCellWidth(t2) {
+      let e = 0, i = 0, r = t2.length;
       for (let n = 0; n < r; ++n) {
-        let o2 = t.charCodeAt(n);
+        let o2 = t2.charCodeAt(n);
         if (55296 <= o2 && o2 <= 56319) {
           if (++n >= r) return e + this.wcwidth(o2);
-          let u = t.charCodeAt(n);
+          let u = t2.charCodeAt(n);
           56320 <= u && u <= 57343 ? o2 = (o2 - 55296) * 1024 + u - 56320 + 65536 : e += this.wcwidth(u);
         }
         let l = this.charProperties(o2, i), a = s13.extractWidth(l);
@@ -7665,8 +8195,8 @@ ${h2.join(`
       }
       return e;
     }
-    charProperties(t, e) {
-      return this._activeProvider.charProperties(t, e);
+    charProperties(t2, e) {
+      return this._activeProvider.charProperties(t2, e);
     }
   };
   var pn = class {
@@ -7677,11 +8207,11 @@ ${h2.join(`
     reset() {
       this.charset = void 0, this._charsets = [], this.glevel = 0;
     }
-    setgLevel(t) {
-      this.glevel = t, this.charset = this._charsets[t];
+    setgLevel(t2) {
+      this.glevel = t2, this.charset = this._charsets[t2];
     }
-    setgCharset(t, e) {
-      this._charsets[t] = e, this.glevel === t && (this.charset = e);
+    setgCharset(t2, e) {
+      this._charsets[t2] = e, this.glevel === t2 && (this.charset = e);
     }
   };
   function Bs(s15) {
@@ -7691,76 +8221,76 @@ ${h2.join(`
   var Vi = 2147483647;
   var uc = 256;
   var ci = class s14 {
-    constructor(t = 32, e = 32) {
-      this.maxLength = t;
+    constructor(t2 = 32, e = 32) {
+      this.maxLength = t2;
       this.maxSubParamsLength = e;
       if (e > uc) throw new Error("maxSubParamsLength must not be greater than 256");
-      this.params = new Int32Array(t), this.length = 0, this._subParams = new Int32Array(e), this._subParamsLength = 0, this._subParamsIdx = new Uint16Array(t), this._rejectDigits = false, this._rejectSubDigits = false, this._digitIsSub = false;
+      this.params = new Int32Array(t2), this.length = 0, this._subParams = new Int32Array(e), this._subParamsLength = 0, this._subParamsIdx = new Uint16Array(t2), this._rejectDigits = false, this._rejectSubDigits = false, this._digitIsSub = false;
     }
-    static fromArray(t) {
+    static fromArray(t2) {
       let e = new s14();
-      if (!t.length) return e;
-      for (let i = Array.isArray(t[0]) ? 1 : 0; i < t.length; ++i) {
-        let r = t[i];
+      if (!t2.length) return e;
+      for (let i = Array.isArray(t2[0]) ? 1 : 0; i < t2.length; ++i) {
+        let r = t2[i];
         if (Array.isArray(r)) for (let n = 0; n < r.length; ++n) e.addSubParam(r[n]);
         else e.addParam(r);
       }
       return e;
     }
     clone() {
-      let t = new s14(this.maxLength, this.maxSubParamsLength);
-      return t.params.set(this.params), t.length = this.length, t._subParams.set(this._subParams), t._subParamsLength = this._subParamsLength, t._subParamsIdx.set(this._subParamsIdx), t._rejectDigits = this._rejectDigits, t._rejectSubDigits = this._rejectSubDigits, t._digitIsSub = this._digitIsSub, t;
+      let t2 = new s14(this.maxLength, this.maxSubParamsLength);
+      return t2.params.set(this.params), t2.length = this.length, t2._subParams.set(this._subParams), t2._subParamsLength = this._subParamsLength, t2._subParamsIdx.set(this._subParamsIdx), t2._rejectDigits = this._rejectDigits, t2._rejectSubDigits = this._rejectSubDigits, t2._digitIsSub = this._digitIsSub, t2;
     }
     toArray() {
-      let t = [];
+      let t2 = [];
       for (let e = 0; e < this.length; ++e) {
-        t.push(this.params[e]);
+        t2.push(this.params[e]);
         let i = this._subParamsIdx[e] >> 8, r = this._subParamsIdx[e] & 255;
-        r - i > 0 && t.push(Array.prototype.slice.call(this._subParams, i, r));
+        r - i > 0 && t2.push(Array.prototype.slice.call(this._subParams, i, r));
       }
-      return t;
+      return t2;
     }
     reset() {
       this.length = 0, this._subParamsLength = 0, this._rejectDigits = false, this._rejectSubDigits = false, this._digitIsSub = false;
     }
-    addParam(t) {
+    addParam(t2) {
       if (this._digitIsSub = false, this.length >= this.maxLength) {
         this._rejectDigits = true;
         return;
       }
-      if (t < -1) throw new Error("values lesser than -1 are not allowed");
-      this._subParamsIdx[this.length] = this._subParamsLength << 8 | this._subParamsLength, this.params[this.length++] = t > Vi ? Vi : t;
+      if (t2 < -1) throw new Error("values lesser than -1 are not allowed");
+      this._subParamsIdx[this.length] = this._subParamsLength << 8 | this._subParamsLength, this.params[this.length++] = t2 > Vi ? Vi : t2;
     }
-    addSubParam(t) {
+    addSubParam(t2) {
       if (this._digitIsSub = true, !!this.length) {
         if (this._rejectDigits || this._subParamsLength >= this.maxSubParamsLength) {
           this._rejectSubDigits = true;
           return;
         }
-        if (t < -1) throw new Error("values lesser than -1 are not allowed");
-        this._subParams[this._subParamsLength++] = t > Vi ? Vi : t, this._subParamsIdx[this.length - 1]++;
+        if (t2 < -1) throw new Error("values lesser than -1 are not allowed");
+        this._subParams[this._subParamsLength++] = t2 > Vi ? Vi : t2, this._subParamsIdx[this.length - 1]++;
       }
     }
-    hasSubParams(t) {
-      return (this._subParamsIdx[t] & 255) - (this._subParamsIdx[t] >> 8) > 0;
+    hasSubParams(t2) {
+      return (this._subParamsIdx[t2] & 255) - (this._subParamsIdx[t2] >> 8) > 0;
     }
-    getSubParams(t) {
-      let e = this._subParamsIdx[t] >> 8, i = this._subParamsIdx[t] & 255;
+    getSubParams(t2) {
+      let e = this._subParamsIdx[t2] >> 8, i = this._subParamsIdx[t2] & 255;
       return i - e > 0 ? this._subParams.subarray(e, i) : null;
     }
     getSubParamsAll() {
-      let t = {};
+      let t2 = {};
       for (let e = 0; e < this.length; ++e) {
         let i = this._subParamsIdx[e] >> 8, r = this._subParamsIdx[e] & 255;
-        r - i > 0 && (t[e] = this._subParams.slice(i, r));
+        r - i > 0 && (t2[e] = this._subParams.slice(i, r));
       }
-      return t;
+      return t2;
     }
-    addDigit(t) {
+    addDigit(t2) {
       let e;
       if (this._rejectDigits || !(e = this._digitIsSub ? this._subParamsLength : this.length) || this._digitIsSub && this._rejectSubDigits) return;
       let i = this._digitIsSub ? this._subParams : this.params, r = i[e - 1];
-      i[e - 1] = ~r ? Math.min(r * 10 + t, Vi) : t;
+      i[e - 1] = ~r ? Math.min(r * 10 + t2, Vi) : t2;
     }
   };
   var qi = [];
@@ -7774,43 +8304,43 @@ ${h2.join(`
       };
       this._stack = { paused: false, loopPosition: 0, fallThrough: false };
     }
-    registerHandler(t, e) {
-      this._handlers[t] === void 0 && (this._handlers[t] = []);
-      let i = this._handlers[t];
+    registerHandler(t2, e) {
+      this._handlers[t2] === void 0 && (this._handlers[t2] = []);
+      let i = this._handlers[t2];
       return i.push(e), { dispose: () => {
         let r = i.indexOf(e);
         r !== -1 && i.splice(r, 1);
       } };
     }
-    clearHandler(t) {
-      this._handlers[t] && delete this._handlers[t];
+    clearHandler(t2) {
+      this._handlers[t2] && delete this._handlers[t2];
     }
-    setHandlerFallback(t) {
-      this._handlerFb = t;
+    setHandlerFallback(t2) {
+      this._handlerFb = t2;
     }
     dispose() {
       this._handlers = /* @__PURE__ */ Object.create(null), this._handlerFb = () => {
       }, this._active = qi;
     }
     reset() {
-      if (this._state === 2) for (let t = this._stack.paused ? this._stack.loopPosition - 1 : this._active.length - 1; t >= 0; --t) this._active[t].end(false);
+      if (this._state === 2) for (let t2 = this._stack.paused ? this._stack.loopPosition - 1 : this._active.length - 1; t2 >= 0; --t2) this._active[t2].end(false);
       this._stack.paused = false, this._active = qi, this._id = -1, this._state = 0;
     }
     _start() {
       if (this._active = this._handlers[this._id] || qi, !this._active.length) this._handlerFb(this._id, "START");
-      else for (let t = this._active.length - 1; t >= 0; t--) this._active[t].start();
+      else for (let t2 = this._active.length - 1; t2 >= 0; t2--) this._active[t2].start();
     }
-    _put(t, e, i) {
-      if (!this._active.length) this._handlerFb(this._id, "PUT", It(t, e, i));
-      else for (let r = this._active.length - 1; r >= 0; r--) this._active[r].put(t, e, i);
+    _put(t2, e, i) {
+      if (!this._active.length) this._handlerFb(this._id, "PUT", It(t2, e, i));
+      else for (let r = this._active.length - 1; r >= 0; r--) this._active[r].put(t2, e, i);
     }
     start() {
       this.reset(), this._state = 1;
     }
-    put(t, e, i) {
+    put(t2, e, i) {
       if (this._state !== 3) {
         if (this._state === 1) for (; e < i; ) {
-          let r = t[e++];
+          let r = t2[e++];
           if (r === 59) {
             this._state = 2, this._start();
             break;
@@ -7821,16 +8351,16 @@ ${h2.join(`
           }
           this._id === -1 && (this._id = 0), this._id = this._id * 10 + r - 48;
         }
-        this._state === 2 && i - e > 0 && this._put(t, e, i);
+        this._state === 2 && i - e > 0 && this._put(t2, e, i);
       }
     }
-    end(t, e = true) {
+    end(t2, e = true) {
       if (this._state !== 0) {
-        if (this._state !== 3) if (this._state === 1 && this._start(), !this._active.length) this._handlerFb(this._id, "END", t);
+        if (this._state !== 3) if (this._state === 1 && this._start(), !this._active.length) this._handlerFb(this._id, "END", t2);
         else {
           let i = false, r = this._active.length - 1, n = false;
           if (this._stack.paused && (r = this._stack.loopPosition - 1, i = e, n = this._stack.fallThrough, this._stack.paused = false), !n && i === false) {
-            for (; r >= 0 && (i = this._active[r].end(t), i !== true); r--) if (i instanceof Promise) return this._stack.paused = true, this._stack.loopPosition = r, this._stack.fallThrough = false, i;
+            for (; r >= 0 && (i = this._active[r].end(t2), i !== true); r--) if (i instanceof Promise) return this._stack.paused = true, this._stack.loopPosition = r, this._stack.fallThrough = false, i;
             r--;
           }
           for (; r >= 0; r--) if (i = this._active[r].end(false), i instanceof Promise) return this._stack.paused = true, this._stack.loopPosition = r, this._stack.fallThrough = true, i;
@@ -7840,21 +8370,21 @@ ${h2.join(`
     }
   };
   var pe = class {
-    constructor(t) {
-      this._handler = t;
+    constructor(t2) {
+      this._handler = t2;
       this._data = "";
       this._hitLimit = false;
     }
     start() {
       this._data = "", this._hitLimit = false;
     }
-    put(t, e, i) {
-      this._hitLimit || (this._data += It(t, e, i), this._data.length > 1e7 && (this._data = "", this._hitLimit = true));
+    put(t2, e, i) {
+      this._hitLimit || (this._data += It(t2, e, i), this._data.length > 1e7 && (this._data = "", this._hitLimit = true));
     }
-    end(t) {
+    end(t2) {
       let e = false;
       if (this._hitLimit) e = false;
-      else if (t && (e = this._handler(this._data), e instanceof Promise)) return e.then((i) => (this._data = "", this._hitLimit = false, i));
+      else if (t2 && (e = this._handler(this._data), e instanceof Promise)) return e.then((i) => (this._data = "", this._hitLimit = false, i));
       return this._data = "", this._hitLimit = false, e;
     }
   };
@@ -7872,38 +8402,38 @@ ${h2.join(`
       this._handlers = /* @__PURE__ */ Object.create(null), this._handlerFb = () => {
       }, this._active = Yi;
     }
-    registerHandler(t, e) {
-      this._handlers[t] === void 0 && (this._handlers[t] = []);
-      let i = this._handlers[t];
+    registerHandler(t2, e) {
+      this._handlers[t2] === void 0 && (this._handlers[t2] = []);
+      let i = this._handlers[t2];
       return i.push(e), { dispose: () => {
         let r = i.indexOf(e);
         r !== -1 && i.splice(r, 1);
       } };
     }
-    clearHandler(t) {
-      this._handlers[t] && delete this._handlers[t];
+    clearHandler(t2) {
+      this._handlers[t2] && delete this._handlers[t2];
     }
-    setHandlerFallback(t) {
-      this._handlerFb = t;
+    setHandlerFallback(t2) {
+      this._handlerFb = t2;
     }
     reset() {
-      if (this._active.length) for (let t = this._stack.paused ? this._stack.loopPosition - 1 : this._active.length - 1; t >= 0; --t) this._active[t].unhook(false);
+      if (this._active.length) for (let t2 = this._stack.paused ? this._stack.loopPosition - 1 : this._active.length - 1; t2 >= 0; --t2) this._active[t2].unhook(false);
       this._stack.paused = false, this._active = Yi, this._ident = 0;
     }
-    hook(t, e) {
-      if (this.reset(), this._ident = t, this._active = this._handlers[t] || Yi, !this._active.length) this._handlerFb(this._ident, "HOOK", e);
+    hook(t2, e) {
+      if (this.reset(), this._ident = t2, this._active = this._handlers[t2] || Yi, !this._active.length) this._handlerFb(this._ident, "HOOK", e);
       else for (let i = this._active.length - 1; i >= 0; i--) this._active[i].hook(e);
     }
-    put(t, e, i) {
-      if (!this._active.length) this._handlerFb(this._ident, "PUT", It(t, e, i));
-      else for (let r = this._active.length - 1; r >= 0; r--) this._active[r].put(t, e, i);
+    put(t2, e, i) {
+      if (!this._active.length) this._handlerFb(this._ident, "PUT", It(t2, e, i));
+      else for (let r = this._active.length - 1; r >= 0; r--) this._active[r].put(t2, e, i);
     }
-    unhook(t, e = true) {
-      if (!this._active.length) this._handlerFb(this._ident, "UNHOOK", t);
+    unhook(t2, e = true) {
+      if (!this._active.length) this._handlerFb(this._ident, "UNHOOK", t2);
       else {
         let i = false, r = this._active.length - 1, n = false;
         if (this._stack.paused && (r = this._stack.loopPosition - 1, i = e, n = this._stack.fallThrough, this._stack.paused = false), !n && i === false) {
-          for (; r >= 0 && (i = this._active[r].unhook(t), i !== true); r--) if (i instanceof Promise) return this._stack.paused = true, this._stack.loopPosition = r, this._stack.fallThrough = false, i;
+          for (; r >= 0 && (i = this._active[r].unhook(t2), i !== true); r--) if (i instanceof Promise) return this._stack.paused = true, this._stack.loopPosition = r, this._stack.fallThrough = false, i;
           r--;
         }
         for (; r >= 0; r--) if (i = this._active[r].unhook(false), i instanceof Promise) return this._stack.paused = true, this._stack.loopPosition = r, this._stack.fallThrough = true, i;
@@ -7914,37 +8444,37 @@ ${h2.join(`
   var ji = new ci();
   ji.addParam(0);
   var Xi = class {
-    constructor(t) {
-      this._handler = t;
+    constructor(t2) {
+      this._handler = t2;
       this._data = "";
       this._params = ji;
       this._hitLimit = false;
     }
-    hook(t) {
-      this._params = t.length > 1 || t.params[0] ? t.clone() : ji, this._data = "", this._hitLimit = false;
+    hook(t2) {
+      this._params = t2.length > 1 || t2.params[0] ? t2.clone() : ji, this._data = "", this._hitLimit = false;
     }
-    put(t, e, i) {
-      this._hitLimit || (this._data += It(t, e, i), this._data.length > 1e7 && (this._data = "", this._hitLimit = true));
+    put(t2, e, i) {
+      this._hitLimit || (this._data += It(t2, e, i), this._data.length > 1e7 && (this._data = "", this._hitLimit = true));
     }
-    unhook(t) {
+    unhook(t2) {
       let e = false;
       if (this._hitLimit) e = false;
-      else if (t && (e = this._handler(this._data, this._params), e instanceof Promise)) return e.then((i) => (this._params = ji, this._data = "", this._hitLimit = false, i));
+      else if (t2 && (e = this._handler(this._data, this._params), e instanceof Promise)) return e.then((i) => (this._params = ji, this._data = "", this._hitLimit = false, i));
       return this._params = ji, this._data = "", this._hitLimit = false, e;
     }
   };
   var Fs = class {
-    constructor(t) {
-      this.table = new Uint8Array(t);
+    constructor(t2) {
+      this.table = new Uint8Array(t2);
     }
-    setDefault(t, e) {
-      this.table.fill(t << 4 | e);
+    setDefault(t2, e) {
+      this.table.fill(t2 << 4 | e);
     }
-    add(t, e, i, r) {
-      this.table[e << 8 | t] = i << 4 | r;
+    add(t2, e, i, r) {
+      this.table[e << 8 | t2] = i << 4 | r;
     }
-    addMany(t, e, i, r) {
-      for (let n = 0; n < t.length; n++) this.table[e << 8 | t[n]] = i << 4 | r;
+    addMany(t2, e, i, r) {
+      for (let n = 0; n < t2.length; n++) this.table[e << 8 | t2[n]] = i << 4 | r;
     }
   };
   var ke = 160;
@@ -8194,26 +8724,26 @@ ${h2.join(`
   var fc = /^[\da-f]+$/;
   function Ws(s15) {
     if (!s15) return;
-    let t = s15.toLowerCase();
-    if (t.indexOf("rgb:") === 0) {
-      t = t.slice(4);
-      let e = dc.exec(t);
+    let t2 = s15.toLowerCase();
+    if (t2.indexOf("rgb:") === 0) {
+      t2 = t2.slice(4);
+      let e = dc.exec(t2);
       if (e) {
         let i = e[1] ? 15 : e[4] ? 255 : e[7] ? 4095 : 65535;
         return [Math.round(parseInt(e[1] || e[4] || e[7] || e[10], 16) / i * 255), Math.round(parseInt(e[2] || e[5] || e[8] || e[11], 16) / i * 255), Math.round(parseInt(e[3] || e[6] || e[9] || e[12], 16) / i * 255)];
       }
-    } else if (t.indexOf("#") === 0 && (t = t.slice(1), fc.exec(t) && [3, 6, 9, 12].includes(t.length))) {
-      let e = t.length / 3, i = [0, 0, 0];
+    } else if (t2.indexOf("#") === 0 && (t2 = t2.slice(1), fc.exec(t2) && [3, 6, 9, 12].includes(t2.length))) {
+      let e = t2.length / 3, i = [0, 0, 0];
       for (let r = 0; r < 3; ++r) {
-        let n = parseInt(t.slice(e * r, e * r + e), 16);
+        let n = parseInt(t2.slice(e * r, e * r + e), 16);
         i[r] = e === 1 ? n << 4 : e === 2 ? n : e === 3 ? n >> 4 : n >> 8;
       }
       return i;
     }
   }
-  function Hs(s15, t) {
+  function Hs(s15, t2) {
     let e = s15.toString(16), i = e.length < 2 ? "0" + e : e;
-    switch (t) {
+    switch (t2) {
       case 4:
         return e[0];
       case 8:
@@ -8224,60 +8754,60 @@ ${h2.join(`
         return i + i;
     }
   }
-  function ml(s15, t = 16) {
+  function ml(s15, t2 = 16) {
     let [e, i, r] = s15;
-    return `rgb:${Hs(e, t)}/${Hs(i, t)}/${Hs(r, t)}`;
+    return `rgb:${Hs(e, t2)}/${Hs(i, t2)}/${Hs(r, t2)}`;
   }
   var mc = { "(": 0, ")": 1, "*": 2, "+": 3, "-": 1, ".": 2 };
   var ut = 131072;
   var _l = 10;
-  function bl(s15, t) {
-    if (s15 > 24) return t.setWinLines || false;
+  function bl(s15, t2) {
+    if (s15 > 24) return t2.setWinLines || false;
     switch (s15) {
       case 1:
-        return !!t.restoreWin;
+        return !!t2.restoreWin;
       case 2:
-        return !!t.minimizeWin;
+        return !!t2.minimizeWin;
       case 3:
-        return !!t.setWinPosition;
+        return !!t2.setWinPosition;
       case 4:
-        return !!t.setWinSizePixels;
+        return !!t2.setWinSizePixels;
       case 5:
-        return !!t.raiseWin;
+        return !!t2.raiseWin;
       case 6:
-        return !!t.lowerWin;
+        return !!t2.lowerWin;
       case 7:
-        return !!t.refreshWin;
+        return !!t2.refreshWin;
       case 8:
-        return !!t.setWinSizeChars;
+        return !!t2.setWinSizeChars;
       case 9:
-        return !!t.maximizeWin;
+        return !!t2.maximizeWin;
       case 10:
-        return !!t.fullscreenWin;
+        return !!t2.fullscreenWin;
       case 11:
-        return !!t.getWinState;
+        return !!t2.getWinState;
       case 13:
-        return !!t.getWinPosition;
+        return !!t2.getWinPosition;
       case 14:
-        return !!t.getWinSizePixels;
+        return !!t2.getWinSizePixels;
       case 15:
-        return !!t.getScreenSizePixels;
+        return !!t2.getScreenSizePixels;
       case 16:
-        return !!t.getCellSizePixels;
+        return !!t2.getCellSizePixels;
       case 18:
-        return !!t.getWinSizeChars;
+        return !!t2.getWinSizeChars;
       case 19:
-        return !!t.getScreenSizeChars;
+        return !!t2.getScreenSizeChars;
       case 20:
-        return !!t.getIconTitle;
+        return !!t2.getIconTitle;
       case 21:
-        return !!t.getWinTitle;
+        return !!t2.getWinTitle;
       case 22:
-        return !!t.pushTitle;
+        return !!t2.pushTitle;
       case 23:
-        return !!t.popTitle;
+        return !!t2.popTitle;
       case 24:
-        return !!t.setWinLines;
+        return !!t2.setWinLines;
     }
     return false;
   }
@@ -9090,18 +9620,18 @@ ${h2.join(`
     }
   };
   var Zi = class {
-    constructor(t) {
-      this._bufferService = t;
+    constructor(t2) {
+      this._bufferService = t2;
       this.clearRange();
     }
     clearRange() {
       this.start = this._bufferService.buffer.y, this.end = this._bufferService.buffer.y;
     }
-    markDirty(t) {
-      t < this.start ? this.start = t : t > this.end && (this.end = t);
+    markDirty(t2) {
+      t2 < this.start ? this.start = t2 : t2 > this.end && (this.end = t2);
     }
-    markRangeDirty(t, e) {
-      t > e && (gl = t, t = e, e = gl), t < this.start && (this.start = t), e > this.end && (this.end = e);
+    markRangeDirty(t2, e) {
+      t2 > e && (gl = t2, t2 = e, e = gl), t2 < this.start && (this.start = t2), e > this.end && (this.end = e);
     }
     markAllDirty() {
       this.markRangeDirty(0, this._bufferService.rows - 1);
@@ -9175,39 +9705,39 @@ ${h2.join(`
     }
   };
   var ui = class {
-    constructor(t) {
-      this._bufferService = t;
+    constructor(t2) {
+      this._bufferService = t2;
       this._nextId = 1;
       this._entriesWithId = /* @__PURE__ */ new Map();
       this._dataByLinkId = /* @__PURE__ */ new Map();
     }
-    registerLink(t) {
+    registerLink(t2) {
       let e = this._bufferService.buffer;
-      if (t.id === void 0) {
-        let a = e.addMarker(e.ybase + e.y), u = { data: t, id: this._nextId++, lines: [a] };
+      if (t2.id === void 0) {
+        let a = e.addMarker(e.ybase + e.y), u = { data: t2, id: this._nextId++, lines: [a] };
         return a.onDispose(() => this._removeMarkerFromLink(u, a)), this._dataByLinkId.set(u.id, u), u.id;
       }
-      let i = t, r = this._getEntryIdKey(i), n = this._entriesWithId.get(r);
+      let i = t2, r = this._getEntryIdKey(i), n = this._entriesWithId.get(r);
       if (n) return this.addLineToLink(n.id, e.ybase + e.y), n.id;
       let o2 = e.addMarker(e.ybase + e.y), l = { id: this._nextId++, key: this._getEntryIdKey(i), data: i, lines: [o2] };
       return o2.onDispose(() => this._removeMarkerFromLink(l, o2)), this._entriesWithId.set(l.key, l), this._dataByLinkId.set(l.id, l), l.id;
     }
-    addLineToLink(t, e) {
-      let i = this._dataByLinkId.get(t);
+    addLineToLink(t2, e) {
+      let i = this._dataByLinkId.get(t2);
       if (i && i.lines.every((r) => r.line !== e)) {
         let r = this._bufferService.buffer.addMarker(e);
         i.lines.push(r), r.onDispose(() => this._removeMarkerFromLink(i, r));
       }
     }
-    getLinkData(t) {
-      return this._dataByLinkId.get(t)?.data;
+    getLinkData(t2) {
+      return this._dataByLinkId.get(t2)?.data;
     }
-    _getEntryIdKey(t) {
-      return `${t.id};;${t.uri}`;
+    _getEntryIdKey(t2) {
+      return `${t2.id};;${t2.uri}`;
     }
-    _removeMarkerFromLink(t, e) {
-      let i = t.lines.indexOf(e);
-      i !== -1 && (t.lines.splice(i, 1), t.lines.length === 0 && (t.data.id !== void 0 && this._entriesWithId.delete(t.key), this._dataByLinkId.delete(t.id)));
+    _removeMarkerFromLink(t2, e) {
+      let i = t2.lines.indexOf(e);
+      i !== -1 && (t2.lines.splice(i, 1), t2.lines.length === 0 && (t2.data.id !== void 0 && this._entriesWithId.delete(t2.key), this._dataByLinkId.delete(t2.id)));
     }
   };
   ui = M([S(0, F)], ui);
@@ -9314,11 +9844,11 @@ ${h2.join(`
     }
   };
   var gc = { 48: ["0", ")"], 49: ["1", "!"], 50: ["2", "@"], 51: ["3", "#"], 52: ["4", "$"], 53: ["5", "%"], 54: ["6", "^"], 55: ["7", "&"], 56: ["8", "*"], 57: ["9", "("], 186: [";", ":"], 187: ["=", "+"], 188: [",", "<"], 189: ["-", "_"], 190: [".", ">"], 191: ["/", "?"], 192: ["`", "~"], 219: ["[", "{"], 220: ["\\", "|"], 221: ["]", "}"], 222: ["'", '"'] };
-  function Il(s15, t, e, i) {
+  function Il(s15, t2, e, i) {
     let r = { type: 0, cancel: false, key: void 0 }, n = (s15.shiftKey ? 1 : 0) | (s15.altKey ? 2 : 0) | (s15.ctrlKey ? 4 : 0) | (s15.metaKey ? 8 : 0);
     switch (s15.keyCode) {
       case 0:
-        s15.key === "UIKeyInputUpArrow" ? t ? r.key = b.ESC + "OA" : r.key = b.ESC + "[A" : s15.key === "UIKeyInputLeftArrow" ? t ? r.key = b.ESC + "OD" : r.key = b.ESC + "[D" : s15.key === "UIKeyInputRightArrow" ? t ? r.key = b.ESC + "OC" : r.key = b.ESC + "[C" : s15.key === "UIKeyInputDownArrow" && (t ? r.key = b.ESC + "OB" : r.key = b.ESC + "[B");
+        s15.key === "UIKeyInputUpArrow" ? t2 ? r.key = b.ESC + "OA" : r.key = b.ESC + "[A" : s15.key === "UIKeyInputLeftArrow" ? t2 ? r.key = b.ESC + "OD" : r.key = b.ESC + "[D" : s15.key === "UIKeyInputRightArrow" ? t2 ? r.key = b.ESC + "OC" : r.key = b.ESC + "[C" : s15.key === "UIKeyInputDownArrow" && (t2 ? r.key = b.ESC + "OB" : r.key = b.ESC + "[B");
         break;
       case 8:
         r.key = s15.ctrlKey ? "\b" : b.DEL, s15.altKey && (r.key = b.ESC + r.key);
@@ -9338,19 +9868,19 @@ ${h2.join(`
         break;
       case 37:
         if (s15.metaKey) break;
-        n ? r.key = b.ESC + "[1;" + (n + 1) + "D" : t ? r.key = b.ESC + "OD" : r.key = b.ESC + "[D";
+        n ? r.key = b.ESC + "[1;" + (n + 1) + "D" : t2 ? r.key = b.ESC + "OD" : r.key = b.ESC + "[D";
         break;
       case 39:
         if (s15.metaKey) break;
-        n ? r.key = b.ESC + "[1;" + (n + 1) + "C" : t ? r.key = b.ESC + "OC" : r.key = b.ESC + "[C";
+        n ? r.key = b.ESC + "[1;" + (n + 1) + "C" : t2 ? r.key = b.ESC + "OC" : r.key = b.ESC + "[C";
         break;
       case 38:
         if (s15.metaKey) break;
-        n ? r.key = b.ESC + "[1;" + (n + 1) + "A" : t ? r.key = b.ESC + "OA" : r.key = b.ESC + "[A";
+        n ? r.key = b.ESC + "[1;" + (n + 1) + "A" : t2 ? r.key = b.ESC + "OA" : r.key = b.ESC + "[A";
         break;
       case 40:
         if (s15.metaKey) break;
-        n ? r.key = b.ESC + "[1;" + (n + 1) + "B" : t ? r.key = b.ESC + "OB" : r.key = b.ESC + "[B";
+        n ? r.key = b.ESC + "[1;" + (n + 1) + "B" : t2 ? r.key = b.ESC + "OB" : r.key = b.ESC + "[B";
         break;
       case 45:
         !s15.shiftKey && !s15.ctrlKey && (r.key = b.ESC + "[2~");
@@ -9359,10 +9889,10 @@ ${h2.join(`
         n ? r.key = b.ESC + "[3;" + (n + 1) + "~" : r.key = b.ESC + "[3~";
         break;
       case 36:
-        n ? r.key = b.ESC + "[1;" + (n + 1) + "H" : t ? r.key = b.ESC + "OH" : r.key = b.ESC + "[H";
+        n ? r.key = b.ESC + "[1;" + (n + 1) + "H" : t2 ? r.key = b.ESC + "OH" : r.key = b.ESC + "[H";
         break;
       case 35:
-        n ? r.key = b.ESC + "[1;" + (n + 1) + "F" : t ? r.key = b.ESC + "OF" : r.key = b.ESC + "[F";
+        n ? r.key = b.ESC + "[1;" + (n + 1) + "F" : t2 ? r.key = b.ESC + "OF" : r.key = b.ESC + "[F";
         break;
       case 33:
         s15.shiftKey ? r.type = 2 : s15.ctrlKey ? r.key = b.ESC + "[5;" + (n + 1) + "~" : r.key = b.ESC + "[5~";
@@ -9426,8 +9956,8 @@ ${h2.join(`
   }
   var ee = 0;
   var En = class {
-    constructor(t) {
-      this._getKey = t;
+    constructor(t2) {
+      this._getKey = t2;
       this._array = [];
       this._insertedValues = [];
       this._flushInsertedTask = new Jt();
@@ -9439,56 +9969,56 @@ ${h2.join(`
     clear() {
       this._array.length = 0, this._insertedValues.length = 0, this._flushInsertedTask.clear(), this._isFlushingInserted = false, this._deletedIndices.length = 0, this._flushDeletedTask.clear(), this._isFlushingDeleted = false;
     }
-    insert(t) {
-      this._flushCleanupDeleted(), this._insertedValues.length === 0 && this._flushInsertedTask.enqueue(() => this._flushInserted()), this._insertedValues.push(t);
+    insert(t2) {
+      this._flushCleanupDeleted(), this._insertedValues.length === 0 && this._flushInsertedTask.enqueue(() => this._flushInserted()), this._insertedValues.push(t2);
     }
     _flushInserted() {
-      let t = this._insertedValues.sort((n, o2) => this._getKey(n) - this._getKey(o2)), e = 0, i = 0, r = new Array(this._array.length + this._insertedValues.length);
-      for (let n = 0; n < r.length; n++) i >= this._array.length || this._getKey(t[e]) <= this._getKey(this._array[i]) ? (r[n] = t[e], e++) : r[n] = this._array[i++];
+      let t2 = this._insertedValues.sort((n, o2) => this._getKey(n) - this._getKey(o2)), e = 0, i = 0, r = new Array(this._array.length + this._insertedValues.length);
+      for (let n = 0; n < r.length; n++) i >= this._array.length || this._getKey(t2[e]) <= this._getKey(this._array[i]) ? (r[n] = t2[e], e++) : r[n] = this._array[i++];
       this._array = r, this._insertedValues.length = 0;
     }
     _flushCleanupInserted() {
       !this._isFlushingInserted && this._insertedValues.length > 0 && this._flushInsertedTask.flush();
     }
-    delete(t) {
+    delete(t2) {
       if (this._flushCleanupInserted(), this._array.length === 0) return false;
-      let e = this._getKey(t);
+      let e = this._getKey(t2);
       if (e === void 0 || (ee = this._search(e), ee === -1) || this._getKey(this._array[ee]) !== e) return false;
       do
-        if (this._array[ee] === t) return this._deletedIndices.length === 0 && this._flushDeletedTask.enqueue(() => this._flushDeleted()), this._deletedIndices.push(ee), true;
+        if (this._array[ee] === t2) return this._deletedIndices.length === 0 && this._flushDeletedTask.enqueue(() => this._flushDeleted()), this._deletedIndices.push(ee), true;
       while (++ee < this._array.length && this._getKey(this._array[ee]) === e);
       return false;
     }
     _flushDeleted() {
       this._isFlushingDeleted = true;
-      let t = this._deletedIndices.sort((n, o2) => n - o2), e = 0, i = new Array(this._array.length - t.length), r = 0;
-      for (let n = 0; n < this._array.length; n++) t[e] === n ? e++ : i[r++] = this._array[n];
+      let t2 = this._deletedIndices.sort((n, o2) => n - o2), e = 0, i = new Array(this._array.length - t2.length), r = 0;
+      for (let n = 0; n < this._array.length; n++) t2[e] === n ? e++ : i[r++] = this._array[n];
       this._array = i, this._deletedIndices.length = 0, this._isFlushingDeleted = false;
     }
     _flushCleanupDeleted() {
       !this._isFlushingDeleted && this._deletedIndices.length > 0 && this._flushDeletedTask.flush();
     }
-    *getKeyIterator(t) {
-      if (this._flushCleanupInserted(), this._flushCleanupDeleted(), this._array.length !== 0 && (ee = this._search(t), !(ee < 0 || ee >= this._array.length) && this._getKey(this._array[ee]) === t)) do
+    *getKeyIterator(t2) {
+      if (this._flushCleanupInserted(), this._flushCleanupDeleted(), this._array.length !== 0 && (ee = this._search(t2), !(ee < 0 || ee >= this._array.length) && this._getKey(this._array[ee]) === t2)) do
         yield this._array[ee];
-      while (++ee < this._array.length && this._getKey(this._array[ee]) === t);
+      while (++ee < this._array.length && this._getKey(this._array[ee]) === t2);
     }
-    forEachByKey(t, e) {
-      if (this._flushCleanupInserted(), this._flushCleanupDeleted(), this._array.length !== 0 && (ee = this._search(t), !(ee < 0 || ee >= this._array.length) && this._getKey(this._array[ee]) === t)) do
+    forEachByKey(t2, e) {
+      if (this._flushCleanupInserted(), this._flushCleanupDeleted(), this._array.length !== 0 && (ee = this._search(t2), !(ee < 0 || ee >= this._array.length) && this._getKey(this._array[ee]) === t2)) do
         e(this._array[ee]);
-      while (++ee < this._array.length && this._getKey(this._array[ee]) === t);
+      while (++ee < this._array.length && this._getKey(this._array[ee]) === t2);
     }
     values() {
       return this._flushCleanupInserted(), this._flushCleanupDeleted(), [...this._array].values();
     }
-    _search(t) {
+    _search(t2) {
       let e = 0, i = this._array.length - 1;
       for (; i >= e; ) {
         let r = e + i >> 1, n = this._getKey(this._array[r]);
-        if (n > t) i = r - 1;
-        else if (n < t) e = r + 1;
+        if (n > t2) i = r - 1;
+        else if (n < t2) e = r + 1;
         else {
-          for (; r > 0 && this._getKey(this._array[r - 1]) === t; ) r--;
+          for (; r > 0 && this._getKey(this._array[r - 1]) === t2; ) r--;
           return r;
         }
       }
@@ -9559,8 +10089,8 @@ ${h2.join(`
   };
   var Sc = 1e3;
   var In = class {
-    constructor(t, e = Sc) {
-      this._renderCallback = t;
+    constructor(t2, e = Sc) {
+      this._renderCallback = t2;
       this._debounceThresholdMS = e;
       this._lastRefreshMs = 0;
       this._additionalRefreshRequested = false;
@@ -9568,8 +10098,8 @@ ${h2.join(`
     dispose() {
       this._refreshTimeoutID && clearTimeout(this._refreshTimeoutID);
     }
-    refresh(t, e, i) {
-      this._rowCount = i, t = t !== void 0 ? t : 0, e = e !== void 0 ? e : this._rowCount - 1, this._rowStart = this._rowStart !== void 0 ? Math.min(this._rowStart, t) : t, this._rowEnd = this._rowEnd !== void 0 ? Math.max(this._rowEnd, e) : e;
+    refresh(t2, e, i) {
+      this._rowCount = i, t2 = t2 !== void 0 ? t2 : 0, e = e !== void 0 ? e : this._rowCount - 1, this._rowStart = this._rowStart !== void 0 ? Math.min(this._rowStart, t2) : t2, this._rowEnd = this._rowEnd !== void 0 ? Math.max(this._rowEnd, e) : e;
       let r = performance.now();
       if (r - this._lastRefreshMs >= this._debounceThresholdMS) this._lastRefreshMs = r, this._innerRefresh();
       else if (!this._additionalRefreshRequested) {
@@ -9581,8 +10111,8 @@ ${h2.join(`
     }
     _innerRefresh() {
       if (this._rowStart === void 0 || this._rowEnd === void 0 || this._rowCount === void 0) return;
-      let t = Math.max(this._rowStart, 0), e = Math.min(this._rowEnd, this._rowCount - 1);
-      this._rowStart = void 0, this._rowEnd = void 0, this._renderCallback(t, e);
+      let t2 = Math.max(this._rowStart, 0), e = Math.min(this._rowEnd, this._rowCount - 1);
+      this._rowStart = void 0, this._rowEnd = void 0, this._renderCallback(t2, e);
     }
   };
   var xl = 20;
@@ -9846,8 +10376,8 @@ ${h2.join(`
     }
   };
   hi = M([S(1, Dt), S(2, ce), S(3, F), S(4, lr)], hi);
-  function Ec(s15, t) {
-    return s15.text === t.text && s15.range.start.x === t.range.start.x && s15.range.start.y === t.range.start.y && s15.range.end.x === t.range.end.x && s15.range.end.y === t.range.end.y;
+  function Ec(s15, t2) {
+    return s15.text === t2.text && s15.range.start.x === t2.range.start.x && s15.range.start.y === t2.range.start.y && s15.range.end.x === t2.range.end.x && s15.range.end.y === t2.range.end.y;
   }
   var yn = class extends Sn {
     constructor(e = {}) {
@@ -10224,26 +10754,26 @@ ${h2.join(`
       this._addons = [];
     }
     dispose() {
-      for (let t = this._addons.length - 1; t >= 0; t--) this._addons[t].instance.dispose();
+      for (let t2 = this._addons.length - 1; t2 >= 0; t2--) this._addons[t2].instance.dispose();
     }
-    loadAddon(t, e) {
+    loadAddon(t2, e) {
       let i = { instance: e, dispose: e.dispose, isDisposed: false };
-      this._addons.push(i), e.dispose = () => this._wrappedAddonDispose(i), e.activate(t);
+      this._addons.push(i), e.dispose = () => this._wrappedAddonDispose(i), e.activate(t2);
     }
-    _wrappedAddonDispose(t) {
-      if (t.isDisposed) return;
+    _wrappedAddonDispose(t2) {
+      if (t2.isDisposed) return;
       let e = -1;
-      for (let i = 0; i < this._addons.length; i++) if (this._addons[i] === t) {
+      for (let i = 0; i < this._addons.length; i++) if (this._addons[i] === t2) {
         e = i;
         break;
       }
       if (e === -1) throw new Error("Could not dispose an addon that has not been loaded");
-      t.isDisposed = true, t.dispose.apply(t.instance), this._addons.splice(e, 1);
+      t2.isDisposed = true, t2.dispose.apply(t2.instance), this._addons.splice(e, 1);
     }
   };
   var wn = class {
-    constructor(t) {
-      this._line = t;
+    constructor(t2) {
+      this._line = t2;
     }
     get isWrapped() {
       return this._line.isWrapped;
@@ -10251,20 +10781,20 @@ ${h2.join(`
     get length() {
       return this._line.length;
     }
-    getCell(t, e) {
-      if (!(t < 0 || t >= this._line.length)) return e ? (this._line.loadCell(t, e), e) : this._line.loadCell(t, new q());
+    getCell(t2, e) {
+      if (!(t2 < 0 || t2 >= this._line.length)) return e ? (this._line.loadCell(t2, e), e) : this._line.loadCell(t2, new q());
     }
-    translateToString(t, e, i) {
-      return this._line.translateToString(t, e, i);
+    translateToString(t2, e, i) {
+      return this._line.translateToString(t2, e, i);
     }
   };
   var Ji = class {
-    constructor(t, e) {
-      this._buffer = t;
+    constructor(t2, e) {
+      this._buffer = t2;
       this.type = e;
     }
-    init(t) {
-      return this._buffer = t, this;
+    init(t2) {
+      return this._buffer = t2, this;
     }
     get cursorY() {
       return this._buffer.y;
@@ -10281,8 +10811,8 @@ ${h2.join(`
     get length() {
       return this._buffer.lines.length;
     }
-    getLine(t) {
-      let e = this._buffer.lines.get(t);
+    getLine(t2) {
+      let e = this._buffer.lines.get(t2);
       if (e) return new wn(e);
     }
     getNullCell() {
@@ -10310,40 +10840,40 @@ ${h2.join(`
     }
   };
   var Rn = class {
-    constructor(t) {
-      this._core = t;
+    constructor(t2) {
+      this._core = t2;
     }
-    registerCsiHandler(t, e) {
-      return this._core.registerCsiHandler(t, (i) => e(i.toArray()));
+    registerCsiHandler(t2, e) {
+      return this._core.registerCsiHandler(t2, (i) => e(i.toArray()));
     }
-    addCsiHandler(t, e) {
-      return this.registerCsiHandler(t, e);
+    addCsiHandler(t2, e) {
+      return this.registerCsiHandler(t2, e);
     }
-    registerDcsHandler(t, e) {
-      return this._core.registerDcsHandler(t, (i, r) => e(i, r.toArray()));
+    registerDcsHandler(t2, e) {
+      return this._core.registerDcsHandler(t2, (i, r) => e(i, r.toArray()));
     }
-    addDcsHandler(t, e) {
-      return this.registerDcsHandler(t, e);
+    addDcsHandler(t2, e) {
+      return this.registerDcsHandler(t2, e);
     }
-    registerEscHandler(t, e) {
-      return this._core.registerEscHandler(t, e);
+    registerEscHandler(t2, e) {
+      return this._core.registerEscHandler(t2, e);
     }
-    addEscHandler(t, e) {
-      return this.registerEscHandler(t, e);
+    addEscHandler(t2, e) {
+      return this.registerEscHandler(t2, e);
     }
-    registerOscHandler(t, e) {
-      return this._core.registerOscHandler(t, e);
+    registerOscHandler(t2, e) {
+      return this._core.registerOscHandler(t2, e);
     }
-    addOscHandler(t, e) {
-      return this.registerOscHandler(t, e);
+    addOscHandler(t2, e) {
+      return this.registerOscHandler(t2, e);
     }
   };
   var Ln = class {
-    constructor(t) {
-      this._core = t;
+    constructor(t2) {
+      this._core = t2;
     }
-    register(t) {
-      this._core.unicodeService.register(t);
+    register(t2) {
+      this._core.unicodeService.register(t2);
     }
     get versions() {
       return this._core.unicodeService.versions;
@@ -10351,15 +10881,15 @@ ${h2.join(`
     get activeVersion() {
       return this._core.unicodeService.activeVersion;
     }
-    set activeVersion(t) {
-      this._core.unicodeService.activeVersion = t;
+    set activeVersion(t2) {
+      this._core.unicodeService.activeVersion = t2;
     }
   };
   var Ic = ["cols", "rows"];
   var Ue = 0;
   var Dl = class extends D {
-    constructor(t) {
-      super(), this._core = this._register(new yn(t)), this._addonManager = this._register(new xn()), this._publicOptions = { ...this._core.options };
+    constructor(t2) {
+      super(), this._core = this._register(new yn(t2)), this._addonManager = this._register(new xn()), this._publicOptions = { ...this._core.options };
       let e = (r) => this._core.options[r], i = (r, n) => {
         this._checkReadonlyOptions(r), this._core.options[r] = n;
       };
@@ -10368,8 +10898,8 @@ ${h2.join(`
         Object.defineProperty(this._publicOptions, r, n);
       }
     }
-    _checkReadonlyOptions(t) {
-      if (Ic.includes(t)) throw new Error(`Option "${t}" can only be set in the constructor`);
+    _checkReadonlyOptions(t2) {
+      if (Ic.includes(t2)) throw new Error(`Option "${t2}" can only be set in the constructor`);
     }
     _checkProposedApi() {
       if (!this._core.optionsService.rawOptions.allowProposedApi) throw new Error("You must set the allowProposedApi option to true to use proposed API");
@@ -10435,7 +10965,7 @@ ${h2.join(`
       return this._checkProposedApi(), this._core.markers;
     }
     get modes() {
-      let t = this._core.coreService.decPrivateModes, e = "none";
+      let t2 = this._core.coreService.decPrivateModes, e = "none";
       switch (this._core.coreMouseService.activeProtocol) {
         case "X10":
           e = "x10";
@@ -10450,13 +10980,13 @@ ${h2.join(`
           e = "any";
           break;
       }
-      return { applicationCursorKeysMode: t.applicationCursorKeys, applicationKeypadMode: t.applicationKeypad, bracketedPasteMode: t.bracketedPasteMode, insertMode: this._core.coreService.modes.insertMode, mouseTrackingMode: e, originMode: t.origin, reverseWraparoundMode: t.reverseWraparound, sendFocusMode: t.sendFocus, synchronizedOutputMode: t.synchronizedOutput, wraparoundMode: t.wraparound };
+      return { applicationCursorKeysMode: t2.applicationCursorKeys, applicationKeypadMode: t2.applicationKeypad, bracketedPasteMode: t2.bracketedPasteMode, insertMode: this._core.coreService.modes.insertMode, mouseTrackingMode: e, originMode: t2.origin, reverseWraparoundMode: t2.reverseWraparound, sendFocusMode: t2.sendFocus, synchronizedOutputMode: t2.synchronizedOutput, wraparoundMode: t2.wraparound };
     }
     get options() {
       return this._publicOptions;
     }
-    set options(t) {
-      for (let e in t) this._publicOptions[e] = t[e];
+    set options(t2) {
+      for (let e in t2) this._publicOptions[e] = t2[e];
     }
     blur() {
       this._core.blur();
@@ -10464,41 +10994,41 @@ ${h2.join(`
     focus() {
       this._core.focus();
     }
-    input(t, e = true) {
-      this._core.input(t, e);
+    input(t2, e = true) {
+      this._core.input(t2, e);
     }
-    resize(t, e) {
-      this._verifyIntegers(t, e), this._core.resize(t, e);
+    resize(t2, e) {
+      this._verifyIntegers(t2, e), this._core.resize(t2, e);
     }
-    open(t) {
-      this._core.open(t);
+    open(t2) {
+      this._core.open(t2);
     }
-    attachCustomKeyEventHandler(t) {
-      this._core.attachCustomKeyEventHandler(t);
+    attachCustomKeyEventHandler(t2) {
+      this._core.attachCustomKeyEventHandler(t2);
     }
-    attachCustomWheelEventHandler(t) {
-      this._core.attachCustomWheelEventHandler(t);
+    attachCustomWheelEventHandler(t2) {
+      this._core.attachCustomWheelEventHandler(t2);
     }
-    registerLinkProvider(t) {
-      return this._core.registerLinkProvider(t);
+    registerLinkProvider(t2) {
+      return this._core.registerLinkProvider(t2);
     }
-    registerCharacterJoiner(t) {
-      return this._checkProposedApi(), this._core.registerCharacterJoiner(t);
+    registerCharacterJoiner(t2) {
+      return this._checkProposedApi(), this._core.registerCharacterJoiner(t2);
     }
-    deregisterCharacterJoiner(t) {
-      this._checkProposedApi(), this._core.deregisterCharacterJoiner(t);
+    deregisterCharacterJoiner(t2) {
+      this._checkProposedApi(), this._core.deregisterCharacterJoiner(t2);
     }
-    registerMarker(t = 0) {
-      return this._verifyIntegers(t), this._core.registerMarker(t);
+    registerMarker(t2 = 0) {
+      return this._verifyIntegers(t2), this._core.registerMarker(t2);
     }
-    registerDecoration(t) {
-      return this._checkProposedApi(), this._verifyPositiveIntegers(t.x ?? 0, t.width ?? 0, t.height ?? 0), this._core.registerDecoration(t);
+    registerDecoration(t2) {
+      return this._checkProposedApi(), this._verifyPositiveIntegers(t2.x ?? 0, t2.width ?? 0, t2.height ?? 0), this._core.registerDecoration(t2);
     }
     hasSelection() {
       return this._core.hasSelection();
     }
-    select(t, e, i) {
-      this._verifyIntegers(t, e, i), this._core.select(t, e, i);
+    select(t2, e, i) {
+      this._verifyIntegers(t2, e, i), this._core.select(t2, e, i);
     }
     getSelection() {
       return this._core.getSelection();
@@ -10512,17 +11042,17 @@ ${h2.join(`
     selectAll() {
       this._core.selectAll();
     }
-    selectLines(t, e) {
-      this._verifyIntegers(t, e), this._core.selectLines(t, e);
+    selectLines(t2, e) {
+      this._verifyIntegers(t2, e), this._core.selectLines(t2, e);
     }
     dispose() {
       super.dispose();
     }
-    scrollLines(t) {
-      this._verifyIntegers(t), this._core.scrollLines(t);
+    scrollLines(t2) {
+      this._verifyIntegers(t2), this._core.scrollLines(t2);
     }
-    scrollPages(t) {
-      this._verifyIntegers(t), this._core.scrollPages(t);
+    scrollPages(t2) {
+      this._verifyIntegers(t2), this._core.scrollPages(t2);
     }
     scrollToTop() {
       this._core.scrollToTop();
@@ -10530,24 +11060,24 @@ ${h2.join(`
     scrollToBottom() {
       this._core.scrollToBottom();
     }
-    scrollToLine(t) {
-      this._verifyIntegers(t), this._core.scrollToLine(t);
+    scrollToLine(t2) {
+      this._verifyIntegers(t2), this._core.scrollToLine(t2);
     }
     clear() {
       this._core.clear();
     }
-    write(t, e) {
-      this._core.write(t, e);
+    write(t2, e) {
+      this._core.write(t2, e);
     }
-    writeln(t, e) {
-      this._core.write(t), this._core.write(`\r
+    writeln(t2, e) {
+      this._core.write(t2), this._core.write(`\r
 `, e);
     }
-    paste(t) {
-      this._core.paste(t);
+    paste(t2) {
+      this._core.paste(t2);
     }
-    refresh(t, e) {
-      this._verifyIntegers(t, e), this._core.refresh(t, e);
+    refresh(t2, e) {
+      this._verifyIntegers(t2, e), this._core.refresh(t2, e);
     }
     reset() {
       this._core.reset();
@@ -10555,25 +11085,25 @@ ${h2.join(`
     clearTextureAtlas() {
       this._core.clearTextureAtlas();
     }
-    loadAddon(t) {
-      this._addonManager.loadAddon(this, t);
+    loadAddon(t2) {
+      this._addonManager.loadAddon(this, t2);
     }
     static get strings() {
       return { get promptLabel() {
         return mi.get();
-      }, set promptLabel(t) {
-        mi.set(t);
+      }, set promptLabel(t2) {
+        mi.set(t2);
       }, get tooMuchOutput() {
         return _i.get();
-      }, set tooMuchOutput(t) {
-        _i.set(t);
+      }, set tooMuchOutput(t2) {
+        _i.set(t2);
       } };
     }
-    _verifyIntegers(...t) {
-      for (Ue of t) if (Ue === 1 / 0 || isNaN(Ue) || Ue % 1 !== 0) throw new Error("This API only accepts integers");
+    _verifyIntegers(...t2) {
+      for (Ue of t2) if (Ue === 1 / 0 || isNaN(Ue) || Ue % 1 !== 0) throw new Error("This API only accepts integers");
     }
-    _verifyPositiveIntegers(...t) {
-      for (Ue of t) if (Ue && (Ue === 1 / 0 || isNaN(Ue) || Ue % 1 !== 0 || Ue < 0)) throw new Error("This API only accepts positive integers");
+    _verifyPositiveIntegers(...t2) {
+      for (Ue of t2) if (Ue && (Ue === 1 / 0 || isNaN(Ue) || Ue % 1 !== 0 || Ue < 0)) throw new Error("This API only accepts positive integers");
     }
   };
 
@@ -10589,15 +11119,15 @@ ${h2.join(`
     fit() {
       let e = this.proposeDimensions();
       if (!e || !this._terminal || isNaN(e.cols) || isNaN(e.rows)) return;
-      let t = this._terminal._core;
-      (this._terminal.rows !== e.rows || this._terminal.cols !== e.cols) && (t._renderService.clear(), this._terminal.resize(e.cols, e.rows));
+      let t2 = this._terminal._core;
+      (this._terminal.rows !== e.rows || this._terminal.cols !== e.cols) && (t2._renderService.clear(), this._terminal.resize(e.cols, e.rows));
     }
     proposeDimensions() {
       if (!this._terminal || !this._terminal.element || !this._terminal.element.parentElement) return;
-      let t = this._terminal._core._renderService.dimensions;
-      if (t.css.cell.width === 0 || t.css.cell.height === 0) return;
+      let t2 = this._terminal._core._renderService.dimensions;
+      if (t2.css.cell.width === 0 || t2.css.cell.height === 0) return;
       let s15 = this._terminal.options.scrollback === 0 ? 0 : this._terminal.options.overviewRuler?.width || 14, r = window.getComputedStyle(this._terminal.element.parentElement), l = parseInt(r.getPropertyValue("height")), a = Math.max(0, parseInt(r.getPropertyValue("width"))), i = window.getComputedStyle(this._terminal.element), n = { top: parseInt(i.getPropertyValue("padding-top")), bottom: parseInt(i.getPropertyValue("padding-bottom")), right: parseInt(i.getPropertyValue("padding-right")), left: parseInt(i.getPropertyValue("padding-left")) }, m = n.top + n.bottom, d = n.right + n.left, c = l - m, p = a - d - s15;
-      return { cols: Math.max(h, Math.floor(p / t.css.cell.width)), rows: Math.max(_, Math.floor(c / t.css.cell.height)) };
+      return { cols: Math.max(h, Math.floor(p / t2.css.cell.width)), rows: Math.max(_, Math.floor(c / t2.css.cell.height)) };
     }
   };
 
@@ -10892,19 +11422,20 @@ ${h2.join(`
   // src/app.ts
   var $2 = (s15) => document.querySelector(s15);
   var TOKEN = (() => {
-    const t = new URLSearchParams(location.hash.slice(1)).get("t");
+    const t2 = new URLSearchParams(location.hash.slice(1)).get("t");
     try {
-      if (t) localStorage.setItem("docker-gui-token", t);
-      return t || localStorage.getItem("docker-gui-token") || "";
+      if (t2) localStorage.setItem("docker-gui-token", t2);
+      return t2 || localStorage.getItem("docker-gui-token") || "";
     } catch {
-      return t || "";
+      return t2 || "";
     }
   })();
   var api = (path, opts = {}) => fetch(path, { ...opts, headers: { ...opts.headers, "X-Docker-GUI-Token": TOKEN } });
-  var LABEL = { start: "Iniciar", stop: "Parar", restart: "Reiniciar", pause: "Pausar", unpause: "Retomar", logs: "Logs", remove: "Remover" };
-  var VERB = { start: "Iniciando…", stop: "Parando…", restart: "Reiniciando…", pause: "Pausando…", unpause: "Retomando…", remove: "Removendo…" };
-  var DONE = { start: "iniciado", stop: "parado", restart: "reiniciado", pause: "pausado", unpause: "retomado", remove: "removido" };
-  var COMPOSE_VERB = { up: "Subindo…", rebuild: "Reconstruindo…", down: "Derrubando…", pull: "Baixando…", restart: "Reiniciando…", build: "Reconstruindo…" };
+  translatePage();
+  var LABEL = { start: t`Iniciar`, stop: t`Parar`, restart: t`Reiniciar`, pause: t`Pausar`, unpause: t`Retomar`, logs: t`Logs`, remove: t`Remover` };
+  var VERB = { start: t`Iniciando…`, stop: t`Parando…`, restart: t`Reiniciando…`, pause: t`Pausando…`, unpause: t`Retomando…`, remove: t`Removendo…` };
+  var DONE = { start: t`iniciado`, stop: t`parado`, restart: t`reiniciado`, pause: t`pausado`, unpause: t`retomado`, remove: t`removido` };
+  var COMPOSE_VERB = { up: t`Subindo…`, rebuild: t`Reconstruindo…`, down: t`Derrubando…`, pull: t`Baixando…`, restart: t`Reiniciando…`, build: t`Reconstruindo…` };
   var COMPOSE_CMD = {
     up: "compose up",
     rebuild: "compose up --build",
@@ -10952,14 +11483,14 @@ ${h2.join(`
     27017
   ]);
   var BUCKETS = [
-    ["problema", "com problema", "com problema", "text-bad-fg"],
-    ["rodando", "rodando bem", "rodando bem", "text-fg"],
-    ["pausado", "pausado", "pausados", "text-fg"],
-    ["reiniciando", "reiniciando", "reiniciando", "text-fg"],
-    ["parado", "parado", "parados", "text-fg"]
+    ["problema", t`com problema`, t`com problema`, "text-bad-fg"],
+    ["rodando", t`rodando bem`, t`rodando bem`, "text-fg"],
+    ["pausado", t`pausado`, t`pausados`, "text-fg"],
+    ["reiniciando", t`reiniciando`, t`reiniciando`, "text-fg"],
+    ["parado", t`parado`, t`parados`, "text-fg"]
   ];
   var TOUCH = matchMedia("(pointer: coarse)").matches;
-  var PROBLEM_TXT = { docker: "Docker fora do ar", perm: "sem acesso ao Docker", server: "sem conexão", auth: "sem token" };
+  var PROBLEM_TXT = { docker: t`Docker fora do ar`, perm: t`sem acesso ao Docker`, server: t`sem conexão`, auth: t`sem token` };
   var ghost = () => BTN.replace(" ring-1 ring-line-strong/80", "");
   var BTN = "px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded text-xs font-medium ring-1 ring-line-strong/80 transition motion-reduce:transition-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent aria-disabled:opacity-40 aria-disabled:cursor-wait";
   var data = [];
@@ -10984,14 +11515,14 @@ ${h2.join(`
   var bulkBusy = "";
   var bulkHtml = "";
   var armedIds = [];
-  var lastSel = "Nenhum container selecionado";
+  var lastSel = t`Nenhum container selecionado`;
   var CHECK = "size-4 max-lg:size-6 shrink-0 accent-accent cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent";
   var toastFn = null;
   function toast(msg, ok = false, action = null) {
     toastFn = action?.[1] || null;
     const html = `<div class="flex items-center gap-3 rounded-lg bg-raised ring-1 shadow-lg shadow-black/30 text-sm px-4 py-3 ${ok ? "ring-ok/50 text-ok-soft" : "ring-bad/50 text-bad-soft"}"><span>${REMOTE ? `<span class="font-semibold text-warn-fg">${esc(CTX)}</span> · ` : ""}${esc(msg)}</span>${action ? `<button onclick="runToastAction()"
       class="shrink-0 font-medium underline underline-offset-4 hover:text-fg-strong focus-visible:outline-2 focus-visible:outline-accent rounded">${esc(action[0])}</button>
-      <kbd class="shrink-0 font-mono text-xs px-1 rounded ring-1 ring-current opacity-70" title="Atalho">Z</kbd>` : ""}</div>`;
+      <kbd class="shrink-0 font-mono text-xs px-1 rounded ring-1 ring-current opacity-70" title="${t`Atalho`}">Z</kbd>` : ""}</div>`;
     ($2("#dlg").open ? $2("#dlg-msg") : $2("#toast")).innerHTML = html;
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => {
@@ -11014,22 +11545,23 @@ ${h2.join(`
     $2("#table").inert = $2("#bulk").inert = !!p;
     if (p) $2("#banner").innerHTML = `<p class="font-medium text-warn-strong">${p[0]}</p>
     <p class="mt-0.5 text-warn-soft">${p[1]}</p>
-    <details class="mt-2 text-xs text-warn-soft"><summary class="cursor-pointer w-fit py-1 max-lg:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent">Detalhes técnicos</summary>
+    <details class="mt-2 text-xs text-warn-soft"><summary class="cursor-pointer w-fit py-1 max-lg:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent">${t`Detalhes técnicos`}</summary>
     <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono">${esc(p[2])}</pre></details>`;
     renderCount();
     if (!lastOk) render();
   }
+  var code = (s15) => `<code class="font-mono">${s15}</code>`;
   async function load() {
     lastLoad = Date.now();
     try {
       const r = await api("/api/containers"), j2 = await r.json();
       if (r.status === 401) return showProblem([
-        "Esta aba não tem o token do Docker GUI.",
-        'Abra o link com <code class="font-mono">#t=…</code> que aparece no terminal onde você rodou <code class="font-mono">python3 docker_gui.py</code>. O token muda a cada execução.',
+        t`Esta aba não tem o token do Docker GUI.`,
+        t`Abra o link com ${code("#t=…")} que aparece no terminal onde você rodou ${code("python3 docker_gui.py")}. O token muda a cada execução.`,
         j2,
         "auth"
       ]);
-      if (!r.ok) return showProblem(/permission denied/i.test(String(j2)) ? ["Seu usuário não tem acesso ao Docker.", 'Rode <code class="font-mono">sudo usermod -aG docker $USER</code> e entre de novo na sessão.', j2, "perm"] : ["Não consegui falar com o Docker.", 'O daemon está rodando? Verifique com <code class="font-mono">systemctl status docker</code>.', j2, "docker"]);
+      if (!r.ok) return showProblem(/permission denied/i.test(String(j2)) ? [t`Seu usuário não tem acesso ao Docker.`, t`Rode ${code("sudo usermod -aG docker $USER")} e entre de novo na sessão.`, j2, "perm"] : [t`Não consegui falar com o Docker.`, t`O daemon está rodando? Verifique com ${code("systemctl status docker")}.`, j2, "docker"]);
       const first = !lastOk;
       lastOk = /* @__PURE__ */ new Date();
       if (first || JSON.stringify(j2) !== JSON.stringify(data)) {
@@ -11043,8 +11575,8 @@ ${h2.join(`
       showProblem(null);
     } catch (e) {
       showProblem([
-        lastOk ? "O servidor do Docker GUI parou de responder." : "Não consegui conectar ao servidor do Docker GUI.",
-        'Rode <code class="font-mono">python3 docker_gui.py</code> de novo; a página volta sozinha.',
+        lastOk ? t`O servidor do Docker GUI parou de responder.` : t`Não consegui conectar ao servidor do Docker GUI.`,
+        t`Rode ${code("python3 docker_gui.py")} de novo; a página volta sozinha.`,
         e.message,
         "server"
       ]);
@@ -11108,21 +11640,21 @@ ${h2.join(`
     showLive();
   }
   function showLive() {
-    $2("#live").innerHTML = live ? '<span aria-hidden="true" class="inline-block size-1.5 mr-1.5 align-middle rounded-full bg-ok"></span>ao vivo' : '<span aria-hidden="true" class="inline-block size-1.5 mr-1.5 align-middle rounded-full ring-1 ring-dim"></span>a cada 2 s';
-    $2("#live").title = live ? "A lista muda assim que o docker avisa (docker events)" : "Sem o docker events: a lista é relida a cada 2 s";
+    $2("#live").innerHTML = live ? `<span aria-hidden="true" class="inline-block size-1.5 mr-1.5 align-middle rounded-full bg-ok"></span>${t`ao vivo`}` : `<span aria-hidden="true" class="inline-block size-1.5 mr-1.5 align-middle rounded-full ring-1 ring-dim"></span>${t`a cada 2 s`}`;
+    $2("#live").title = live ? t`A lista muda assim que o docker avisa (docker events)` : t`Sem o docker events: a lista é relida a cada 2 s`;
   }
   var canAsk = () => isSecureContext && "Notification" in window && Notification.permission === "default";
   var notifying = () => "Notification" in window && Notification.permission === "granted";
   async function askNotify() {
     const ok = await Notification.requestPermission() === "granted";
     $2("#notify").hidden = !canAsk();
-    toast(ok ? "Pronto: aviso quando um container entrar na faixa de atenção, mesmo com a aba em segundo plano." : "Sem permissão para notificar. Dá para liberar nas configurações do site, no navegador.", ok);
+    toast(ok ? t`Pronto: aviso quando um container entrar na faixa de atenção, mesmo com a aba em segundo plano.` : t`Sem permissão para notificar. Dá para liberar nas configurações do site, no navegador.`, ok);
   }
   function notify(cs2) {
     if (!cs2.length || !notifying() || !document.hidden && document.hasFocus()) return;
     try {
       const n = new Notification(
-        cs2.length === 1 ? `${cs2[0].Names} precisa de atenção` : `${cs2.length} containers precisam de atenção`,
+        cs2.length === 1 ? t`${cs2[0].Names} precisa de atenção` : t`${cs2.length} containers precisam de atenção`,
         { body: cs2.length === 1 ? status(cs2[0])[0] : cs2.map((c) => c.Names).join(", ") }
       );
       n.onclick = () => {
@@ -11147,11 +11679,11 @@ ${h2.join(`
       if (r.ok) next = Object.fromEntries((await r.json()).map((s15) => [sid(s15.ID), s15]));
     } catch {
     }
-    const t = Date.now();
+    const t2 = Date.now();
     for (const k of series.keys()) if (!next[k]) series.delete(k);
     for (const [k, s15] of Object.entries(next)) {
       const cpu = percent(s15.CPUPerc), mem = bytes(s15.MemUsage.split(" / ")[0]);
-      if (cpu !== null && mem !== null) series.set(k, pushSample(series.get(k) ?? [], { t, cpu, mem }));
+      if (cpu !== null && mem !== null) series.set(k, pushSample(series.get(k) ?? [], { t: t2, cpu, mem }));
     }
     stats = next;
     if (selectingRows()) dirty = true;
@@ -11164,7 +11696,7 @@ ${h2.join(`
   var CPU_FMT = (n) => `${n.toFixed(2)}%`;
   function spark(h2, k, w = 48, ht = 14) {
     if (h2.length < 2) return "";
-    const vs2 = h2.map((s15) => s15[k]), label = esc(trend(k === "cpu" ? "CPU" : "Memória", vs2, h2.at(-1).t - h2[0].t, k === "cpu" ? CPU_FMT : fmtBytes));
+    const vs2 = h2.map((s15) => s15[k]), label = esc(trend(k === "cpu" ? "CPU" : t`Memória`, vs2, h2.at(-1).t - h2[0].t, k === "cpu" ? CPU_FMT : fmtBytes));
     return `<span role="img" data-spark="${k}" aria-label="${label}" title="${label}" class="inline-block align-middle -mt-0.5 mr-0.5"><svg aria-hidden="true"
     viewBox="0 0 ${w} ${ht}" width="${w}" height="${ht}" fill="none" stroke-linecap="round" stroke-linejoin="round">
     <polyline points="${sparkPoints(vs2, w, ht, HISTORY, k === "cpu" ? 10 : 0)}" stroke-width="1.5" class="stroke-accent"/></svg></span>`;
@@ -11172,8 +11704,8 @@ ${h2.join(`
   var WHERE = document.documentElement.dataset;
   var REMOTE = "remote" in WHERE;
   var CTX = WHERE.where?.split(" · ")[1] ?? "";
-  $2("#where").innerHTML = WHERE.where ? `${esc(WHERE.where)}${REMOTE ? `<span class="sr-only">, daemon remoto em ${esc(WHERE.host)}</span>` : ""}` : "";
-  $2("#where").title = WHERE.host ? `Daemon em ${WHERE.host}` : "";
+  $2("#where").innerHTML = WHERE.where ? `${esc(WHERE.where)}${REMOTE ? `<span class="sr-only">${t`, daemon remoto em ${esc(WHERE.host)}`}</span>` : ""}` : "";
+  $2("#where").title = WHERE.host ? t`Daemon em ${WHERE.host}` : "";
   if (REMOTE) {
     $2("#where").classList.replace("text-muted", "text-warn-fg");
     $2("#where").classList.replace("ring-line-strong", "ring-warn/60");
@@ -11188,23 +11720,23 @@ ${h2.join(`
   })();
   if (REMOTE) {
     $2("#remote").hidden = false;
-    $2("#remote").innerHTML = `Daemon remoto <strong class="font-semibold">${esc(CTX)}</strong> <span class="font-mono text-xs">(${esc(WHERE.host)})</span>: tudo o que você fizer aqui vale lá.`;
-    $2("#run-ports-hint").innerHTML = `portaDoHost:portaDoContainer, separadas por vírgula ou espaço. Ficam em <code class="font-mono">127.0.0.1</code> do daemon remoto ${esc(CTX)}: só aquela máquina acessa, não esta.`;
+    $2("#remote").innerHTML = t`Daemon remoto ${`<strong class="font-semibold">${esc(CTX)}</strong>`} ${`<span class="font-mono text-xs">(${esc(WHERE.host)})</span>`}: tudo o que você fizer aqui vale lá.`;
+    $2("#run-ports-hint").innerHTML = t`portaDoHost:portaDoContainer, separadas por vírgula ou espaço. Ficam em ${code("127.0.0.1")} do daemon remoto ${esc(CTX)}: só aquela máquina acessa, não esta.`;
   }
   function renderCount() {
     const n = (k) => data.filter((c) => bucket(c) === k).length, running = data.filter((c) => c.State === "running").length;
     const problemTxt = problemKind ? PROBLEM_TXT[problemKind] : "";
     setIcon(problem ? "!" : n("problema") > 9 ? "9+" : String(n("problema") || ""));
-    document.title = !lastOk && !problem ? TITLE : !problem ? `${TITLE} · ${running} rodando${n("problema") ? ` · ${n("problema")} com problema` : ""}` : `${TITLE} · ${problemTxt}`;
+    document.title = !lastOk && !problem ? TITLE : !problem ? `${TITLE} · ${t`${running} rodando`}${n("problema") ? ` · ${t`${n("problema")} com problema`}` : ""}` : `${TITLE} · ${problemTxt}`;
     if (problem) {
-      const t = lastOk?.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
-      $2("#count").textContent = lastOk ? `Desatualizado · dados de ${t}` : problemTxt[0].toUpperCase() + problemTxt.slice(1);
+      const at2 = lastOk?.toLocaleTimeString(LOCALE, { hour: "2-digit", minute: "2-digit" });
+      $2("#count").textContent = lastOk ? t`Desatualizado · dados de ${at2}` : problemTxt[0].toUpperCase() + problemTxt.slice(1);
       return;
     }
     const pill = "shrink-0 whitespace-nowrap rounded px-2 py-0.5 max-lg:py-3 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent";
     const segs = BUCKETS.filter(([k]) => n(k) || only === k).map(([k, one, many, color]) => `<button data-id="count-${k}" data-a="filter" aria-pressed="${only === k}" onclick="filterBy('${k}')"
       class="${pill} rounded-none font-mono text-data hover:bg-hover aria-pressed:bg-fg-strong aria-pressed:text-canvas ${color}"><span class="font-semibold tabular-nums">${n(k)}</span> ${n(k) === 1 ? one : many}</button>`).join("");
-    $2("#count").innerHTML = (segs ? `<span class="flex max-lg:max-w-full max-lg:overflow-x-auto [scrollbar-width:none] rounded ring-1 ring-line divide-x divide-line">${segs}</span>` : "<span>0 containers</span>") + (only || $2("#q").value.trim() ? `<button data-id="count-clear" data-a="filter" onclick="clearFilters()" class="${pill} text-accent-fg underline underline-offset-4 hover:text-accent-soft">Limpar filtros</button>` : "");
+    $2("#count").innerHTML = (segs ? `<span class="flex max-lg:max-w-full max-lg:overflow-x-auto [scrollbar-width:none] rounded ring-1 ring-line divide-x divide-line">${segs}</span>` : `<span>${t`0 containers`}</span>`) + (only || $2("#q").value.trim() ? `<button data-id="count-clear" data-a="filter" onclick="clearFilters()" class="${pill} text-accent-fg underline underline-offset-4 hover:text-accent-soft">${t`Limpar filtros`}</button>` : "");
   }
   function filterBy(k) {
     only = only === k ? "" : k;
@@ -11234,14 +11766,14 @@ ${h2.join(`
     only = BUCKETS.find(([k]) => k === h2.get("estado"))?.[0] || "";
     $2("#q").value = h2.get("q") || "";
   }
-  function pickTab(t, focus2 = false) {
-    if (t !== tab) {
+  function pickTab(t2, focus2 = false) {
+    if (t2 !== tab) {
       disarm(false);
-      tab = t;
+      tab = t2;
       history.pushState(null, "", hashUrl());
       showTab();
     }
-    if (focus2) $2("#tab-" + t).focus();
+    if (focus2) $2("#tab-" + t2).focus();
   }
   function showTab() {
     for (const b2 of document.querySelectorAll('[role="tab"]')) {
@@ -11262,7 +11794,7 @@ ${h2.join(`
   }
   function copyAddr(h2) {
     const a = `${PORT_HOST}:${h2}`;
-    navigator.clipboard.writeText(a).then(() => toast(`Copiado: ${a}`, true), () => toast("Não consegui copiar."));
+    navigator.clipboard.writeText(a).then(() => toast(t`Copiado: ${a}`, true), () => toast(t`Não consegui copiar.`));
   }
   var reachable = (c, h2) => !REMOTE || c.Ports.split(", ").some((b2) => {
     const m = b2.match(/^(.*):(\d+)(?:-(\d+))?->/);
@@ -11271,12 +11803,12 @@ ${h2.join(`
   function portChip(c, [h2, p, proto]) {
     const label = `${h2}<span class="font-sans">→</span>${p}${proto === "tcp" ? "" : "/" + proto}`, svg = 'aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" class="inline size-3 ml-1 -mt-0.5"';
     const base = "whitespace-nowrap font-mono text-xs px-1 py-0.5 max-lg:px-2 max-lg:py-3.5 rounded underline-offset-4 focus-visible:outline-2 focus-visible:outline-accent";
-    if (!reachable(c, h2)) return `<span title="Só no loopback do daemon remoto ${esc(CTX)}: não abre daqui"
+    if (!reachable(c, h2)) return `<span title="${t`Só no loopback do daemon remoto ${esc(CTX)}: não abre daqui`}"
     class="${base} text-muted">${label}</span>`;
-    if (h2.includes("-")) return `<span title="Faixa de portas: ${h2} do host → ${p} do container"
+    if (h2.includes("-")) return `<span title="${t`Faixa de portas: ${h2} do host → ${p} do container`}"
     class="${base} text-muted">${label}</span>`;
-    return c.State === "running" && proto === "tcp" && !NOT_HTTP.has(+p) ? `<a href="http://${PORT_HOST}:${h2}" target="_blank" rel="noopener" aria-label="Abrir ${PORT_HOST}:${h2} em nova aba (porta ${p} do container)"
-        title="Abrir no navegador" class="${base} text-accent-fg hover:underline hover:bg-accent/10">${label}<svg ${svg}><path d="M6 3h7v7M13 3 4 12"/></svg></a>` : `<button onclick="copyAddr('${h2}')" aria-label="Copiar ${PORT_HOST}:${h2} (porta ${p}/${proto} do container)" title="Copiar ${PORT_HOST}:${h2}"
+    return c.State === "running" && proto === "tcp" && !NOT_HTTP.has(+p) ? `<a href="http://${PORT_HOST}:${h2}" target="_blank" rel="noopener" aria-label="${t`Abrir ${PORT_HOST}:${h2} em nova aba (porta ${p} do container)`}"
+        title="${t`Abrir no navegador`}" class="${base} text-accent-fg hover:underline hover:bg-accent/10">${label}<svg ${svg}><path d="M6 3h7v7M13 3 4 12"/></svg></a>` : `<button onclick="copyAddr('${h2}')" aria-label="${t`Copiar ${PORT_HOST}:${h2} (porta ${p}/${proto} do container)`}" title="${t`Copiar ${PORT_HOST}:${h2}`}"
         class="${base} text-fg-soft hover:text-fg-strong hover:underline hover:bg-hover">${label}<svg ${svg}><rect x="5.5" y="5.5" width="7.5" height="7.5" rx="1.5"/><path d="M3 10.5V4a1 1 0 0 1 1-1h6.5"/></svg></button>`;
   }
   function errHtml(c) {
@@ -11286,7 +11818,7 @@ ${h2.join(`
       errors.delete(c.ID);
       return "";
     }
-    return `<details data-keep="err" class="mt-1 text-xs text-bad-fg"><summary class="cursor-pointer w-fit py-1 max-lg:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent">Falhou ao ${e.what.toLowerCase()} · ver erro</summary>
+    return `<details data-keep="err" class="mt-1 text-xs text-bad-fg"><summary class="cursor-pointer w-fit py-1 max-lg:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent">${t`Falhou ao ${e.what.toLowerCase()} · ver erro`}</summary>
     <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-bad-soft">${esc(e.msg)}</pre></details>`;
   }
   var health = {};
@@ -11296,9 +11828,9 @@ ${h2.join(`
     let txt;
     try {
       const r = await api("/api/health/" + id), h2 = await r.json(), last = r.ok ? h2?.Log?.at(-1) : void 0;
-      txt = !r.ok ? `Não consegui ler o healthcheck: ${h2}` : last ? `código ${last.ExitCode} · ${last.Output.trim() || "(sem saída)"}` : "Nenhum probe rodou ainda.";
+      txt = !r.ok ? t`Não consegui ler o healthcheck: ${h2}` : last ? t`código ${last.ExitCode} · ${last.Output.trim() || t`(sem saída)`}` : t`Nenhum probe rodou ainda.`;
     } catch {
-      txt = "Não consegui ler o healthcheck.";
+      txt = t`Não consegui ler o healthcheck.`;
     }
     health[id + c.Status] = txt;
     render();
@@ -11343,56 +11875,56 @@ ${h2.join(`
   }
   var RESTART_ICON = '<svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="size-4"><path d="M13 8a5 5 0 1 1-1.6-3.7"/><path d="M13 2.5v3h-3"/></svg>';
   var X_ICON = '<svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="size-4"><path d="M4 4l8 8M12 4l-8 8"/></svg>';
-  var cancelBtn = (id, what) => `<button data-id="${id}" data-a="cancel" aria-label="Cancelar ${what}" title="Cancelar (Esc)"
+  var cancelBtn = (id, what) => `<button data-id="${id}" data-a="cancel" aria-label="${t`Cancelar ${what}`}" title="${t`Cancelar (Esc)`}"
   onclick="disarm()" class="grid place-items-center shrink-0 lg:w-9 max-lg:w-11 ${BTN} text-fg hover:bg-hover">${X_ICON}</button>`;
-  var armNote = (text, cls = "w-full [contain:inline-size] lg:text-right text-balance") => `<p aria-hidden="true" class="${cls} text-xs text-bad-soft">${REMOTE ? `<span class="font-semibold text-warn-fg">${esc(CTX)}</span> · ` : ""}${text} ${TOUCH ? "Cancela sozinho em 8 s." : "Esc cancela."}</p>`;
+  var armNote = (text, cls = "w-full [contain:inline-size] lg:text-right text-balance") => `<p aria-hidden="true" class="${cls} text-xs text-bad-soft">${REMOTE ? `<span class="font-semibold text-warn-fg">${esc(CTX)}</span> · ` : ""}${text} ${TOUCH ? t`Cancela sozinho em 8 s.` : t`Esc cancela.`}</p>`;
   function rowHtml(c, withProject) {
-    const b2 = busy.get(c.ID), t = TONE[b2 ? "busy" : tone(c)], st2 = status(c), pp = ports(c.Ports), p = project(c), bt2 = b2 && busyText(c, b2);
+    const b2 = busy.get(c.ID), tn2 = TONE[b2 ? "busy" : tone(c)], st2 = status(c), pp = ports(c.Ports), p = project(c), bt2 = b2 && busyText(c, b2);
     const armed = arming?.id === c.ID, prim = PRIMARY[c.State], sec = SECONDARY[c.State];
     const u = c.State === "running" && !b2 && stats[sid(c.ID)] ? usage(stats[sid(c.ID)]) : null, h2 = series.get(sid(c.ID)) ?? [];
     const slot = (w = "lg:w-20") => `<span aria-hidden="true" class="${w} shrink-0 max-lg:hidden"></span>`;
     const btn = (a, cls = "text-fg hover:bg-hover", text = LABEL[a], aria = `${LABEL[a]} ${esc(c.Names)}`, base = BTN) => `<button data-id="${c.ID}" data-a="${a}" ${(b2 || armed && a !== "remove") && a !== "logs" ? 'aria-disabled="true"' : ""}
       aria-label="${aria}" aria-describedby="st-${c.ID}" onclick="act('${a}','${c.ID}')" class="lg:w-20 max-lg:min-w-24 shrink-0 ${base} ${cls}">${text}</button>`;
     const svc = p && workingDir(c) && service(c);
-    const restart = c.State === "running" ? `<button data-id="${c.ID}" data-a="restart" ${b2 ? 'aria-disabled="true"' : ""} aria-label="Reiniciar ${esc(c.Names)}"
-      aria-describedby="st-${c.ID}" title="Reiniciar (r)" onclick="act('restart','${c.ID}')"
+    const restart = c.State === "running" ? `<button data-id="${c.ID}" data-a="restart" ${b2 ? 'aria-disabled="true"' : ""} aria-label="${t`Reiniciar ${esc(c.Names)}`}"
+      aria-describedby="st-${c.ID}" title="${t`Reiniciar (r)`}" onclick="act('restart','${c.ID}')"
       class="grid place-items-center shrink-0 lg:w-9 max-lg:w-11 ${BTN} text-fg hover:bg-hover">${RESTART_ICON}</button>` : slot("lg:w-9");
     const more = [
       sec && sec !== "restart" && [sec, LABEL[sec]],
-      svc && ["srestart", `Reiniciar serviço ${esc(svc)}`],
-      svc && ["sbuild", `Reconstruir serviço ${esc(svc)}`],
-      c.State === "running" && ["pause", "Pausar"],
-      c.State === "running" && ["shell", "Abrir terminal"],
-      c.State === "running" && ["exec", "Copiar docker exec"],
-      removable(c) ? ["remove", "Remover…"] : ["noremove", "Pare antes de remover"]
+      svc && ["srestart", t`Reiniciar serviço ${esc(svc)}`],
+      svc && ["sbuild", t`Reconstruir serviço ${esc(svc)}`],
+      c.State === "running" && ["pause", t`Pausar`],
+      c.State === "running" && ["shell", t`Abrir terminal`],
+      c.State === "running" && ["exec", t`Copiar docker exec`],
+      removable(c) ? ["remove", t`Remover…`] : ["noremove", t`Pare antes de remover`]
     ].filter((x) => !!x);
     const menu = !more.length ? slot("lg:w-9") : menuBox(
       c.ID,
-      `Mais ações para ${esc(c.Names)}`,
+      t`Mais ações para ${esc(c.Names)}`,
       !!b2,
-      more.map(([a, text]) => a === "noremove" ? `<button data-id="${c.ID}" data-a="m-noremove" aria-disabled="true" aria-label="Remover (indisponível: pare o container antes)" title="O docker só remove container parado (sem -f)"
+      more.map(([a, text]) => a === "noremove" ? `<button data-id="${c.ID}" data-a="m-noremove" aria-disabled="true" aria-label="${t`Remover (indisponível: pare o container antes)`}" title="${t`O docker só remove container parado (sem -f)`}"
       class="${MENU_ITEM} text-muted cursor-not-allowed hover:bg-transparent">${text}</button>` : `<button data-id="${c.ID}" data-a="m-${a}" ${b2 || (a === "srestart" || a === "sbuild") && composing.has(p) ? 'aria-disabled="true"' : ""} onclick="menuPick(this); ${a === "exec" ? `copyExec('${c.ID}')` : a === "shell" ? `openShell('${c.ID}')` : a === "srestart" || a === "sbuild" ? `serviceAct('${a.slice(1)}','${c.ID}')` : `act('${a}','${c.ID}')`}"
       class="${MENU_ITEM} ${a === "remove" ? "text-bad-fg" : "text-fg"}">${text}</button>`).join("")
     );
     const healthBox = hasHealth(c) && !b2 ? `<details data-keep="health" class="mt-1 text-xs" ontoggle="this.open && loadHealth('${c.ID}')">
-      <summary class="cursor-pointer w-fit py-1 max-lg:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent text-muted hover:text-fg">Ver último healthcheck</summary>
-      <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-fg-soft">${esc(health[c.ID + c.Status] || "Carregando…")}</pre></details>` : "";
+      <summary class="cursor-pointer w-fit py-1 max-lg:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent text-muted hover:text-fg">${t`Ver último healthcheck`}</summary>
+      <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-fg-soft">${esc(health[c.ID + c.Status] || t`Carregando…`)}</pre></details>` : "";
     const on2 = sel.has(c.ID);
     return `<tr data-row data-key="c:${c.ID}" role="row" class="border-t border-line/70 ${on2 ? "bg-accent/10" : "hover:bg-raised/70"} transition motion-reduce:transition-none max-lg:block max-lg:px-4 max-lg:py-4 max-lg:space-y-1.5">
     <th role="rowheader" scope="row" class="py-3 pl-4 pr-6 max-lg:block max-lg:p-0 text-left font-normal"><div class="flex items-center gap-3">
-      <input type="checkbox" data-id="${c.ID}" data-a="sel" ${on2 ? "checked" : ""} aria-label="Selecionar ${esc(c.Names)}" onchange="toggleSel('${c.ID}')" class="${CHECK}">
-      <span aria-hidden="true" class="size-2 shrink-0 rounded-full ${t[0]}"></span>
+      <input type="checkbox" data-id="${c.ID}" data-a="sel" ${on2 ? "checked" : ""} aria-label="${t`Selecionar ${esc(c.Names)}`}" onchange="toggleSel('${c.ID}')" class="${CHECK}">
+      <span aria-hidden="true" class="size-2 shrink-0 rounded-full ${tn2[0]}"></span>
       <div class="min-w-0"><div class="font-mono text-data font-semibold text-fg-strong lg:truncate lg:max-w-[28ch]" title="${esc(c.Names)} · ${c.ID.slice(0, 12)}">${esc(c.Names)}</div>${withProject && p ? `<div class="font-mono text-xs text-muted">${esc(p)}</div>` : ""}</div></div></th>
     <td role="cell" class="font-mono text-xs text-muted pr-4 max-lg:block max-lg:p-0 max-lg:pl-14 [overflow-wrap:anywhere]">
-      <span class="sr-only lg:hidden">Imagem: </span><div class="lg:truncate lg:max-w-[24ch] lg:[direction:rtl] lg:text-left" title="${esc(c.Image)}"><bdi dir="ltr">${esc(shortImage(c.Image))}</bdi></div></td>
+      <span class="sr-only lg:hidden">${t`Imagem:`} </span><div class="lg:truncate lg:max-w-[24ch] lg:[direction:rtl] lg:text-left" title="${esc(c.Image)}"><bdi dir="ltr">${esc(shortImage(c.Image))}</bdi></div></td>
     <td role="cell" class="font-mono text-data pr-4 lg:min-w-[24ch] max-lg:block max-lg:p-0 max-lg:pl-14" title="${esc(c.Status)}">
-      <span id="st-${c.ID}" class="${t[1]}">${bt2 || esc(st2[0])}${st2[1] && !b2 ? `<span class="block text-xs text-muted">${st2[1]}</span>` : ""}</span>${// [contain:inline-size]: a linha do log ocupa a largura que a coluna já tem, sem alargá-la (a tabela estourava)
-    fell(c) && !b2 && tails[tailKey(c)] ? `<span class="block [contain:inline-size] mt-1 font-mono text-xs text-fg-soft lg:truncate [overflow-wrap:anywhere]" title="${esc(tails[tailKey(c)])}"><span aria-hidden="true" class="text-dim">› </span><span class="sr-only">Última linha do log: </span>${esc(tails[tailKey(c)])}</span>` : ""}${u ? `<span id="us-${c.ID}" class="block text-xs font-mono text-muted" title="${esc(u[2])}"><span class="whitespace-nowrap">${esc(u[0])} ${spark(h2, "cpu")}</span> <span class="whitespace-nowrap max-xl:block"><span class="max-xl:hidden">· </span>${esc(u[1])} ${spark(h2, "mem")}</span></span>` : ""}${b2 ? "" : errHtml(c) + healthBox}</td>
+      <span id="st-${c.ID}" class="${tn2[1]}">${bt2 || esc(st2[0])}${st2[1] && !b2 ? `<span class="block text-xs text-muted">${st2[1]}</span>` : ""}</span>${// [contain:inline-size]: a linha do log ocupa a largura que a coluna já tem, sem alargá-la (a tabela estourava)
+    fell(c) && !b2 && tails[tailKey(c)] ? `<span class="block [contain:inline-size] mt-1 font-mono text-xs text-fg-soft lg:truncate [overflow-wrap:anywhere]" title="${esc(tails[tailKey(c)])}"><span aria-hidden="true" class="text-dim">› </span><span class="sr-only">${t`Última linha do log:`} </span>${esc(tails[tailKey(c)])}</span>` : ""}${u ? `<span id="us-${c.ID}" class="block text-xs font-mono text-muted" title="${esc(u[2])}"><span class="whitespace-nowrap">${esc(u[0])} ${spark(h2, "cpu")}</span> <span class="whitespace-nowrap max-xl:block"><span class="max-xl:hidden">· </span>${esc(u[1])} ${spark(h2, "mem")}</span></span>` : ""}${b2 ? "" : errHtml(c) + healthBox}</td>
     <td role="cell" class="pr-4 max-lg:hidden max-lg:has-[div]:block max-lg:p-0 max-lg:pl-14">${pp.length ? `<div class="flex flex-wrap gap-1 max-lg:gap-x-2 max-lg:-ml-2 max-lg:-my-3">${pp.map((x) => portChip(c, x)).join("")}</div>` : ""}</td>
     <td role="cell" class="pr-4 max-lg:block max-lg:p-0 max-lg:pt-2"><div class="flex justify-end max-lg:justify-start items-center gap-1.5 max-lg:gap-2">
       ${prim ? btn(prim, prim === "start" ? "text-ok-fg hover:bg-ok/10" : void 0) : slot()}${restart}${btn("logs", "text-fg-soft hover:text-fg-strong hover:bg-hover", void 0, void 0, ghost())}
-      ${armed ? menuBox(c.ID, `Mais ações para ${esc(c.Names)}`, true, "") : menu}
-    </div>${armed ? `<div class="mt-1.5 flex flex-wrap items-center justify-end max-lg:justify-start gap-x-1.5 gap-y-1 [contain:inline-size]">${armNote(`Remover ${esc(c.Names)} de vez? Os volumes ficam.`, "basis-full lg:text-right text-balance")}${btn("remove", "bg-danger text-white ring-danger hover:bg-danger-hover", "Remover", `Confirmar remoção de ${esc(c.Names)}`)}${cancelBtn(c.ID, `remoção de ${esc(c.Names)}`)}</div>` : ""}</td></tr>`;
+      ${armed ? menuBox(c.ID, t`Mais ações para ${esc(c.Names)}`, true, "") : menu}
+    </div>${armed ? `<div class="mt-1.5 flex flex-wrap items-center justify-end max-lg:justify-start gap-x-1.5 gap-y-1 [contain:inline-size]">${armNote(t`Remover ${esc(c.Names)} de vez? Os volumes ficam.`, "basis-full lg:text-right text-balance")}${btn("remove", "bg-danger text-white ring-danger hover:bg-danger-hover", t`Remover`, t`Confirmar remoção de ${esc(c.Names)}`)}${cancelBtn(c.ID, t`remoção de ${esc(c.Names)}`)}</div>` : ""}</td></tr>`;
   }
   var MENU_ITEM = "block w-full text-left px-3 py-2 max-lg:py-3 rounded text-sm hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent";
   var menuBox = (id, label, off, items) => `<details data-keep="menu" class="shrink-0" ontoggle="placeMenu(this)">
@@ -11423,7 +11955,7 @@ ${h2.join(`
   }
   document.addEventListener("click", (e) => closeMenus(e.target instanceof Element ? e.target.closest('details[data-keep="menu"]') : null));
   var bandHead = (text, cls) => `<tr data-key="h:attn" role="row" class="max-lg:block"><th role="columnheader" colspan="5" scope="colgroup"
-  class="max-lg:block px-4 pt-4 pb-2 text-left font-mono text-xs font-semibold uppercase border-t border-line ${cls}">${text}<span class="ml-3 font-sans font-normal normal-case text-bad-soft/80">healthcheck falhando, loop de reinício ou saída com erro</span></th></tr>`;
+  class="max-lg:block px-4 pt-4 pb-2 text-left font-mono text-xs font-semibold uppercase border-t border-line ${cls}">${text}<span class="ml-3 font-sans font-normal normal-case text-bad-soft/80">${t`healthcheck falhando, loop de reinício ou saída com erro`}</span></th></tr>`;
   function groupHead(k, label) {
     const all = data.filter((c) => project(c) === k), on2 = all.filter((c) => c.State === "running").length;
     const anyBusy = composing.has(k) || all.some((c) => busy.has(c.ID)), dir = k && workingDir(all[0]), armed = arming?.id === `stack-${k}`;
@@ -11431,10 +11963,10 @@ ${h2.join(`
     const prim = stackList("start", k).length ? "start" : "stop";
     const sbtn = (a, text, cls) => {
       const list = stackList(a, k), n = list.length, one = n === 1 ? `${LABEL[a]} ${esc(list[0].Names)}` : "", label2 = one || `${text} (${n})`;
-      return k && n ? `<button data-id="stack-${ek}" data-a="${a === prim ? a : `m-${a}`}" data-p="${ek}" ${off} aria-label="${one ? `${one} do projeto ${ek}` : `${text} do projeto ${ek} (${n})`}"
+      return k && n ? `<button data-id="stack-${ek}" data-a="${a === prim ? a : `m-${a}`}" data-p="${ek}" ${off} aria-label="${one ? t`${one} do projeto ${ek}` : t`${text} do projeto ${ek} (${n})`}"
       title="${esc(list.map((c) => c.Names).join(", "))}" onclick="${a === prim ? "" : "menuPick(this); "}stackAct('${a}', this.dataset.p)" class="${cls}">${label2}</button>` : "";
     };
-    const cbtn = (a, text, cls = MENU_ITEM + " text-fg") => `<button data-id="stack-${ek}" data-a="m-${a}" data-p="${ek}" ${off} aria-label="${text.replace("…", "")} do projeto ${ek}"
+    const cbtn = (a, text, cls = MENU_ITEM + " text-fg") => `<button data-id="stack-${ek}" data-a="m-${a}" data-p="${ek}" ${off} aria-label="${t`${text.replace("…", "")} do projeto ${ek}`}"
       onclick="menuPick(this); composeAct('${a}', this.dataset.p)" class="${cls}">${composing.get(k) === a ? COMPOSE_VERB[a] : text}</button>`;
     const groups = [
       STACK.filter(([a]) => a !== prim).map(([a, text]) => sbtn(a, text, MENU_ITEM + " text-fg")).join(""),
@@ -11446,15 +11978,15 @@ ${h2.join(`
     return `<tr data-key="g:${ek}" role="row" class="max-lg:block"><th role="columnheader" colspan="5" scope="colgroup" class="max-lg:block px-4 pt-3 pb-2.5 text-left font-normal border-t border-line-strong bg-raised">
     <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
       <span class="font-mono text-data font-semibold ${k ? "text-fg-strong" : "text-muted"}">${label}</span>${strip}
-      ${k ? `<span class="font-mono text-xs ${verb ? "text-fg-strong" : "text-muted"}">compose · ${verb ? COMPOSE_VERB[verb] : `${on2} de ${all.length} rodando`}</span>` : ""}
-      ${k && inBand ? `<span class="text-xs text-bad-fg">${inBand} na faixa de atenção, acima</span>` : ""}
+      ${k ? `<span class="font-mono text-xs ${verb ? "text-fg-strong" : "text-muted"}">compose · ${verb ? COMPOSE_VERB[verb] : t`${on2} de ${all.length} rodando`}</span>` : ""}
+      ${k && inBand ? `<span class="text-xs text-bad-fg">${t`${inBand} na faixa de atenção, acima`}</span>` : ""}
       <span class="lg:ml-auto max-lg:w-full flex flex-wrap items-center gap-1.5 max-lg:gap-2">${sbtn(
       prim,
-      prim === "start" ? "Iniciar tudo" : "Parar tudo",
+      prim === "start" ? t`Iniciar tudo` : t`Parar tudo`,
       `${BTN} ${prim === "start" ? "text-ok-fg hover:bg-ok/10" : "text-fg hover:bg-hover"}`
-    )}${dir ? `<button data-id="stack-${ek}" data-a="plogs" data-p="${ek}" aria-label="Logs do projeto ${ek}" onclick="projectLogs(this.dataset.p)"
-            class="lg:w-20 ${ghost()} text-fg-soft hover:text-fg-strong hover:bg-hover">Logs</button>` : ""}${armed ? `<button data-id="stack-${ek}" data-a="down" data-p="${ek}" aria-label="Confirmar compose down do projeto ${ek}" onclick="composeAct('down', this.dataset.p)"
-            class="${BTN} bg-danger text-white ring-danger hover:bg-danger-hover">Derrubar ${ek}</button>${cancelBtn(`stack-${ek}`, `compose down do projeto ${ek}`)}` : groups.length ? menuBox(`stack-${ek}`, `Mais ações do projeto ${ek}`, anyBusy, groups.join('<hr class="my-1 border-line">')) : ""}</span>
+    )}${dir ? `<button data-id="stack-${ek}" data-a="plogs" data-p="${ek}" aria-label="${t`Logs do projeto ${ek}`}" onclick="projectLogs(this.dataset.p)"
+            class="lg:w-20 ${ghost()} text-fg-soft hover:text-fg-strong hover:bg-hover">${t`Logs`}</button>` : ""}${armed ? `<button data-id="stack-${ek}" data-a="down" data-p="${ek}" aria-label="${t`Confirmar compose down do projeto ${ek}`}" onclick="composeAct('down', this.dataset.p)"
+            class="${BTN} bg-danger text-white ring-danger hover:bg-danger-hover">${t`Derrubar ${ek}`}</button>${cancelBtn(`stack-${ek}`, t`compose down do projeto ${ek}`)}` : groups.length ? menuBox(`stack-${ek}`, t`Mais ações do projeto ${ek}`, anyBusy, groups.join('<hr class="my-1 border-line">')) : ""}</span>
       
     </div></th></tr>`;
   }
@@ -11470,15 +12002,15 @@ ${h2.join(`
     const label = only ? BUCKETS.find(([k]) => k === only)[1] + " " : "";
     const f = document.activeElement?.dataset;
     patchRows(rows.length ? [
-      ...attn.length ? [bandHead(`Precisa de atenção · ${attn.length}`, "text-bad-fg bg-bad/10"), ...attn.map((c) => row(c, true))] : [],
+      ...attn.length ? [bandHead(t`Precisa de atenção · ${attn.length}`, "text-bad-fg bg-bad/10"), ...attn.map((c) => row(c, true))] : [],
       ...keys.flatMap((k) => [
-        ...heads ? [groupHead(k, k ? esc(k) : keys.length > 1 ? "Sem projeto compose" : "Demais containers")] : [],
+        ...heads ? [groupHead(k, k ? esc(k) : keys.length > 1 ? t`Sem projeto compose` : t`Demais containers`)] : [],
         ...groups.get(k).map((c) => row(c))
       ])
-    ] : [`<tr data-key="empty" role="row" class="max-lg:block"><td role="cell" colspan="5" class="max-lg:block py-16 px-4 text-center text-muted">${!lastOk ? problem ? "Sem dados ainda." : "Carregando…" : !data.length ? 'Nenhum container ainda. Crie um em “Novo container” ou com <code class="font-mono">docker run</code>.' : `Nenhum container ${label}${q2 ? `corresponde a “${esc(q2)}”` : "agora"}.`}</td></tr>`]);
+    ] : [`<tr data-key="empty" role="row" class="max-lg:block"><td role="cell" colspan="5" class="max-lg:block py-16 px-4 text-center text-muted">${!lastOk ? problem ? t`Sem dados ainda.` : t`Carregando…` : !data.length ? t`Nenhum container ainda. Crie um em “Novo container” ou com ${code("docker run")}.` : q2 ? t`Nenhum container ${label}corresponde a “${esc(q2)}”.` : t`Nenhum container ${label}agora.`}</td></tr>`]);
     dirty = false;
     const dk = arming?.a === "down" ? arming.name : "";
-    const dock = dk ? armNote(`Derrubar ${esc(dk)}? ${esc(downNote(dk))}`, "max-w-[80ch]") : "";
+    const dock = dk ? armNote(t`Derrubar ${esc(dk)}? ${esc(downNote(dk))}`, "max-w-[80ch]") : "";
     if ($2("#armdock").innerHTML !== dock) $2("#armdock").innerHTML = dock;
     $2("#armdock").classList.toggle("hidden", !dock);
     renderCount();
@@ -11488,7 +12020,7 @@ ${h2.join(`
     renderObjects();
     if (f?.id) refocus(f.id, f.a);
     saveHash();
-    const say = arming ? `${REMOTE ? `No daemon remoto ${CTX}: ` : ""}${arming.a === "down" ? `Clique em Derrubar ${arming.name} para derrubar o projeto.` : arming.a === "prune" ? `Clique em Limpar para apagar ${arming.name}.` : `Clique em Remover para apagar ${arming.name} de vez.`} ${arming.note} ${TOUCH ? "Cancela sozinho em 8 segundos." : "Esc cancela."}` : q2 || only ? `${rows.length} de ${data.length} containers` : "";
+    const say = arming ? `${REMOTE ? t`No daemon remoto ${CTX}: ` : ""}${arming.a === "down" ? t`Clique em Derrubar ${arming.name} para derrubar o projeto.` : arming.a === "prune" ? t`Clique em Limpar para apagar ${arming.name}.` : t`Clique em Remover para apagar ${arming.name} de vez.`} ${arming.note} ${TOUCH ? t`Cancela sozinho em 8 segundos.` : t`Esc cancela.`}` : q2 || only ? t`${rows.length} de ${data.length} containers` : "";
     if (say !== lastSay) $2("#shown").textContent = lastSay = say;
   }
   function refocus(id, a) {
@@ -11540,10 +12072,10 @@ ${h2.join(`
     try {
       const r = await api(`/api/${a}/${c.ID}`, { method: "POST" });
       const msg = await r.json();
-      if (!r.ok) errors.set(c.ID, { msg: msg || "erro sem mensagem", state: c.State, what: LABEL[a] });
+      if (!r.ok) errors.set(c.ID, { msg: msg || t`erro sem mensagem`, state: c.State, what: LABEL[a] });
       return r.ok;
     } catch {
-      errors.set(c.ID, { msg: "Sem resposta do servidor do Docker GUI.", state: c.State, what: LABEL[a] });
+      errors.set(c.ID, { msg: t`Sem resposta do servidor do Docker GUI.`, state: c.State, what: LABEL[a] });
       return false;
     } finally {
       busy.delete(c.ID);
@@ -11555,24 +12087,24 @@ ${h2.join(`
     if (arming?.id === id && a !== "remove") return disarm();
     const c = data.find((c2) => c2.ID === id);
     if (!c || busy.has(id)) return;
-    if (a === "remove" && !confirmed(id, c.Names, "remove", "Os volumes não são afetados.")) return;
+    if (a === "remove" && !confirmed(id, c.Names, "remove", t`Os volumes não são afetados.`)) return;
     const trs = [...document.querySelectorAll("#rows tr[data-row]")], i = trs.findIndex((tr2) => tr2.dataset.key === "c:" + id);
     const near = (trs[i + 1] || trs[i - 1])?.dataset.key?.slice(2), since2 = (/* @__PURE__ */ new Date()).toISOString();
     const done = run(a, c);
     $2("#shown").textContent = `${VERB[a]} ${c.Names}`;
     if (!await done) {
-      toast(`Não deu para ${LABEL[a].toLowerCase()} ${c.Names}. O erro ficou na linha.`);
+      toast(t`Não deu para ${LABEL[a].toLowerCase()} ${c.Names}. O erro ficou na linha.`);
       return load();
     }
     if (!UP.includes(a)) {
-      toast(`${c.Names} ${DONE[a]}.`, true, a === "pause" ? ["Retomar", () => act("unpause", id)] : a === "stop" && c.State !== "paused" ? ["Iniciar de novo", () => act("start", id)] : null);
+      toast(`${c.Names} ${DONE[a]}.`, true, a === "pause" ? [t`Retomar`, () => act("unpause", id)] : a === "stop" && c.State !== "paused" ? [t`Iniciar de novo`, () => act("start", id)] : null);
       await load();
       if (a === "remove") (document.querySelector(`[data-id="${near}"][data-a="logs"]`) || $2("#q")).focus();
       return;
     }
-    toast(`${c.Names} ${DONE[a]}, conferindo se ficou de pé…`, true);
+    toast(t`${c.Names} ${DONE[a]}, conferindo se ficou de pé…`, true);
     if ($2("#dlg").open && logId === id) {
-      mark = { at: since2, label: `${DONE[a]} às ${(/* @__PURE__ */ new Date()).toLocaleTimeString("pt-BR")}` };
+      mark = { at: since2, label: t`${DONE[a]} às ${(/* @__PURE__ */ new Date()).toLocaleTimeString(LOCALE)}` };
       toggleFollow(true);
     }
     confirmUp([c.ID]);
@@ -11583,33 +12115,33 @@ ${h2.join(`
     await load();
     const cs2 = ids.map((id) => data.find((c) => c.ID === id)).filter((c) => !!c);
     const fell2 = cs2.filter((c) => c.State !== "running" || isProblem(c));
-    if (!fell2.length) return toast(cs2.length === 1 ? `${cs2[0].Names} está de pé.` : `Os ${cs2.length} containers estão de pé.`, true);
-    if (fell2.length === 1) toast(`${fell2[0].Names} subiu mas não ficou bem: ${status(fell2[0])[0]}.`, false, ["Ver logs", () => logs(fell2[0].ID)]);
-    else toast(`${fell2.length} containers subiram mas não ficaram bem. Veja a faixa de atenção.`);
+    if (!fell2.length) return toast(cs2.length === 1 ? t`${cs2[0].Names} está de pé.` : t`Os ${cs2.length} containers estão de pé.`, true);
+    if (fell2.length === 1) toast(t`${fell2[0].Names} subiu mas não ficou bem: ${status(fell2[0])[0]}.`, false, [t`Ver logs`, () => logs(fell2[0].ID)]);
+    else toast(t`${fell2.length} containers subiram mas não ficaram bem. Veja a faixa de atenção.`);
   }
-  var STACK = [["start", "Iniciar tudo"], ["restart", "Reiniciar tudo"], ["stop", "Parar tudo"]];
+  var STACK = [["start", t`Iniciar tudo`], ["restart", t`Reiniciar tudo`], ["stop", t`Parar tudo`]];
   var fits = (a, c) => a === "start" ? PRIMARY[c.State] === "start" : a === "restart" ? c.State === "running" : a === "remove" ? removable(c) : STOPPABLE.includes(c.State);
   var stackList = (a, p, ids) => data.filter((c) => project(c) === p && (ids ? ids.includes(c.ID) : fits(a, c)));
   function copyExec(id) {
     const cmd = `${document.documentElement.dataset.cli} exec -it ${data.find((c) => c.ID === id).Names} sh`;
-    navigator.clipboard.writeText(cmd).then(() => toast(`Copiado: ${cmd}`, true), () => toast(`Não consegui copiar. O comando é: ${cmd}`));
+    navigator.clipboard.writeText(cmd).then(() => toast(t`Copiado: ${cmd}`, true), () => toast(t`Não consegui copiar. O comando é: ${cmd}`));
   }
   async function stackAct(a, p, ids) {
     const list = stackList(a, p, ids);
     if (!list.length || composing.has(p) || list.some((c) => busy.has(c.ID))) return;
     const all = Promise.all(list.map((c) => run(a, c)));
-    $2("#shown").textContent = `${VERB[a]} ${list.length} containers de ${p}`;
+    $2("#shown").textContent = t`${VERB[a]} ${list.length} containers de ${p}`;
     const res = await all, fails = res.filter((ok) => !ok).length, okIds = list.filter((c, i) => res[i] && c.State !== "paused").map((c) => c.ID);
-    if (fails) toast(`${p}: ${fails} de ${list.length} ${fails === 1 ? "falhou" : "falharam"}. ${fails === 1 ? "O erro ficou na linha" : "Os erros ficaram nas linhas"}.`);
-    else if (a === "stop") toast(`${p}: ${list.length} parados.`, true, okIds.length ? ["Iniciar de novo", () => stackAct("start", p, okIds)] : null);
-    else toast(`${p}: ${list.length} ${a === "start" ? "iniciados" : "reiniciados"}, conferindo se ficaram de pé…`, true);
+    if (fails) toast(fails === 1 ? t`${p}: 1 de ${list.length} falhou. O erro ficou na linha.` : t`${p}: ${fails} de ${list.length} falharam. Os erros ficaram nas linhas.`);
+    else if (a === "stop") toast(t`${p}: ${list.length} parados.`, true, okIds.length ? [t`Iniciar de novo`, () => stackAct("start", p, okIds)] : null);
+    else toast(a === "start" ? t`${p}: ${list.length} iniciados, conferindo se ficaram de pé…` : t`${p}: ${list.length} reiniciados, conferindo se ficaram de pé…`, true);
     if (!fails && UP.includes(a)) return confirmUp(okIds);
     load();
   }
-  var BULK = [["start", "Iniciar"], ["stop", "Parar"], ["restart", "Reiniciar"], ["remove", "Remover…"]];
+  var BULK = [["start", t`Iniciar`], ["stop", t`Parar`], ["restart", t`Reiniciar`], ["remove", t`Remover…`]];
   var bulkList = (a, ids = [...sel]) => data.filter((c) => ids.includes(c.ID) && fits(a, c));
   var plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
-  var names = (cs2, max = 3) => cs2.length > max ? `${cs2.slice(0, max).map((c) => c.Names).join(", ")} e mais ${cs2.length - max}` : cs2.map((c) => c.Names).join(", ").replace(/, ([^,]*)$/, " e $1");
+  var names = (cs2, max = 3) => cs2.length > max ? t`${cs2.slice(0, max).map((c) => c.Names).join(", ")} e mais ${cs2.length - max}` : cs2.map((c) => c.Names).join(", ").replace(/, ([^,]*)$/, (_2, last) => t` e ${last}`);
   function changeSel(fn2) {
     fn2();
     if (arming?.id === "bulk") disarm(false);
@@ -11627,20 +12159,20 @@ ${h2.join(`
     all.indeterminate = mine > 0 && mine < visible.length;
     all.disabled = !visible.length;
     const n = sel.size, hidden = n - mine, armed = arming?.id === "bulk";
-    const say = n ? `${plural(n, "container selecionado", "containers selecionados")}${hidden ? `, ${hidden} fora do filtro` : ""}` : "Nenhum container selecionado";
+    const say = n ? `${plural(n, t`container selecionado`, t`containers selecionados`)}${hidden ? t`, ${hidden} fora do filtro` : ""}` : t`Nenhum container selecionado`;
     if (say !== lastSel) $2("#sel-live").textContent = lastSel = say;
     const btn = ([a, text]) => {
       const k = armed && a === "remove" ? armedIds.length : bulkList(a).length;
       if (!k || armed && a !== "remove") return "";
       const cls = armed && a === "remove" ? "bg-danger text-white ring-danger hover:bg-danger-hover" : a === "start" ? "text-ok-fg hover:bg-ok/10" : a === "remove" ? "text-bad-fg hover:bg-bad/10" : "text-fg hover:bg-hover";
-      const aria = armed && a === "remove" ? `Confirmar remoção de ${plural(k, "container", "containers")}` : `${text.replace("…", "")} ${plural(k, "selecionado", "selecionados")}`;
+      const aria = armed && a === "remove" ? t`Confirmar remoção de ${plural(k, "container", "containers")}` : `${text.replace("…", "")} ${plural(k, t`selecionado`, t`selecionados`)}`;
       return `<button data-id="bulk" data-a="${a}" ${bulkBusy ? 'aria-disabled="true"' : ""} aria-label="${aria}" title="${esc(bulkList(a, armed && a === "remove" ? armedIds : void 0).map((c) => c.Names).join(", "))}"
-      onclick="bulkAct('${a}')" class="${BTN} ${cls}">${bulkBusy === a ? `${VERB[a]} (${k})` : armed && a === "remove" ? `Remover ${plural(k, "container", "containers")}` : `${text} (${k})`}</button>`;
+      onclick="bulkAct('${a}')" class="${BTN} ${cls}">${bulkBusy === a ? `${VERB[a]} (${k})` : armed && a === "remove" ? t`Remover ${plural(k, "container", "containers")}` : `${text} (${k})`}</button>`;
     };
-    const html = !n ? "" : `<p class="mr-auto text-sm font-medium text-fg-strong">${plural(n, "selecionado", "selecionados")}${hidden ? `<span class="font-normal text-muted"> · ${hidden} fora do filtro</span>` : ""}</p>
-    <div class="flex flex-wrap gap-1.5">${BULK.map(btn).join("")}${armed ? cancelBtn("bulk", "remoção em lote") : ""}
-      ${armed ? "" : `<button data-id="bulk" data-a="clear" onclick="clearSel()" class="${BTN} text-muted hover:bg-hover">Limpar seleção</button>`}</div>
-    ${armed ? armNote(`Remover ${esc(names(data.filter((c) => armedIds.includes(c.ID)), 10))} de vez? Os volumes ficam.`) : ""}`;
+    const html = !n ? "" : `<p class="mr-auto text-sm font-medium text-fg-strong">${plural(n, t`selecionado`, t`selecionados`)}${hidden ? `<span class="font-normal text-muted"> · ${t`${hidden} fora do filtro`}</span>` : ""}</p>
+    <div class="flex flex-wrap gap-1.5">${BULK.map(btn).join("")}${armed ? cancelBtn("bulk", t`remoção em lote`) : ""}
+      ${armed ? "" : `<button data-id="bulk" data-a="clear" onclick="clearSel()" class="${BTN} text-muted hover:bg-hover">${t`Limpar seleção`}</button>`}</div>
+    ${armed ? armNote(t`Remover ${esc(names(data.filter((c) => armedIds.includes(c.ID)), 10))} de vez? Os volumes ficam.`) : ""}`;
     $2("#bulk").classList.toggle("hidden", !n);
     if (html !== bulkHtml) $2("#bulk").innerHTML = bulkHtml = html;
   }
@@ -11660,7 +12192,7 @@ ${h2.join(`
     if (a === "remove" && !ids) {
       if (arming?.id !== "bulk") armedIds = bulkList("remove").map((c) => c.ID);
       const k = armedIds.length, name = names(data.filter((c) => armedIds.includes(c.ID)));
-      if (!k || !confirmed("bulk", name, "remove", "Os volumes não são afetados.")) return;
+      if (!k || !confirmed("bulk", name, "remove", t`Os volumes não são afetados.`)) return;
       ids = armedIds;
     }
     const list = bulkList(a, ids).filter((c) => !busy.has(c.ID));
@@ -11675,11 +12207,11 @@ ${h2.join(`
     const fails = list.filter((_2, i) => !res[i]).map((c) => [c.Names, errors.get(c.ID)?.msg || ""]);
     const msg = bulkSummary(DONE[a], res.filter(Boolean).length, fails);
     if (!fails.length && UP.includes(a)) {
-      toast(`${msg.slice(0, -1)}, conferindo se ficaram de pé…`, true);
+      toast(t`${msg.slice(0, -1)}, conferindo se ficaram de pé…`, true);
       return confirmUp(okIds);
     }
     await load();
-    toast(msg, !fails.length, a === "stop" && okIds.length ? ["Iniciar de novo", () => bulkAct("start", okIds)] : null);
+    toast(msg, !fails.length, a === "stop" && okIds.length ? [t`Iniciar de novo`, () => bulkAct("start", okIds)] : null);
     if (a === "remove" && (!document.activeElement || document.activeElement === document.body)) $2("#q").focus();
   }
   function confirmed(id, name, a, note) {
@@ -11713,9 +12245,9 @@ ${h2.join(`
       });
       const msg = await r.json();
       ok = r.ok;
-      toast(r.ok ? `${p}: ${what} concluído${ids.length ? ", conferindo se ficou de pé…" : "."}` : `${p}: ${what} falhou. ${msg.trim().split("\n").at(-1) || "Erro sem mensagem."}`, r.ok);
+      toast(r.ok ? ids.length ? t`${p}: ${what} concluído, conferindo se ficou de pé…` : t`${p}: ${what} concluído.` : t`${p}: ${what} falhou. ${msg.trim().split("\n").at(-1) || t`Erro sem mensagem.`}`, r.ok);
     } catch {
-      toast(`${p}: sem resposta do servidor do Docker GUI.`);
+      toast(t`${p}: sem resposta do servidor do Docker GUI.`);
     }
     composing.delete(p);
     ids.forEach((id) => busy.delete(id));
@@ -11725,7 +12257,7 @@ ${h2.join(`
     if (ok && now.length) return confirmUp(now);
     if (a === "down") $2("#q").focus();
   }
-  var downNote = (p) => `Remove ${names(data.filter((c) => project(c) === p).sort((a, b2) => +isProblem(b2) - +isProblem(a)), 10)} e as redes do projeto. Os volumes ficam; para subir de novo, use compose up no terminal.`;
+  var downNote = (p) => t`Remove ${names(data.filter((c) => project(c) === p).sort((a, b2) => +isProblem(b2) - +isProblem(a)), 10)} e as redes do projeto. Os volumes ficam; para subir de novo, use compose up no terminal.`;
   function serviceAct(a, id) {
     const c = data.find((c2) => c2.ID === id);
     if (c) composeAct(a, project(c), service(c));
@@ -11737,7 +12269,7 @@ ${h2.join(`
     if (!TOUCH && els.some((el2) => el2.matches(":hover") || el2 === document.activeElement)) arming.timer = setTimeout(armTick, 1e3);
     else {
       disarm();
-      toast("Confirmação cancelada: passaram 8 s sem o segundo clique. Nada foi apagado.", true);
+      toast(t`Confirmação cancelada: passaram 8 s sem o segundo clique. Nada foi apagado.`, true);
     }
   }
   function disarm(redraw = true) {
@@ -11789,27 +12321,27 @@ ${h2.join(`
     if (!$2("#dlg").open) return;
     if (logProject) {
       const p = logProject.project, all = data.filter((c2) => project(c2) === p), on2 = all.filter((c2) => c2.State === "running").length;
-      $2("#dlg-status").innerHTML = `<span class="text-muted">${all.length ? `Projeto compose · ${on2} de ${all.length} rodando · todos os serviços` : "Este projeto não tem mais containers."}</span>`;
+      $2("#dlg-status").innerHTML = `<span class="text-muted">${all.length ? t`Projeto compose · ${on2} de ${all.length} rodando · todos os serviços` : t`Este projeto não tem mais containers.`}</span>`;
       $2("#dlg-acts").innerHTML = "";
       return;
     }
     const c = data.find((c2) => c2.ID === logId);
     if (!c) {
-      $2("#dlg-status").innerHTML = '<span class="text-muted">Este container não existe mais.</span>';
+      $2("#dlg-status").innerHTML = `<span class="text-muted">${t`Este container não existe mais.`}</span>`;
       $2("#dlg-acts").innerHTML = "";
       return;
     }
-    const b2 = busy.get(c.ID), t = TONE[b2 ? "busy" : tone(c)], st2 = status(c);
+    const b2 = busy.get(c.ID), tn2 = TONE[b2 ? "busy" : tone(c)], st2 = status(c);
     const h2 = hasHealth(c) && health[c.ID + c.Status];
     if (hasHealth(c) && !h2) loadHealth(c.ID);
     const s15 = c.State === "running" && !b2 ? stats[sid(c.ID)] : void 0, u = s15 && usage(s15), hs2 = series.get(sid(c.ID)) ?? [];
     const again2 = mark && c.State === "running" && !b2 ? `<span class="text-muted"> · ${esc(mark.label)}</span>` : "";
-    $2("#dlg-status").innerHTML = `<span class="${t[1]}">${b2 ? busyText(c, b2) : esc(st2[0])}</span>${st2[1] && !b2 ? `<span class="text-muted"> · ${st2[1]}</span>` : ""}${again2}${b2 ? "" : errHtml(c)}${h2 ? `<div class="mt-1 text-xs text-muted lg:truncate" title="${esc(h2)}"><span class="font-sans">Último healthcheck:</span> <span class="text-fg-soft">${esc(h2)}</span></div>` : ""}${s15 && u ? `<div id="dlg-usage" class="mt-1 text-xs text-muted"><span class="whitespace-nowrap"><span class="text-fg-soft">${esc(u[0])}</span> ${spark(hs2, "cpu", 96, 20)}</span> <span class="whitespace-nowrap">· <span class="text-fg-soft">${esc(u[1])}</span> ${spark(hs2, "mem", 96, 20)}</span>${io(s15).length ? `<span class="max-lg:hidden text-fg-soft" title="Totais desde que o container subiu">${io(s15).map((x) => ` <span class="whitespace-nowrap">· ${esc(x)}</span>`).join("")}</span>` : ""}</div>` : ""}`;
+    $2("#dlg-status").innerHTML = `<span class="${tn2[1]}">${b2 ? busyText(c, b2) : esc(st2[0])}</span>${st2[1] && !b2 ? `<span class="text-muted"> · ${st2[1]}</span>` : ""}${again2}${b2 ? "" : errHtml(c)}${h2 ? `<div class="mt-1 text-xs text-muted lg:truncate" title="${esc(h2)}"><span class="font-sans">${t`Último healthcheck:`}</span> <span class="text-fg-soft">${esc(h2)}</span></div>` : ""}${s15 && u ? `<div id="dlg-usage" class="mt-1 text-xs text-muted"><span class="whitespace-nowrap"><span class="text-fg-soft">${esc(u[0])}</span> ${spark(hs2, "cpu", 96, 20)}</span> <span class="whitespace-nowrap">· <span class="text-fg-soft">${esc(u[1])}</span> ${spark(hs2, "mem", 96, 20)}</span>${io(s15).length ? `<span class="max-lg:hidden text-fg-soft" title="${t`Totais desde que o container subiu`}">${io(s15).map((x) => ` <span class="whitespace-nowrap">· ${esc(x)}</span>`).join("")}</span>` : ""}</div>` : ""}`;
     const prim = PRIMARY[c.State], sec = SECONDARY[c.State];
-    const more = [sec && sec !== "restart" && [sec, LABEL[sec]], c.State === "running" && ["exec", "Copiar docker exec"]].filter((x) => !!x);
-    $2("#dlg-acts").innerHTML = (sec === "restart" ? `<button data-id="dlg" data-a="restart" ${b2 ? 'aria-disabled="true"' : ""} aria-label="Reiniciar ${esc(c.Names)}" title="Reiniciar (r)"
-      onclick="act('restart', '${c.ID}')" class="inline-flex items-center gap-1.5 ${BTN} text-fg hover:bg-hover">${RESTART_ICON}Reiniciar</button>` : "") + (prim ? `<button data-id="dlg" data-a="${prim}" ${b2 ? 'aria-disabled="true"' : ""} aria-label="${LABEL[prim]} ${esc(c.Names)}" onclick="act('${prim}', '${c.ID}')"
-      class="${BTN} ${prim === "start" ? "text-ok-fg hover:bg-ok/10" : "text-fg hover:bg-hover"}">${LABEL[prim]}</button>` : "") + (more.length ? menuBox("dlg", `Mais ações para ${esc(c.Names)} nos logs`, !!b2, more.map(([a, text]) => `<button data-id="dlg" data-a="m-${a}" ${b2 ? 'aria-disabled="true"' : ""} onclick="menuPick(this); ${a === "exec" ? `copyExec('${c.ID}')` : `act('${a}', '${c.ID}')`}"
+    const more = [sec && sec !== "restart" && [sec, LABEL[sec]], c.State === "running" && ["exec", t`Copiar docker exec`]].filter((x) => !!x);
+    $2("#dlg-acts").innerHTML = (sec === "restart" ? `<button data-id="dlg" data-a="restart" ${b2 ? 'aria-disabled="true"' : ""} aria-label="${t`Reiniciar ${esc(c.Names)}`}" title="${t`Reiniciar (r)`}"
+      onclick="act('restart', '${c.ID}')" class="inline-flex items-center gap-1.5 ${BTN} text-fg hover:bg-hover">${RESTART_ICON}${t`Reiniciar`}</button>` : "") + (prim ? `<button data-id="dlg" data-a="${prim}" ${b2 ? 'aria-disabled="true"' : ""} aria-label="${LABEL[prim]} ${esc(c.Names)}" onclick="act('${prim}', '${c.ID}')"
+      class="${BTN} ${prim === "start" ? "text-ok-fg hover:bg-ok/10" : "text-fg hover:bg-hover"}">${LABEL[prim]}</button>` : "") + (more.length ? menuBox("dlg", t`Mais ações para ${esc(c.Names)} nos logs`, !!b2, more.map(([a, text]) => `<button data-id="dlg" data-a="m-${a}" ${b2 ? 'aria-disabled="true"' : ""} onclick="menuPick(this); ${a === "exec" ? `copyExec('${c.ID}')` : `act('${a}', '${c.ID}')`}"
         class="${MENU_ITEM} text-fg">${text}</button>`).join("")) : "");
   }
   var TAILS = ["500", "2000", "10000", "all"];
@@ -11821,16 +12353,16 @@ ${h2.join(`
   var hitLines = 0;
   var complete = false;
   var streamOpen = false;
-  var fmt = (n) => n.toLocaleString("pt-BR");
+  var fmt = (n) => n.toLocaleString(LOCALE);
   var SINCE_TXT = {
-    start: "desde que o container subiu",
-    "5m": "dos últimos 5 min",
-    "15m": "dos últimos 15 min",
-    "1h": "da última hora",
-    "24h": "das últimas 24 h"
+    start: t`desde que o container subiu`,
+    "5m": t`dos últimos 5 min`,
+    "15m": t`dos últimos 15 min`,
+    "1h": t`da última hora`,
+    "24h": t`das últimas 24 h`
   };
   var since = "";
-  var hist = () => (TAILS[tailAt] === "all" ? "todas as linhas" : `últimas ${fmt(+TAILS[tailAt])} linhas${logProject ? " de cada container" : ""}`) + (since ? ` ${SINCE_TXT[since]}` : "");
+  var hist = () => (TAILS[tailAt] === "all" ? t`todas as linhas` : logProject ? t`últimas ${fmt(+TAILS[tailAt])} linhas de cada container` : t`últimas ${fmt(+TAILS[tailAt])} linhas`) + (since ? ` ${SINCE_TXT[since]}` : "");
   var filterRe = () => logFilter($2("#lf").value);
   var level = "";
   var svcPick = "";
@@ -11856,7 +12388,7 @@ ${h2.join(`
   function renderSvcs() {
     const sv = $2("#lsvc");
     sv.hidden = !logProject;
-    sv.replaceChildren(new Option("Todos os serviços", ""), ...[...svcSet].sort().map((v2) => new Option(v2, v2)));
+    sv.replaceChildren(new Option(t`Todos os serviços`, ""), ...[...svcSet].sort().map((v2) => new Option(v2, v2)));
     sv.value = svcPick;
   }
   function logPick() {
@@ -11910,10 +12442,10 @@ ${h2.join(`
       return p;
     };
     if (pre) part(pre, svcTone(pre));
-    const t = ts2 && new Date(ts2.trim().replace(/(\.\d{3})\d+/, "$1"));
-    if (t && !isNaN(+t)) {
+    const at2 = ts2 && new Date(ts2.trim().replace(/(\.\d{3})\d+/, "$1"));
+    if (at2 && !isNaN(+at2)) {
       const el2 = part(ts2.trimEnd(), "text-[0px] text-muted before:content-[attr(data-t)] before:text-xs");
-      el2.dataset.t = t.toLocaleTimeString("pt-BR");
+      el2.dataset.t = at2.toLocaleTimeString(LOCALE);
       el2.title = ts2.trim();
       part(ts2.slice(ts2.trimEnd().length), "");
     } else part(ts2, "text-muted");
@@ -11941,7 +12473,7 @@ ${h2.join(`
     return m;
   }
   function renderHits() {
-    const txt = filterRe() ? hits ? `${fmt(hits)} ${hits === 1 ? "ocorrência" : "ocorrências"} em ${fmt(hitLines)} ${hitLines === 1 ? "linha" : "linhas"}` : "Nenhuma ocorrência" : narrowed() ? hitLines ? `${fmt(hitLines)} ${hitLines === 1 ? "linha" : "linhas"}` : "Nenhuma linha" : "";
+    const txt = filterRe() ? hits ? t`${fmt(hits)} ${hits === 1 ? t`ocorrência` : t`ocorrências`} em ${fmt(hitLines)} ${hitLines === 1 ? t`linha` : t`linhas`}` : t`Nenhuma ocorrência` : narrowed() ? hitLines ? `${fmt(hitLines)} ${hitLines === 1 ? t`linha` : t`linhas`}` : t`Nenhuma linha` : "";
     if ($2("#lcount").textContent !== txt) $2("#lcount").textContent = txt;
   }
   function paint() {
@@ -11962,7 +12494,7 @@ ${h2.join(`
   }
   function renderMore() {
     const next = TAILS[tailAt + 1], b2 = $2("#more");
-    b2.textContent = !next || complete ? "Tudo carregado" : next === "all" ? "Carregar tudo" : `Carregar ${fmt(+next)} linhas`;
+    b2.textContent = !next || complete ? t`Tudo carregado` : next === "all" ? t`Carregar tudo` : t`Carregar ${fmt(+next)} linhas`;
     b2.toggleAttribute("data-done", !next || complete);
     b2.setAttribute("aria-disabled", String(!next || complete || !!stream && tailAt + 1 >= LIVE_TAILS));
   }
@@ -11980,13 +12512,13 @@ ${h2.join(`
       complete = r.ok && (tail === "all" || buf.length < +tail);
       if (buf.length) paint();
       else {
-        lb.textContent = r.ok ? since ? "Nada no log nesse período." : "(sem logs)" : `Não consegui ler os logs: ${j2}`;
+        lb.textContent = r.ok ? since ? t`Nada no log nesse período.` : t`(sem logs)` : t`Não consegui ler os logs: ${j2}`;
         renderHits();
       }
-      $2("#lmeta").textContent = `${hist().replace(/^./, (c) => c.toUpperCase())} · atualizado às ${(/* @__PURE__ */ new Date()).toLocaleTimeString("pt-BR")}`;
+      $2("#lmeta").textContent = t`${hist().replace(/^./, (c) => c.toUpperCase())} · atualizado às ${(/* @__PURE__ */ new Date()).toLocaleTimeString(LOCALE)}`;
     } catch {
       buf = [];
-      lb.textContent = "Não consegui carregar os logs. O servidor do Docker GUI está rodando?";
+      lb.textContent = t`Não consegui carregar os logs. O servidor do Docker GUI está rodando?`;
     }
     renderMore();
     if (more) lb.scrollTop = lb.scrollHeight - fromEnd;
@@ -12003,7 +12535,7 @@ ${h2.join(`
     $2("#lsince-start").hidden = $2("#lsince-start").disabled = !!logProject;
     svcSet.clear();
     renderSvcs();
-    $2("#lb").textContent = "Carregando…";
+    $2("#lb").textContent = t`Carregando…`;
     $2("#lmeta").textContent = hist().replace(/^./, (c) => c.toUpperCase());
     $2("#dlg-msg").innerHTML = "";
     $2("#insp").hidden = !!logProject;
@@ -12030,7 +12562,7 @@ ${h2.join(`
   }
   function loadMore() {
     if ($2("#more").getAttribute("aria-disabled") === "true") {
-      if (stream && TAILS[tailAt + 1]) toast(`Ao vivo, o histórico vai até ${fmt(+TAILS[LIVE_TAILS - 1])} linhas. Para carregar tudo, desligue o ao vivo.`);
+      if (stream && TAILS[tailAt + 1]) toast(t`Ao vivo, o histórico vai até ${fmt(+TAILS[LIVE_TAILS - 1])} linhas. Para carregar tudo, desligue o ao vivo.`);
       return;
     }
     tailAt++;
@@ -12075,17 +12607,17 @@ ${h2.join(`
         marked = false;
         $2("#lb").textContent = "";
         renderHits();
-        $2("#lmeta").textContent = `Ao vivo · ${hist()} e as novas`;
+        $2("#lmeta").textContent = t`Ao vivo · ${hist()} e as novas`;
       };
       es2.onmessage = (e) => {
         if (pending.push(JSON.parse(e.data)) === 1) setTimeout(flushLogs, 50);
       };
-      es2.addEventListener("end", () => toggleFollow(false, logProject ? "os containers pararam" : "o container parou"));
+      es2.addEventListener("end", () => toggleFollow(false, logProject ? t`os containers pararam` : t`o container parou`));
       es2.onerror = () => {
-        if (es2.readyState === EventSource.CLOSED) toggleFollow(false, "falhou");
-        else $2("#lmeta").textContent = "Ao vivo · reconectando…";
+        if (es2.readyState === EventSource.CLOSED) toggleFollow(false, t`falhou`);
+        else $2("#lmeta").textContent = t`Ao vivo · reconectando…`;
       };
-    } else if (was) $2("#lmeta").textContent = `Ao vivo parado às ${(/* @__PURE__ */ new Date()).toLocaleTimeString("pt-BR")}${why ? ` · ${why}` : ""}`;
+    } else if (was) $2("#lmeta").textContent = t`Ao vivo parado às ${(/* @__PURE__ */ new Date()).toLocaleTimeString(LOCALE)}${why ? ` · ${why}` : ""}`;
     $2("#follow").setAttribute("aria-pressed", String(on2));
     $2("#refresh").setAttribute("aria-disabled", String(on2));
     renderMore();
@@ -12108,30 +12640,30 @@ ${h2.join(`
     if (!stream) fetchLogs();
   }
   function copyLogs() {
-    navigator.clipboard.writeText($2("#lb").textContent ?? "").then(() => toast("Logs copiados.", true), () => toast("Não consegui copiar."));
+    navigator.clipboard.writeText($2("#lb").textContent ?? "").then(() => toast(t`Logs copiados.`, true), () => toast(t`Não consegui copiar.`));
   }
-  var RESTART_TXT = { no: "não reinicia", "on-failure": "se sair com erro", "unless-stopped": "sempre, menos se você parar", always: "sempre" };
+  var RESTART_TXT = { no: t`não reinicia`, "on-failure": t`se sair com erro`, "unless-stopped": t`sempre, menos se você parar`, always: t`sempre` };
   function inspectHtml(d, reveal) {
-    const list = (xs2, none = "nenhum") => xs2.length ? xs2.map((x) => `<div>${x}</div>`).join("") : `<span class="font-sans text-muted">${none}</span>`;
+    const list = (xs2, none = t`nenhum`) => xs2.length ? xs2.map((x) => `<div>${x}</div>`).join("") : `<span class="font-sans text-muted">${none}</span>`;
     const nets = Object.entries(d.Networks).map(([n, ip]) => esc(ip ? `${n} · ${ip}` : n));
-    const mounts = d.Mounts.map((m) => esc(`${[m.Type, m.Name || m.Source].filter(Boolean).join(" ")} → ${m.Destination}${m.RW ? "" : " (somente leitura)"}`));
-    const env = d.Env.map(([k, v2]) => `${esc(k)}=${v2 === null ? '<span aria-hidden="true">••••••</span><span class="sr-only">(oculto)</span>' : esc(v2)}`);
+    const mounts = d.Mounts.map((m) => esc(`${[m.Type, m.Name || m.Source].filter(Boolean).join(" ")} → ${m.Destination}${m.RW ? "" : t` (somente leitura)`}`));
+    const env = d.Env.map(([k, v2]) => `${esc(k)}=${v2 === null ? `<span aria-hidden="true">••••••</span><span class="sr-only">${t`(oculto)`}</span>` : esc(v2)}`);
     const dt2 = "font-sans text-muted";
     return `<dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 font-mono text-fg-soft [overflow-wrap:anywhere]">
     <dt class="${dt2}">Restart</dt><dd>${esc(d.Restart)}${RESTART_TXT[d.Restart.split(":")[0]] ? `<span class="font-sans text-muted"> · ${RESTART_TXT[d.Restart.split(":")[0]]}</span>` : ""}</dd>
-    <dt class="${dt2}">Redes</dt><dd>${list(nets, "nenhuma")}</dd>
+    <dt class="${dt2}">${t`Redes`}</dt><dd>${list(nets, t`nenhuma`)}</dd>
     <dt class="${dt2}">Mounts</dt><dd>${list(mounts)}</dd>
-    <dt class="${dt2}">Env</dt><dd>${list(env, "nenhuma")}${d.Env.length ? `<button id="insp-env" onclick="loadInspect(${!reveal})"
-      class="mt-1.5 ${BTN} font-sans text-fg hover:bg-hover">${reveal ? "Ocultar valores" : "Revelar valores"}</button>` : ""}</dd></dl>`;
+    <dt class="${dt2}">Env</dt><dd>${list(env, t`nenhuma`)}${d.Env.length ? `<button id="insp-env" onclick="loadInspect(${!reveal})"
+      class="mt-1.5 ${BTN} font-sans text-fg hover:bg-hover">${reveal ? t`Ocultar valores` : t`Revelar valores`}</button>` : ""}</dd></dl>`;
   }
   async function loadInspect(reveal = false) {
     const id = logId, refocus2 = document.activeElement?.id === "insp-env";
     let html;
     try {
       const r = await api(`/api/inspect/${id}${reveal ? "/env" : ""}`), j2 = await r.json();
-      html = r.ok ? inspectHtml(j2, reveal) : esc(`Não consegui ler o inspect: ${j2}`);
+      html = r.ok ? inspectHtml(j2, reveal) : esc(t`Não consegui ler o inspect: ${j2}`);
     } catch {
-      html = "Não consegui ler o inspect.";
+      html = t`Não consegui ler o inspect.`;
     }
     if (id !== logId || !$2("#insp").open) return;
     $2("#insp-body").innerHTML = html;
@@ -12147,7 +12679,7 @@ ${h2.join(`
   function afterClose() {
     toggleFollow(false);
     $2("#insp").removeAttribute("open");
-    $2("#insp-body").textContent = "Carregando…";
+    $2("#insp-body").textContent = t`Carregando…`;
     document.querySelector(logProject ? `[data-id="${CSS.escape(`stack-${logProject.project}`)}"][data-a="plogs"]` : `[data-id="${logId}"][data-a="logs"]`)?.focus();
   }
   var xtermCss = document.createElement("style");
@@ -12158,7 +12690,7 @@ ${h2.join(`
     const c = data.find((c2) => c2.ID === id);
     if (!c) return;
     $2("#shell-name").textContent = c.Names;
-    $2("#shell-status").textContent = "Conectando…";
+    $2("#shell-status").textContent = t`Conectando…`;
     $2("#shell").showModal();
     const term = new Dl({ cursorBlink: true, fontSize: 13, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" });
     const fit = new o(), enc = new TextEncoder();
@@ -12172,7 +12704,7 @@ ${h2.join(`
     };
     ws2.onopen = () => {
       size();
-      $2("#shell-status").textContent = "Conectado. Esc vai para o terminal; feche pelo ×.";
+      $2("#shell-status").textContent = t`Conectado. Esc vai para o terminal; feche pelo ×.`;
       term.focus();
     };
     ws2.onmessage = (e) => {
@@ -12180,7 +12712,7 @@ ${h2.join(`
       else term.write(new Uint8Array(e.data));
     };
     ws2.onclose = () => {
-      $2("#shell-status").textContent = "Sessão encerrada.";
+      $2("#shell-status").textContent = t`Sessão encerrada.`;
     };
     term.onData((d) => {
       if (ws2.readyState === WebSocket.OPEN) ws2.send(enc.encode(d));
@@ -12219,7 +12751,7 @@ ${h2.join(`
     return !first;
   }
   function createLabel() {
-    if (!creating) $2("#create-go").textContent = runField("public").checked ? "Criar e expor na rede" : "Criar e iniciar";
+    if (!creating) $2("#create-go").textContent = runField("public").checked ? t`Criar e expor na rede` : t`Criar e iniciar`;
   }
   async function createContainer(e) {
     e.preventDefault();
@@ -12239,16 +12771,16 @@ ${h2.join(`
     const go2 = $2("#create-go"), label = spec.name || spec.image;
     creating = true;
     go2.setAttribute("aria-disabled", "true");
-    go2.textContent = "Criando… (baixa a imagem se faltar)";
+    go2.textContent = t`Criando… (baixa a imagem se faltar)`;
     $2("#create-fields").disabled = true;
-    $2("#shown").textContent = `Criando ${label}…`;
+    $2("#shown").textContent = t`Criando ${label}…`;
     let ok = false, msg;
     try {
       const r = await api("/api/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(spec) });
       msg = await r.json();
       ok = r.ok;
     } catch {
-      msg = "Sem resposta do servidor do Docker GUI.";
+      msg = t`Sem resposta do servidor do Docker GUI.`;
     }
     creating = false;
     go2.removeAttribute("aria-disabled");
@@ -12257,27 +12789,27 @@ ${h2.join(`
     const shown = $2("#create").open;
     if (!ok) {
       if (shown) {
-        $2("#create-msg").innerHTML = `<p class="font-medium">Não deu para criar ${esc(label)}.</p>
-        <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-xs">${esc(msg || "Erro sem mensagem.")}</pre>`;
+        $2("#create-msg").innerHTML = `<p class="font-medium">${t`Não deu para criar ${esc(label)}.`}</p>
+        <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-xs">${esc(msg || t`Erro sem mensagem.`)}</pre>`;
         go2.focus();
-      } else toast(`Não deu para criar ${label}. ${msg.trim().split("\n").at(-1) || "Erro sem mensagem."}`);
+      } else toast(t`Não deu para criar ${label}. ${msg.trim().split("\n").at(-1) || t`Erro sem mensagem.`}`);
       return load();
     }
     $2("#create-form").reset();
     markRunErrors({});
     createLabel();
     if (shown) $2("#create").close();
-    toast(`${label} criado, conferindo se ficou de pé…`, true);
+    toast(t`${label} criado, conferindo se ficou de pé…`, true);
     await load();
     const c = data.find((c2) => msg.startsWith(c2.ID));
     if (c) confirmUp([c.ID]);
-    else toast(`${label} criado.`, true);
+    else toast(t`${label} criado.`, true);
   }
   var DISK = [
-    ["Containers", "containers", "Containers parados", "os containers parados", "Os logs deles se perdem; os volumes ficam."],
-    ["Images", "images", "Imagens", "as imagens que nenhum container usa", "Dá para baixar de novo."],
-    ["Local Volumes", "volumes", "Volumes", "os volumes que nenhum container usa", "Os dados deles se perdem."],
-    ["Build Cache", "buildcache", "Build cache", "o cache de build", "O próximo build fica mais lento."]
+    ["Containers", "containers", t`Containers parados`, t`os containers parados`, t`Os logs deles se perdem; os volumes ficam.`],
+    ["Images", "images", t`Imagens`, t`as imagens que nenhum container usa`, t`Dá para baixar de novo.`],
+    ["Local Volumes", "volumes", t`Volumes`, t`os volumes que nenhum container usa`, t`Os dados deles se perdem.`],
+    ["Build Cache", "buildcache", t`Build cache`, t`o cache de build`, t`O próximo build fica mais lento.`]
   ];
   var disk = null;
   var diskBusy = "";
@@ -12285,19 +12817,19 @@ ${h2.join(`
   var PODMAN = /^podman\b/.test(document.documentElement.dataset.cli ?? "");
   function volumeNote() {
     const vs2 = objs.volumes;
-    if (!Array.isArray(vs2)) return vs2 === null ? "Conferindo quais volumes saem…" : "Não consegui ler a lista de volumes; o prune leva os sem uso.";
+    if (!Array.isArray(vs2)) return vs2 === null ? t`Conferindo quais volumes saem…` : t`Não consegui ler a lista de volumes; o prune leva os sem uso.`;
     const out = prunedVolumes(vs2, PODMAN), shown = out.slice(0, 10).map((v2) => anonVolume(v2.Name) ? v2.Name.slice(0, 12) + "…" : v2.Name);
-    return !out.length ? "Nenhum volume sem uso para apagar." : `Vai apagar ${plural(out.length, PODMAN ? "volume sem uso" : "volume anônimo sem uso", PODMAN ? "volumes sem uso" : "volumes anônimos sem uso")}: ${shown.join(", ")}${out.length > 10 ? ` e mais ${out.length - 10}` : ""}. Os dados deles se perdem.${PODMAN ? "" : " Os nomeados ficam."}`;
+    return !out.length ? t`Nenhum volume sem uso para apagar.` : t`Vai apagar ${plural(out.length, PODMAN ? t`volume sem uso` : t`volume anônimo sem uso`, PODMAN ? t`volumes sem uso` : t`volumes anônimos sem uso`)}: ${shown.join(", ")}${out.length > 10 ? t` e mais ${out.length - 10}` : ""}. Os dados deles se perdem.` + (PODMAN ? "" : t` Os nomeados ficam.`);
   }
   function containerNote(note) {
     const out = data.filter(removable);
-    return out.length ? `Vai remover ${names(out, 10)}. ${note}` : "Nenhum container parado para remover.";
+    return out.length ? t`Vai remover ${names(out, 10)}. ${note}` : t`Nenhum container parado para remover.`;
   }
   var pruneNote = (d, note) => {
     const idle = d ? +d.TotalCount - +d.Active : 0;
     if (d?.Type === "Local Volumes") return volumeNote();
     if (d?.Type === "Containers") return containerNote(note);
-    return d ? `Libera até ${d.Reclaimable.split(" ")[0]}${idle > 0 ? `, de ${plural(idle, "item sem uso", "itens sem uso")}` : ""}. ${note}` : note;
+    return d ? t`Libera até ${d.Reclaimable.split(" ")[0]}${idle > 0 ? t`, de ${plural(idle, t`item sem uso`, t`itens sem uso`)}` : ""}. ${note}` : note;
   };
   async function loadTab() {
     if (tab === "containers") return;
@@ -12306,15 +12838,15 @@ ${h2.join(`
   async function loadDf() {
     try {
       const r = await api("/api/df"), j2 = await r.json();
-      disk = r.ok ? j2 : `Não consegui ler o uso de disco: ${j2}`;
+      disk = r.ok ? j2 : t`Não consegui ler o uso de disco: ${j2}`;
     } catch {
-      disk = "Não consegui ler o uso de disco. O servidor do Docker GUI está rodando?";
+      disk = t`Não consegui ler o uso de disco. O servidor do Docker GUI está rodando?`;
     }
     render();
   }
   function renderDisk() {
     for (const panel of ["images", "volumes"]) {
-      const html = disk === null ? '<p class="py-3 text-muted">Carregando…</p>' : typeof disk === "string" ? `<p class="py-3 text-bad-fg">${esc(disk)}</p>` : DISK.filter(([, k]) => k === "volumes" === (panel === "volumes")).map(([type, k, label, what, note]) => {
+      const html = disk === null ? `<p class="py-3 text-muted">${t`Carregando…`}</p>` : typeof disk === "string" ? `<p class="py-3 text-bad-fg">${esc(disk)}</p>` : DISK.filter(([, k]) => k === "volumes" === (panel === "volumes")).map(([type, k, label, what, note]) => {
         const d = disk.find((d2) => d2.Type === type), id = "df-" + k, armed = arming?.id === id;
         if (!d) return "";
         const cls = armed ? "bg-danger text-white ring-danger hover:bg-danger-hover" : "text-fg hover:bg-hover", share = reclaimShare(d);
@@ -12322,10 +12854,10 @@ ${h2.join(`
             <span class="h-full bg-accent" style="width:${Math.round(share * 100)}%"></span></div>`;
         return `<div class="flex flex-wrap items-center gap-x-3 gap-y-2 py-3">
           <div class="mr-auto min-w-0 flex-1"><div class="font-medium text-fg-strong">${label}</div>
-            <div class="font-mono text-xs text-muted">${esc(d.Size)} no total · ${esc(d.Reclaimable)} liberável · ${esc(d.TotalCount)} ${d.TotalCount === "1" ? "item" : "itens"}, ${esc(d.Active)} em uso</div>${bar}</div>
+            <div class="font-mono text-xs text-muted">${t`${esc(d.Size)} no total · ${esc(d.Reclaimable)} liberável · ${esc(d.TotalCount)} ${d.TotalCount === "1" ? t`item` : t`itens`}, ${esc(d.Active)} em uso`}</div>${bar}</div>
           <button data-id="${id}" data-a="prune" ${diskBusy ? 'aria-disabled="true"' : ""} onclick="prune('${k}')"
-            aria-label="${armed ? `Confirmar limpeza de ${label.toLowerCase()}` : `Limpar ${label.toLowerCase()}`}" class="${BTN} ${cls}">${diskBusy === k ? "Limpando…" : armed ? `Limpar ${label.toLowerCase()}` : "Limpar…"}</button>${armed ? cancelBtn(id, `limpeza de ${label.toLowerCase()}`) : ""}
-          ${armed ? armNote(`Apagar ${what}? ${esc(pruneNote(d, note))}`) : ""}
+            aria-label="${armed ? t`Confirmar limpeza de ${label.toLowerCase()}` : t`Limpar ${label.toLowerCase()}`}" class="${BTN} ${cls}">${diskBusy === k ? t`Limpando…` : armed ? t`Limpar ${label.toLowerCase()}` : t`Limpar…`}</button>${armed ? cancelBtn(id, t`limpeza de ${label.toLowerCase()}`) : ""}
+          ${armed ? armNote(t`Apagar ${what}? ${esc(pruneNote(d, note))}`) : ""}
         </div>`;
       }).join("");
       if (html !== diskHtml[panel]) $2("#df-" + panel).innerHTML = diskHtml[panel] = html;
@@ -12337,23 +12869,23 @@ ${h2.join(`
     if (diskBusy || !confirmed("df-" + k, what, "prune", pruneNote(d, note))) return;
     diskBusy = k;
     render();
-    $2("#shown").textContent = `Limpando ${label.toLowerCase()}…`;
+    $2("#shown").textContent = t`Limpando ${label.toLowerCase()}…`;
     try {
       const r = await api("/api/prune/" + k, { method: "POST" }), msg = await r.json();
       const freed = msg.match(/Total(?: reclaimed space)?:\s*(\S+)/)?.[1];
-      if (r.ok) toast(`${label}: ${freed ? `${freed} liberados` : "limpeza feita"}.`, true);
-      else toast(`Não deu para limpar ${label.toLowerCase()}: ${msg || "erro sem mensagem"}`);
+      if (r.ok) toast(`${label}: ${freed ? t`${freed} liberados` : t`limpeza feita`}.`, true);
+      else toast(t`Não deu para limpar ${label.toLowerCase()}: ${msg || t`erro sem mensagem`}`);
     } catch {
-      toast("Sem resposta do servidor do Docker GUI.");
+      toast(t`Sem resposta do servidor do Docker GUI.`);
     }
     diskBusy = "";
     await Promise.all([loadTab(), k === "containers" && load()]);
   }
   var KINDS = ["images", "volumes", "networks"];
   var OBJ = {
-    images: ["image", "a imagem", "Imagem", "Imagens", "removida", "Dá para baixar de novo.", "Nenhuma imagem."],
-    volumes: ["volume", "o volume", "Volume", "Volumes", "removido", "Os dados dele se perdem.", "Nenhum volume."],
-    networks: ["network", "a rede", "Rede", "Redes", "removida", "", "Nenhuma rede."]
+    images: ["image", t`a imagem`, t`Imagem`, t`Imagens`, t`removida`, t`Dá para baixar de novo.`, t`Nenhuma imagem.`],
+    volumes: ["volume", t`o volume`, t`Volume`, t`Volumes`, t`removido`, t`Os dados dele se perdem.`, t`Nenhum volume.`],
+    networks: ["network", t`a rede`, t`Rede`, t`Redes`, t`removida`, "", t`Nenhuma rede.`]
   };
   var objs = { images: null, volumes: null, networks: null };
   var objHtml = {};
@@ -12361,39 +12893,39 @@ ${h2.join(`
   var objBusy = "";
   var objRef = (k, o2) => k === "volumes" ? o2.Name : o2.ID;
   var anon = anonVolume;
-  var objName = (k, o2) => k === "images" ? o2.Tags.join(", ") || `sem tag ${o2.ID.slice(0, 12)}` : anon(o2.Name) ? o2.Name.slice(0, 12) : o2.Name;
+  var objName = (k, o2) => k === "images" ? o2.Tags.join(", ") || t`sem tag ${o2.ID.slice(0, 12)}` : anon(o2.Name) ? o2.Name.slice(0, 12) : o2.Name;
   async function loadObjects(k) {
     try {
       const r = await api("/api/" + k), j2 = await r.json();
-      objs[k] = r.ok ? j2 : `Não consegui ler a lista: ${j2}`;
+      objs[k] = r.ok ? j2 : t`Não consegui ler a lista: ${j2}`;
     } catch {
-      objs[k] = "Não consegui ler a lista. O servidor do Docker GUI está rodando?";
+      objs[k] = t`Não consegui ler a lista. O servidor do Docker GUI está rodando?`;
     }
     render();
   }
   var OBJ_COLS = {
-    images: ["Imagem", "ID", "Tamanho", "Criada", "Em uso por"],
-    volumes: ["Volume", "Driver", "Em uso por"],
-    networks: ["Rede", "Driver", "Escopo", "Em uso por"]
+    images: [t`Imagem`, "ID", t`Tamanho`, t`Criada`, t`Em uso por`],
+    volumes: [t`Volume`, "Driver", t`Em uso por`],
+    networks: [t`Rede`, "Driver", t`Escopo`, t`Em uso por`]
   };
   function objItem(k, o2) {
     const r = objRef(k, o2), id = `rm-${k}-${r}`, armed = arming?.id === id, what = `${OBJ[k][1]} ${objName(k, o2)}`;
-    const err = objErr.get(id), hint = err && rmHint(err), tag = (t, title2) => `<span title="${title2}" class="ml-1.5 font-normal text-muted">(${t})</span>`;
+    const err = objErr.get(id), hint = err && rmHint(err), tag = (t2, title2) => `<span title="${title2}" class="ml-1.5 font-normal text-muted">(${t2})</span>`;
     let title = esc(objName(k, o2)), cells;
     if (k === "images") {
       const i = o2;
-      if (!i.Tags.length) title = `sem tag${tag("dangling", "nenhuma tag aponta para ela")}`;
-      cells = [esc(i.ID.slice(0, 12)), esc(i.Size), i.Created ? `há ${age(i.Created)}` : "—"];
+      if (!i.Tags.length) title = `${t`sem tag`}${tag("dangling", t`nenhuma tag aponta para ela`)}`;
+      cells = [esc(i.ID.slice(0, 12)), esc(i.Size), i.Created ? t`há ${age(i.Created)}` : "—"];
     } else if (k === "volumes") {
       const v2 = o2;
-      if (anon(v2.Name)) title = `<span title="${esc(v2.Name)}">${title}…</span>${tag("anônimo", "criado sem nome, por um container")}`;
+      if (anon(v2.Name)) title = `<span title="${esc(v2.Name)}">${title}…</span>${tag(t`anônimo`, t`criado sem nome, por um container`)}`;
       cells = [esc(v2.Driver)];
     } else {
       const n = o2;
-      if (n.Builtin) title += tag("padrão", "vem com o daemon e não pode ser removida");
+      if (n.Builtin) title += tag(t`padrão`, t`vem com o daemon e não pode ser removida`);
       cells = [esc(n.Driver), esc(n.Scope)];
     }
-    cells.push(o2.Containers.length ? `<span class="text-fg-soft">${esc(o2.Containers.join(", "))}</span>` : "nenhum container");
+    cells.push(o2.Containers.length ? `<span class="text-fg-soft">${esc(o2.Containers.join(", "))}</span>` : t`nenhum container`);
     const canRm = k !== "networks" || !o2.Builtin && !!o2.ID;
     const cls = armed ? "bg-danger text-white ring-danger hover:bg-danger-hover" : "text-fg hover:bg-hover";
     const cols = OBJ_COLS[k].slice(1);
@@ -12404,15 +12936,15 @@ ${h2.join(`
         <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-bad-soft">${esc(err)}</pre></div>` : ""}</th>
     ${cells.map((c, i) => `<td class="py-2.5 pr-4 max-lg:block max-lg:p-0 max-lg:px-4 align-top font-mono text-xs text-muted [overflow-wrap:anywhere]"><span class="lg:sr-only">${cols[i]}: </span>${c}</td>`).join("")}
     <td class="py-2 pr-4 max-lg:block max-lg:p-0 max-lg:px-4 max-lg:pt-2 align-top"><div class="flex justify-end max-lg:justify-start items-center gap-1.5">${canRm ? `<button data-id="${esc(id)}" data-a="rm" data-k="${k}" data-r="${esc(r)}" ${objBusy ? 'aria-disabled="true"' : ""}
-      onclick="rmObj(this.dataset.k, this.dataset.r)" aria-label="${armed ? `Confirmar remoção de ${esc(what)}` : `Remover ${esc(what)}`}"
-      class="${BTN} ${cls}">${objBusy === id ? "Removendo…" : armed ? "Remover" : "Remover…"}</button>${armed ? cancelBtn(id, `remoção de ${esc(what)}`) : ""}` : ""}</div>
-      ${armed ? armNote(`Remover ${esc(what)}? ${OBJ[k][5]}`, "mt-1.5 [contain:inline-size] max-lg:[contain:none] lg:text-right text-balance") : ""}</td></tr>`;
+      onclick="rmObj(this.dataset.k, this.dataset.r)" aria-label="${armed ? t`Confirmar remoção de ${esc(what)}` : t`Remover ${esc(what)}`}"
+      class="${BTN} ${cls}">${objBusy === id ? t`Removendo…` : armed ? t`Remover` : t`Remover…`}</button>${armed ? cancelBtn(id, t`remoção de ${esc(what)}`) : ""}` : ""}</div>
+      ${armed ? armNote(t`Remover ${esc(what)}? ${OBJ[k][5]}`, "mt-1.5 [contain:inline-size] max-lg:[contain:none] lg:text-right text-balance") : ""}</td></tr>`;
   }
   var dfCount = (k) => Array.isArray(disk) ? +(disk.find((d) => d.Type === { images: "Images", volumes: "Local Volumes", networks: "" }[k])?.TotalCount ?? 0) : 0;
   function renderObjects() {
     for (const k of KINDS) {
       const v2 = objs[k];
-      const html = v2 === null ? '<p class="py-3 text-muted">Carregando…</p>' : typeof v2 === "string" ? `<p class="py-3 text-bad-fg">${esc(v2)}</p>` : !v2.length ? `<p class="py-3 px-4 text-muted">${OBJ[k][6]}${dfCount(k) ? ` O docker system df conta ${dfCount(k)}: a lista pode ter vindo antes do df. Troque de aba e volte para ler de novo.` : ""}</p>` : `<table aria-label="${OBJ[k][3]}" class="w-full text-left max-lg:block"><thead class="max-lg:hidden font-mono text-[11px] uppercase text-muted"><tr>${OBJ_COLS[k].map((h2, i) => `<th scope="col" class="py-3 ${i ? "" : "pl-4 "}pr-4 font-medium">${h2}</th>`).join("")}<th scope="col" class="pr-4"><span class="sr-only">Ações</span></th></tr></thead>
+      const html = v2 === null ? `<p class="py-3 text-muted">${t`Carregando…`}</p>` : typeof v2 === "string" ? `<p class="py-3 text-bad-fg">${esc(v2)}</p>` : !v2.length ? `<p class="py-3 px-4 text-muted">${OBJ[k][6]}${dfCount(k) ? t` O docker system df conta ${dfCount(k)}: a lista pode ter vindo antes do df. Troque de aba e volte para ler de novo.` : ""}</p>` : `<table aria-label="${OBJ[k][3]}" class="w-full text-left max-lg:block"><thead class="max-lg:hidden font-mono text-[11px] uppercase text-muted"><tr>${OBJ_COLS[k].map((h2, i) => `<th scope="col" class="py-3 ${i ? "" : "pl-4 "}pr-4 font-medium">${h2}</th>`).join("")}<th scope="col" class="pr-4"><span class="sr-only">${t`Ações`}</span></th></tr></thead>
         <tbody class="max-lg:block">${v2.map((o2) => objItem(k, o2)).join("")}</tbody></table>`;
       if (html !== objHtml[k]) $2(`#obj-${k}-list`).innerHTML = objHtml[k] = html;
       $2(`#obj-${k}-n`).textContent = Array.isArray(v2) ? ` · ${v2.length}` : "";
@@ -12428,18 +12960,18 @@ ${h2.join(`
     objErr.delete(id);
     objBusy = id;
     render();
-    $2("#shown").textContent = `Removendo ${one} ${name}…`;
+    $2("#shown").textContent = t`Removendo ${one} ${name}…`;
     let ok = false;
     try {
       const res = await api(`/api/rm/${rm}/${encodeURIComponent(r)}`, { method: "POST" }), msg = await res.json();
       ok = res.ok;
       if (ok) toast(`${label} ${name} ${done}.`, true);
       else {
-        objErr.set(id, msg || "erro sem mensagem");
-        toast(`Não deu para remover ${one} ${name}. ${rmHint(msg) || "O erro ficou na lista."}`);
+        objErr.set(id, msg || t`erro sem mensagem`);
+        toast(t`Não deu para remover ${one} ${name}. ${rmHint(msg) || t`O erro ficou na lista.`}`);
       }
     } catch {
-      toast("Sem resposta do servidor do Docker GUI.");
+      toast(t`Sem resposta do servidor do Docker GUI.`);
     }
     objBusy = "";
     await loadTab();

@@ -20,6 +20,13 @@ DOCKER_GUI_CLI=podman python3 docker_gui.py
 python3 docker_gui.py --context producao
 ```
 
+A página e as mensagens saem em português ou em inglês, pelo locale do sistema (`LC_ALL`, `LC_MESSAGES` ou `LANG` começando com `pt`: português; qualquer outro: inglês). Para escolher, use `--lang` ou a variável `DOCKER_GUI_LANG`:
+
+```bash
+python3 docker_gui.py --lang en
+DOCKER_GUI_LANG=pt python3 docker_gui.py
+```
+
 A saída do `podman ps` tem outro formato (`Names` em lista, portas como objetos, labels como dicionário…), e a do `podman stats` também (`cpu_percent`, `net_io`…; pelo `podman-docker`, números crus). O servidor converte tudo para o formato do `docker ps` e do `docker stats`, então a página funciona igual. O mesmo vale para as listas de imagens (tamanho em bytes, data em epoch), volumes e redes (chaves em minúsculas no Podman 4+). Uma rede que venha sem ID (formatos antigos do Podman) aparece na lista, mas sem o botão de remover. O "Copiar `docker exec`" usa o mesmo binário e contexto.
 
 ## O que faz
@@ -57,6 +64,7 @@ A saída do `podman ps` tem outro formato (`Names` em lista, portas como objetos
 - **Confirmações** de remoção, `down` e limpeza: o primeiro clique arma (e o foco vai para o ×, o botão seguro), o segundo confirma (o botão vermelho diz o que faz: "Remover", "Derrubar shop", "Limpar imagens"; na linha de um container, a confirmação aparece numa linha própria e o botão principal fica inerte até decidir), e o × ao lado (ou `Esc`) cancela; no celular, também cancela sozinho em 8 s, com um aviso de que nada foi apagado. O `down` lista todos os containers que saem (até 10). A barra das ações em lote flutua no pé da página, então marcar uma caixa não mexe na lista.
 - **Reiniciar** fica à vista (↻) em cada container rodando: o ciclo de quem desenvolve é mudar, reiniciar e olhar os logs.
 - **Teclado:** `?` mostra a lista de atalhos, `r` reinicia o container da linha em foco (com o modal de logs aberto, o dos logs), `/` vai para a busca de containers, de qualquer aba (com o modal de logs aberto, para o filtro das linhas), `←` `→` trocam de aba com o foco nelas, `↑` `↓` andam entre os botões Logs, `X` marca ou desmarca a linha em foco, `A` marca ou desmarca todos os visíveis e `Z` aciona o "desfazer". O `Ctrl+F` continua sendo a busca do navegador. Os filtros ficam na URL, como a aba.
+- **Português e inglês**, na página inteira (textos, avisos, confirmações, datas e números) e nas mensagens do servidor e do terminal, pelo `--lang`, pelo `DOCKER_GUI_LANG` ou pelo locale do sistema.
 - Tema **claro e escuro** automático, com paleta de terminal (dados em mono, estado em cor), layout de **cards no celular** (o modal de logs vira tela cheia) e acessibilidade AA (contraste, foco, leitores de tela, `prefers-reduced-motion`).
 
 ## Requisitos
@@ -101,6 +109,8 @@ Quem usa baixa só o `docker_gui.py` e não precisa de nada além de Python. Par
 |---|---|
 | `docker_gui.py` | Servidor (Python, editado à mão) + bloco gerado no fim, com HTML, JS compilado e CSS |
 | `src/page.html` | Estrutura da página |
+| `src/i18n.ts` | Tradução: o `t\`...\`` que envolve cada frase da interface e troca o HTML estático quando a língua é o inglês |
+| `src/en.json` | O dicionário em inglês: a chave é a frase em pt-BR, com `{0}`, `{1}`... no lugar de cada `${...}` |
 | `src/format.ts` | Tipos (`Container`, `Port`…) e funções puras que traduzem a saída do `docker` (status, portas, projeto, tamanhos do `stats`, pontos do sparkline…) |
 | `src/app.ts` | Renderização, ações e eventos; no fim, a lista das funções que o HTML chama (`onclick="act(...)"`) |
 | `src/theme.css` | Entrada do [Tailwind CSS v4](https://tailwindcss.com) com os **tokens semânticos** dos dois temas (`bg-canvas`, `text-muted`, `bg-ok`, `text-bad-fg`, `bg-accent`…) |
@@ -115,6 +125,8 @@ python3 build.py --css   # HTML, JS e CSS
 ```
 
 Não edite o bloco gerado do `docker_gui.py` à mão: o CI confere se ele bate com `src/`.
+
+O texto da interface fica em pt-BR no código. Uma frase nova vai num `t\`...\`` (em `src/*.ts`) ou direto no `page.html`, e a tradução dela vai no `src/en.json`; no servidor, num `tr("...")` com a tradução no `EN` do `docker_gui.py`. O `tests/test_i18n.py` falha se faltar tradução, se sobrar chave que ninguém usa ou se os `{0}`, `{1}`... não baterem.
 
 ## Testes
 
