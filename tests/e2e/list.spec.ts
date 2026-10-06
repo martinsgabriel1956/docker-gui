@@ -98,7 +98,8 @@ test('status do docker vem traduzido, com o original no title', async ({ page, g
     ],
   });
   const cases: [string, string][] = [
-    ['worker', 'Saiu com código 137 há 2 minmorto à força ou sem memória (OOM)'],
+    // com o inspect de quem caiu, o 137 diz a causa (o docker falso não marca OOMKilled)
+    ['worker', 'Saiu com código 137 há 2 minmorto à força (SIGKILL), não por falta de memória'],
     ['db', 'Rodando há 2 h · saudável'],
     ['flaky', 'Rodando há ~1 h · healthcheck falhando'],
     ['cron', 'Parado há 3 d'],
@@ -202,4 +203,15 @@ test('CPU e memória do docker stats aparecem só nos containers rodando, e atua
 
   gui.update(s => { s.containers[0].stats = { ...stats, CPUPerc: '42.00%' }; });
   await expect(us).toHaveText('CPU 42.00% · RAM 20MiB', { timeout: 12_000 });  // o stats consulta a cada 5 s
+});
+
+test('quem saiu com 137 diz se foi falta de memória, pelo inspect, e quantas vezes reiniciou', async ({ page, gui }) => {
+  await gui.open({ containers: [
+    ctr('api', { State: 'exited', Status: 'Exited (137) 2 minutes ago', inspect: { State: { OOMKilled: true }, RestartCount: 2 } }),
+    ctr('worker', { State: 'exited', Status: 'Exited (137) 2 minutes ago', inspect: { State: { OOMKilled: false } } }),
+  ] });
+  await expect(row(page, 'api')).toContainText('sem memória (OOM) · reiniciou 2 vezes');
+  await expect(row(page, 'worker')).toContainText('morto à força (SIGKILL), não por falta de memória');
+  await page.getByRole('button', { name: 'Logs api' }).click();
+  await expect(page.locator('#dlg-status')).toContainText('sem memória (OOM) · reiniciou 2 vezes');
 });

@@ -610,7 +610,8 @@ class InspectTest(ServerTest):
         "NetworkSettings": {"Networks": {"app_default": {"IPAddress": "172.18.0.2"}, "host": {"IPAddress": ""}}},
         "Mounts": [{"Type": "volume", "Name": "pgdata", "Source": "/var/lib/docker/volumes/pgdata/_data",
                     "Destination": "/var/lib/postgresql/data", "RW": True, "Driver": "local"}],
-        "Config": {"Env": ["POSTGRES_PASSWORD=s3cr3t=x", "EMPTY=", "BARE"]}}
+        "Config": {"Env": ["POSTGRES_PASSWORD=s3cr3t=x", "EMPTY=", "BARE"]},
+        "State": {"OOMKilled": True, "ExitCode": 137}, "RestartCount": 4}
 
     def test_env_masked_by_default(self):
         self.docker.return_value = ok(json.dumps(self.INFO) + "\n")
@@ -621,7 +622,8 @@ class InspectTest(ServerTest):
             "Networks": {"app_default": "172.18.0.2", "host": ""},
             "Mounts": [{"Type": "volume", "Name": "pgdata", "Source": "/var/lib/docker/volumes/pgdata/_data",
                         "Destination": "/var/lib/postgresql/data", "RW": True}],
-            "Env": [["POSTGRES_PASSWORD", None], ["EMPTY", None], ["BARE", None]]})
+            "Env": [["POSTGRES_PASSWORD", None], ["EMPTY", None], ["BARE", None]],
+            "OOMKilled": True, "RestartCount": 4})
         self.docker.assert_called_once_with("inspect", "--format", "{{json .}}", HEX_ID)
 
     def test_env_revealed_on_request(self):
@@ -632,8 +634,10 @@ class InspectTest(ServerTest):
     def test_minimal_inspect(self):
         # container sem restart policy, rede, mount nem env (ou campos null, como o docker às vezes manda)
         for info in ({}, {"HostConfig": {"RestartPolicy": {"Name": "", "MaximumRetryCount": 0}},
-                          "NetworkSettings": {"Networks": None}, "Mounts": None, "Config": {"Env": None}}):
-            self.assertEqual(docker_gui.summary(info), {"Restart": "no", "Networks": {}, "Mounts": [], "Env": []})
+                          "NetworkSettings": {"Networks": None}, "Mounts": None, "Config": {"Env": None},
+                          "State": None, "RestartCount": None}):
+            self.assertEqual(docker_gui.summary(info), {"Restart": "no", "Networks": {}, "Mounts": [], "Env": [],
+                                                        "OOMKilled": False, "RestartCount": 0})
 
     def test_inspect_error(self):
         self.docker.return_value = fail("Error: No such object: 0123456789ab\n")
