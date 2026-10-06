@@ -103,7 +103,7 @@ test('imagens, volumes e redes só vão ao docker quando a lista é aberta', asy
   expect(asked.filter(p => /images|volumes|networks/.test(p))).toEqual([]);
 
   await openList(page, 'images');
-  await expect(page.locator('#obj-images > summary')).toHaveText('Imagens, uma a uma · 4');
+  await expect(page.locator('#obj-images > summary')).toHaveText('Imagens · 4');
   await expect(item(page, 'images', 'postgres:16'))
     .toContainText(`${sha('postgres').slice(0, 12)} · 412MB · criada há 2 sem · em uso por db`);
   await expect(item(page, 'images', 'nginx:latest')).toContainText('em uso por web');  // parado também conta
@@ -143,7 +143,7 @@ test('remover um volume usa a confirmação em 2 passos', async ({ page, gui }) 
   await confirm.click();
   await expect(page.locator('#toast')).toHaveText('Volume cache removido.');
   await expect(item(page, 'volumes', 'cache')).toHaveCount(0);
-  await expect(page.locator('#obj-volumes > summary')).toHaveText('Volumes, um a um · 2');
+  await expect(page.locator('#obj-volumes > summary')).toHaveText('Volumes · 2');
   expect(gui.read().removed).toEqual(['volume rm cache']);
   // o foco vai para o próximo item, não se perde no body
   await expect(page.getByRole('button', { name: 'Remover o volume pgdata' })).toBeFocused();
@@ -198,4 +198,19 @@ test('remover uma rede criada; as padrão não têm botão', async ({ page, gui 
   await expect(page.locator('#toast')).toHaveText('Rede velha removida.');
   await expect(item(page, 'networks', 'velha')).toHaveCount(0);
   expect(gui.read().removed).toEqual([`network rm ${sha('velha')}`]);
+});
+
+test('limpar volumes diz quais saem: no Docker, só os anônimos sem uso', async ({ page, gui }) => {
+  await gui.open(OBJECTS());
+  await openDisk(page);
+  await page.getByRole('button', { name: 'Limpar volumes' }).click();
+  await expect(page.locator('#df')).toContainText(`Vai apagar 1 volume anônimo sem uso: ${ANON.slice(0, 12)}…. Os dados deles se perdem. Os nomeados ficam.`);
+});
+
+test('cada categoria do disco tem a barra do que a limpeza libera', async ({ page, gui }) => {
+  await gui.open({ containers: [], df: DF });
+  await openDisk(page);
+  // 1.2GB (29%) das imagens; o build cache não traz a porcentagem e sai pela conta (tudo)
+  await expect(page.locator('#df span[style]').first()).toHaveAttribute('style', 'width:29%');
+  await expect(page.locator('#df span[style]').last()).toHaveAttribute('style', 'width:100%');
 });

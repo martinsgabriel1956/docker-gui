@@ -175,6 +175,8 @@ test.describe('remover em 2 passos', () => {
     await expect(page.getByRole('button', { name: 'Pausar' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Reiniciar', exact: true })).toHaveCount(0);  // fica à vista na linha
     await expect(page.getByRole('button', { name: 'Remover…' })).toHaveCount(0);
+    // no lugar, o porquê, desabilitado: o docker só remove container parado
+    await expect(page.getByRole('button', { name: 'Pare antes de remover' })).toHaveAttribute('aria-disabled', 'true');
   });
 });
 
@@ -221,7 +223,7 @@ test('Iniciar tudo só mexe nos parados do projeto', async ({ page, gui }) => {
       stopped('outro', { Labels: compose('blog', 'web') }),
     ],
   });
-  await page.getByRole('button', { name: 'Iniciar tudo do projeto shop (1)', exact: true }).click();
+  await page.getByRole('button', { name: 'Iniciar db do projeto shop', exact: true }).click();
   await expect(toast(page)).toHaveText('db está de pé.');
   expect(gui.container('outro')!.State).toBe('exited');
 });

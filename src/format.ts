@@ -172,8 +172,11 @@ export function pushSample(buf: Sample[], s: Sample, max = HISTORY, gap = 30_000
 // uma fatia fixa, alinhada à direita: a linha cresce da direita e a largura sempre vale a mesma janela de tempo.
 // O eixo y vai de 0 ao máximo da série (ou a floor, se maior): uma variação de 0,01% não vira montanha
 export function sparkPoints(vs: number[], w: number, h: number, max = HISTORY, floor = 0): string {
-  const top = Math.max(floor, ...vs) || 1, dx = w / (max - 1), r = (n: number) => +n.toFixed(1);
-  return vs.map((v, i) => `${r(w - (vs.length - 1 - i) * dx)},${r(h - 1 - (v / top) * (h - 2))}`).join(' ');
+  // até a janela encher, a série ocupa a largura toda: 3 leituras numa janela de 60 viravam um ponto na ponta
+  const top = Math.max(floor, ...vs) || 1, dx = w / (Math.max(2, Math.min(vs.length, max)) - 1), r = (n: number) => +n.toFixed(1);
+  // série sem variação vai no meio da altura: deitada no pé, parecia um sublinhado quebrado
+  const flat = vs.every(v => v === vs[0]);
+  return vs.map((v, i) => `${r(w - (vs.length - 1 - i) * dx)},${r(flat ? h / 2 : h - 1 - (v / top) * (h - 2))}`).join(' ');
 }
 // texto alternativo do sparkline: "CPU nos últimos 4 min: mín 0.1%, máx 2.3%, agora 0.5%"
 export function trend(label: string, vs: number[], span: number, fmt: (n: number) => string): string {
@@ -293,3 +296,28 @@ export function bulkSummary(done: string, ok: number, fails: [name: string, msg:
   return [ok && `${ok} ${ok === 1 ? done : done + 's'}`,
           f && `${f} ${f === 1 ? 'falhou' : 'falharam'}: ${list}${f > 2 ? `; e mais ${f - 2}` : ''}`].filter(Boolean).join(', ') + '.';
 }
+
+// nível de uma linha de log, para a cor: 'bad' (erro), 'warn' (aviso), 'dim' (debug) ou '' (o resto). Vale a palavra
+// solta em maiúsculas (ERROR, WARN: "0 errors" não é nível), Error:/Warning: começando a mensagem, level=... ou
+// "level":"..." de log estruturado e o [error] do nginx. ponytail: heurística; "No Error: found" sai vermelho
+export type LogLevel = 'bad' | 'warn' | 'dim' | '';
+const LEVEL: [Exclude<LogLevel, ''>, RegExp, RegExp][] = [
+  ['bad', /\b(FATAL|PANIC|CRIT(ICAL)?|ERROR|ERR|EMERG)\b|\b(Error|Exception|Traceback)\b:/, /\blevel["=: ]+"?(fatal|panic|crit|err)|\[(error|crit|alert|emerg)\]/i],
+  ['warn', /\bWARN(ING)?\b|\bWarning:/, /\blevel["=: ]+"?warn|\[warn\]/i],
+  ['dim', /\b(DEBUG|TRACE)\b/, /\blevel["=: ]+"?(debug|trace)|\[debug\]/i]];
+export const logLevel = (line: string): LogLevel => LEVEL.find(([, word, mark]) => word.test(line) || mark.test(line))?.[0] ?? '';
+
+// fatia liberável de uma categoria do docker system df (0 a 1), para a barra: o "(40%)" do Reclaimable, ou a
+// conta pelos tamanhos quando ele não vem (o build cache manda só "3.3GB"); null se não der para saber
+export function reclaimShare(d: DiskUsage): number | null {
+  const pct = d.Reclaimable.match(/\((\d+(?:\.\d+)?)%\)/), r = bytes(d.Reclaimable.split(' ')[0]), t = bytes(d.Size);
+  const v = pct ? +pct[1] / 100 : r !== null && t ? r / t : null;
+  return v === null ? null : Math.min(1, Math.max(0, v));
+}
+
+// volume anônimo: o nome é um hash de 64 hex
+export const anonVolume = (name: string): boolean => /^[0-9a-f]{64}$/.test(name);
+// o que o volume prune (sem -a) leva: o que nenhum container usa; no Docker 23+ só os anônimos, no Podman os nomeados
+// também. ponytail: Docker anterior ao 23 (2023) também leva os nomeados e aqui sai a conta menor
+export const prunedVolumes = (vs: Volume[], podman: boolean): Volume[] =>
+  vs.filter(v => !v.Containers.length && (podman || anonVolume(v.Name)));
