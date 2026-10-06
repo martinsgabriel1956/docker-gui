@@ -1168,6 +1168,7 @@ def main():
     finally:
         for p in list(STREAMS):  # as threads dos streams são daemon: morrem com o servidor sem passar pelo finally delas
             p.kill()
+            p.wait()  # recolhe o filho aqui: órfão, viraria zumbi onde o PID 1 não recolhe (container sem init)
 
 
 # Front (HTML, JS e o CSS do Tailwind) embutido: sem CDN, funciona offline e não pisca sem estilo.
