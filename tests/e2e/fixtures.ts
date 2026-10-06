@@ -25,6 +25,7 @@ export type Container = {
   after?: Partial<Record<Action, { State: string; Status: string }>>;
   stats?: Stats | Stats[];  // lista: uma leitura por `docker stats`, a última se repete
   noscript?: boolean;
+  started?: string;  // StartedAt do inspect (since=start dos logs)
 };
 export type DiskUsage = { Type: string; TotalCount: string; Active: string; Size: string; Reclaimable: string };
 // linhas reais do `docker image ls --no-trunc` (uma por tag), `volume ls` e `network ls --no-trunc`, em '{{json .}}'
@@ -33,7 +34,7 @@ export type VolumeRow = { Name: string; Driver: string };
 export type NetworkRow = { ID: string; Name: string; Driver: string; Scope: string };
 export type DockerState = {
   containers: Container[]; ps_error?: string; df?: DiskUsage[]; pruned?: string[];
-  compose_fail?: string; compose_calls?: string[][]; events_error?: string;
+  compose_fail?: string; compose_calls?: string[][]; events_error?: string; compose_recreate?: { State: string; Status: string };
   run_calls?: string[][]; run_fail?: string; run_delay?: number; run_after?: { State: string; Status: string };
   images?: ImageRow[]; volumes?: VolumeRow[]; networks?: NetworkRow[]; removed?: string[];
   context?: { Name: string; Host: string };  // o que o `context inspect` responde (padrão: default em unix://)
