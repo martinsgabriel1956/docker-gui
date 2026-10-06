@@ -4,6 +4,7 @@ import {
   fmtBytes, hasHealth, io, isProblem, logFilter, logLevel, newProblems, percent, ports, project, prunedVolumes, pushSample,
   reclaimShare, rmHint, runSpec, service, shortImage, sparkPoints, status, tone, trend, usage, workingDir,
 } from './format';
+import {LOCALE, t, translatePage} from './i18n';
 import {Terminal} from '@xterm/xterm';
 import {FitAddon} from '@xterm/addon-fit';
 import XTERM_CSS from '@xterm/xterm/css/xterm.css';  // string (build.py usa --loader:.css=text): nada de CDN
@@ -23,14 +24,14 @@ const api = (path: string, opts: RequestInit = {}) =>
 
 type Action = 'start' | 'stop' | 'restart' | 'pause' | 'unpause' | 'remove';
 type RowAction = Action | 'logs';
-type MenuAction = Action | 'exec' | 'shell' | 'srestart' | 'noremove';
+type MenuAction = Action | 'exec' | 'shell' | 'srestart' | 'sbuild' | 'noremove';
 type ProblemKind = 'docker' | 'perm' | 'server' | 'auth';
 // [título, dica (HTML confiável), detalhe técnico, tipo]
 type Problem = [title: string, hint: string, detail: unknown, kind: ProblemKind];
 type ToastAction = [label: string, fn: () => unknown];
 type RowError = {msg: string; state: ContainerState; what: string};
-// rebuild = up --build; restart é por serviço (o resto vale para o projeto inteiro)
-type ComposeAction = 'up' | 'rebuild' | 'down' | 'pull' | 'restart';
+// rebuild = up --build do projeto; restart e build (up --build --no-deps) são por serviço (o resto vale para o projeto inteiro)
+type ComposeAction = 'up' | 'rebuild' | 'down' | 'pull' | 'restart' | 'build';
 // confirmação em 2 passos pendente: remover um container (ou os selecionados, id = "bulk"), derrubar um projeto
 // (id = "stack-<projeto>"), limpar uma categoria do disco ou remover uma imagem, volume ou rede; a é o data-a do
 // botão e note vai para o leitor de tela
@@ -42,11 +43,14 @@ type Inspect = {Restart: string; Networks: Record<string, string>; Env: [key: st
 // linha da tabela com o HTML que a gerou, para o patchRows saber se mudou
 type Row = HTMLElement & {_html?: string};
 
-const LABEL: Record<RowAction, string> = {start: 'Iniciar', stop: 'Parar', restart: 'Reiniciar', pause: 'Pausar', unpause: 'Retomar', logs: 'Logs', remove: 'Remover'};
-const VERB: Record<Action, string> = {start: 'Iniciando…', stop: 'Parando…', restart: 'Reiniciando…', pause: 'Pausando…', unpause: 'Retomando…', remove: 'Removendo…'};
-const DONE: Record<Action, string> = {start: 'iniciado', stop: 'parado', restart: 'reiniciado', pause: 'pausado', unpause: 'retomado', remove: 'removido'};
-const COMPOSE_VERB: Record<ComposeAction, string> = {up: 'Subindo…', rebuild: 'Reconstruindo…', down: 'Derrubando…', pull: 'Baixando…', restart: 'Reiniciando…'};
-const COMPOSE_CMD: Record<ComposeAction, string> = {up: 'compose up', rebuild: 'compose up --build', down: 'compose down', pull: 'compose pull', restart: 'compose restart'};
+// o HTML estático vem em pt-BR: em inglês, troca antes de qualquer coisa ler ou desenhar a página
+translatePage();
+const LABEL: Record<RowAction, string> = {start: t`Iniciar`, stop: t`Parar`, restart: t`Reiniciar`, pause: t`Pausar`, unpause: t`Retomar`, logs: t`Logs`, remove: t`Remover`};
+const VERB: Record<Action, string> = {start: t`Iniciando…`, stop: t`Parando…`, restart: t`Reiniciando…`, pause: t`Pausando…`, unpause: t`Retomando…`, remove: t`Removendo…`};
+const DONE: Record<Action, string> = {start: t`iniciado`, stop: t`parado`, restart: t`reiniciado`, pause: t`pausado`, unpause: t`retomado`, remove: t`removido`};
+const COMPOSE_VERB: Record<ComposeAction, string> = {up: t`Subindo…`, rebuild: t`Reconstruindo…`, down: t`Derrubando…`, pull: t`Baixando…`, restart: t`Reiniciando…`, build: t`Reconstruindo…`};
+const COMPOSE_CMD: Record<ComposeAction, string> = {up: 'compose up', rebuild: 'compose up --build', down: 'compose down', pull: 'compose pull', restart: 'compose restart',
+                                                    build: 'compose up --build --no-deps'};
 // cada estado tem posições fixas de botão, assim Logs fica sempre no mesmo lugar (dead não inicia, só remove)
 const PRIMARY: Partial<Record<ContainerState, Action>> = {running: 'stop', restarting: 'stop', paused: 'unpause', exited: 'start', created: 'start'};
 const SECONDARY: Partial<Record<ContainerState, Action>> = {running: 'restart', paused: 'stop'};
@@ -61,11 +65,11 @@ const NOT_HTTP = new Set([21, 22, 25, 53, 110, 143, 465, 587, 993, 995, 1025, 14
                           5432, 5672, 6379, 9042, 9092, 11211, 27017]);
 // [estado, rótulo no singular, no plural, cor]
 const BUCKETS: [Bucket, string, string, string][] = [
-  ['problema', 'com problema', 'com problema', 'text-bad-fg'], ['rodando', 'rodando bem', 'rodando bem', 'text-fg'],
-  ['pausado', 'pausado', 'pausados', 'text-fg'], ['reiniciando', 'reiniciando', 'reiniciando', 'text-fg'],
-  ['parado', 'parado', 'parados', 'text-fg']];
+  ['problema', t`com problema`, t`com problema`, 'text-bad-fg'], ['rodando', t`rodando bem`, t`rodando bem`, 'text-fg'],
+  ['pausado', t`pausado`, t`pausados`, 'text-fg'], ['reiniciando', t`reiniciando`, t`reiniciando`, 'text-fg'],
+  ['parado', t`parado`, t`parados`, 'text-fg']];
 const TOUCH = matchMedia('(pointer: coarse)').matches;
-const PROBLEM_TXT: Record<ProblemKind, string> = {docker: 'Docker fora do ar', perm: 'sem acesso ao Docker', server: 'sem conexão', auth: 'sem token'};
+const PROBLEM_TXT: Record<ProblemKind, string> = {docker: t`Docker fora do ar`, perm: t`sem acesso ao Docker`, server: t`sem conexão`, auth: t`sem token`};
 // Logs é a ação mais usada e a mais inofensiva: sem contorno, para a principal (Parar, Iniciar) ser a que salta aos olhos
 const ghost = () => BTN.replace(' ring-1 ring-line-strong/80', '');
 const BTN = 'px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded text-xs font-medium ring-1 ring-line-strong/80 transition motion-reduce:transition-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent aria-disabled:opacity-40 aria-disabled:cursor-wait';
@@ -78,7 +82,7 @@ let data: Container[] = [], busy = new Map<string, Action>(), composing = new Ma
 // seleção para as ações em lote: IDs, não nós do DOM, então sobrevive ao redesenho; visible = IDs na tela agora
 // (filtros e busca aplicados); armedIds = o que o Remover em lote armou, para o Confirmar não apagar nada além disso
 let sel = new Set<string>(), visible: string[] = [], bulkBusy: Action | '' = '', bulkHtml = '', armedIds: string[] = [],
-    lastSel = 'Nenhum container selecionado';
+    lastSel = t`Nenhum container selecionado`;
 const CHECK = 'size-4 max-lg:size-6 shrink-0 accent-accent cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent';
 
 let toastFn: (() => unknown) | null = null;
@@ -89,7 +93,7 @@ function toast(msg: string, ok = false, action: ToastAction | null = null) {
     ? 'ring-ok/50 text-ok-soft'
     : 'ring-bad/50 text-bad-soft'}"><span>${REMOTE ? `<span class="font-semibold text-warn-fg">${esc(CTX)}</span> · ` : ''}${esc(msg)}</span>${action ? `<button onclick="runToastAction()"
       class="shrink-0 font-medium underline underline-offset-4 hover:text-fg-strong focus-visible:outline-2 focus-visible:outline-accent rounded">${esc(action[0])}</button>
-      <kbd class="shrink-0 font-mono text-xs px-1 rounded ring-1 ring-current opacity-70" title="Atalho">Z</kbd>` : ''}</div>`;
+      <kbd class="shrink-0 font-mono text-xs px-1 rounded ring-1 ring-current opacity-70" title="${t`Atalho`}">Z</kbd>` : ''}</div>`;
   // com o modal aberto o toast ficaria atrás do backdrop; mostra dentro dele
   ($<HTMLDialogElement>('#dlg').open ? $('#dlg-msg') : $('#toast')).innerHTML = html;
   clearTimeout(toastTimer);
@@ -112,21 +116,22 @@ function showProblem(p: Problem | null) {
   $('#table').inert = $('#bulk').inert = !!p;  // dados velhos não aceitam clique
   if (p) $('#banner').innerHTML = `<p class="font-medium text-warn-strong">${p[0]}</p>
     <p class="mt-0.5 text-warn-soft">${p[1]}</p>
-    <details class="mt-2 text-xs text-warn-soft"><summary class="cursor-pointer w-fit py-1 max-lg:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent">Detalhes técnicos</summary>
+    <details class="mt-2 text-xs text-warn-soft"><summary class="cursor-pointer w-fit py-1 max-lg:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent">${t`Detalhes técnicos`}</summary>
     <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono">${esc(p[2])}</pre></details>`;
   renderCount();
   if (!lastOk) render();
 }
 
+const code = (s: string) => `<code class="font-mono">${s}</code>`;
 async function load() {
   lastLoad = Date.now();
   try {
     const r = await api('/api/containers'), j: unknown = await r.json();
-    if (r.status === 401) return showProblem(['Esta aba não tem o token do Docker GUI.',
-      'Abra o link com <code class="font-mono">#t=…</code> que aparece no terminal onde você rodou <code class="font-mono">python3 docker_gui.py</code>. O token muda a cada execução.', j, 'auth']);
+    if (r.status === 401) return showProblem([t`Esta aba não tem o token do Docker GUI.`,
+      t`Abra o link com ${code('#t=…')} que aparece no terminal onde você rodou ${code('python3 docker_gui.py')}. O token muda a cada execução.`, j, 'auth']);
     if (!r.ok) return showProblem(/permission denied/i.test(String(j))
-      ? ['Seu usuário não tem acesso ao Docker.', 'Rode <code class="font-mono">sudo usermod -aG docker $USER</code> e entre de novo na sessão.', j, 'perm']
-      : ['Não consegui falar com o Docker.', 'O daemon está rodando? Verifique com <code class="font-mono">systemctl status docker</code>.', j, 'docker']);
+      ? [t`Seu usuário não tem acesso ao Docker.`, t`Rode ${code('sudo usermod -aG docker $USER')} e entre de novo na sessão.`, j, 'perm']
+      : [t`Não consegui falar com o Docker.`, t`O daemon está rodando? Verifique com ${code('systemctl status docker')}.`, j, 'docker']);
     const first = !lastOk;
     lastOk = new Date();
     // só redesenha se mudou (ou na 1ª carga, senão a lista vazia nunca aparece)
@@ -140,8 +145,8 @@ async function load() {
     seen = new Set(data.filter(isProblem).map(c => c.ID));
     showProblem(null);
   } catch (e) {
-    showProblem([lastOk ? 'O servidor do Docker GUI parou de responder.' : 'Não consegui conectar ao servidor do Docker GUI.',
-      'Rode <code class="font-mono">python3 docker_gui.py</code> de novo; a página volta sozinha.', (e as Error).message, 'server']);
+    showProblem([lastOk ? t`O servidor do Docker GUI parou de responder.` : t`Não consegui conectar ao servidor do Docker GUI.`,
+      t`Rode ${code('python3 docker_gui.py')} de novo; a página volta sozinha.`, (e as Error).message, 'server']);
   }
 }
 
@@ -180,9 +185,9 @@ function connectEvents() {
 function closeEvents() { events?.close(); events = null; live = false; showLive(); }
 // no cabeçalho: a lista vem dos eventos do docker (muda na hora) ou do poll de 2 s (o docker events caiu ou não existe)
 function showLive() {
-  $('#live').innerHTML = live ? '<span aria-hidden="true" class="inline-block size-1.5 mr-1.5 align-middle rounded-full bg-ok"></span>ao vivo'
-    : '<span aria-hidden="true" class="inline-block size-1.5 mr-1.5 align-middle rounded-full ring-1 ring-dim"></span>a cada 2 s';
-  $('#live').title = live ? 'A lista muda assim que o docker avisa (docker events)' : 'Sem o docker events: a lista é relida a cada 2 s';
+  $('#live').innerHTML = live ? `<span aria-hidden="true" class="inline-block size-1.5 mr-1.5 align-middle rounded-full bg-ok"></span>${t`ao vivo`}`
+    : `<span aria-hidden="true" class="inline-block size-1.5 mr-1.5 align-middle rounded-full ring-1 ring-dim"></span>${t`a cada 2 s`}`;
+  $('#live').title = live ? t`A lista muda assim que o docker avisa (docker events)` : t`Sem o docker events: a lista é relida a cada 2 s`;
 }
 
 // notificação do sistema só por pedido explícito (botão no cabeçalho) e só para quem acabou de entrar na faixa
@@ -192,13 +197,13 @@ const notifying = () => 'Notification' in window && Notification.permission === 
 async function askNotify() {
   const ok = await Notification.requestPermission() === 'granted';
   $('#notify').hidden = !canAsk();
-  toast(ok ? 'Pronto: aviso quando um container entrar na faixa de atenção, mesmo com a aba em segundo plano.'
-           : 'Sem permissão para notificar. Dá para liberar nas configurações do site, no navegador.', ok);
+  toast(ok ? t`Pronto: aviso quando um container entrar na faixa de atenção, mesmo com a aba em segundo plano.`
+           : t`Sem permissão para notificar. Dá para liberar nas configurações do site, no navegador.`, ok);
 }
 function notify(cs: Container[]) {
   if (!cs.length || !notifying() || (!document.hidden && document.hasFocus())) return;
   try {
-    const n = new Notification(cs.length === 1 ? `${cs[0].Names} precisa de atenção` : `${cs.length} containers precisam de atenção`,
+    const n = new Notification(cs.length === 1 ? t`${cs[0].Names} precisa de atenção` : t`${cs.length} containers precisam de atenção`,
       {body: cs.length === 1 ? status(cs[0])[0] : cs.map(c => c.Names).join(', ')});
     n.onclick = () => { focus(); n.close(); };
   } catch { /* Chrome no Android só notifica via service worker; o favicon continua avisando */ }
@@ -242,7 +247,7 @@ async function statsLoop() { if (!document.hidden) await loadStats(); setTimeout
 const CPU_FMT = (n: number) => `${n.toFixed(2)}%`;
 function spark(h: Sample[], k: 'cpu' | 'mem', w = 48, ht = 14) {
   if (h.length < 2) return '';
-  const vs = h.map(s => s[k]), label = esc(trend(k === 'cpu' ? 'CPU' : 'Memória', vs, h.at(-1)!.t - h[0].t, k === 'cpu' ? CPU_FMT : fmtBytes));
+  const vs = h.map(s => s[k]), label = esc(trend(k === 'cpu' ? 'CPU' : t`Memória`, vs, h.at(-1)!.t - h[0].t, k === 'cpu' ? CPU_FMT : fmtBytes));
   return `<span role="img" data-spark="${k}" aria-label="${label}" title="${label}" class="inline-block align-middle -mt-0.5 mr-0.5"><svg aria-hidden="true"
     viewBox="0 0 ${w} ${ht}" width="${w}" height="${ht}" fill="none" stroke-linecap="round" stroke-linejoin="round">
     <polyline points="${sparkPoints(vs, w, ht, HISTORY, k === 'cpu' ? 10 : 0)}" stroke-width="1.5" class="stroke-accent"/></svg></span>`;
@@ -251,8 +256,8 @@ function spark(h: Sample[], k: 'cpu' | 'mem', w = 48, ht = 14) {
 // onde a página age (docker_gui.py, where()): "docker · producao". Remoto fica em âmbar, com o endereço para o leitor de
 // tela e no title; o contexto também vai para o título da aba, menos o default, que é o caso comum
 const WHERE = document.documentElement.dataset, REMOTE = 'remote' in WHERE, CTX = WHERE.where?.split(' · ')[1] ?? '';
-$('#where').innerHTML = WHERE.where ? `${esc(WHERE.where)}${REMOTE ? `<span class="sr-only">, daemon remoto em ${esc(WHERE.host!)}</span>` : ''}` : '';
-$('#where').title = WHERE.host ? `Daemon em ${WHERE.host}` : '';
+$('#where').innerHTML = WHERE.where ? `${esc(WHERE.where)}${REMOTE ? `<span class="sr-only">${t`, daemon remoto em ${esc(WHERE.host!)}`}</span>` : ''}` : '';
+$('#where').title = WHERE.host ? t`Daemon em ${WHERE.host}` : '';
 if (REMOTE) {
   $('#where').classList.replace('text-muted', 'text-warn-fg');
   $('#where').classList.replace('ring-line-strong', 'ring-warn/60');
@@ -263,19 +268,19 @@ const PORT_HOST = (() => { try { return REMOTE && new URL(WHERE.host!).hostname 
 // remoto: a faixa âmbar fica no topo o tempo todo, e o "só esta máquina" do Novo container passa a ser a de lá
 if (REMOTE) {
   $('#remote').hidden = false;
-  $('#remote').innerHTML = `Daemon remoto <strong class="font-semibold">${esc(CTX)}</strong> <span class="font-mono text-xs">(${esc(WHERE.host!)})</span>: tudo o que você fizer aqui vale lá.`;
-  $('#run-ports-hint').innerHTML = `portaDoHost:portaDoContainer, separadas por vírgula ou espaço. Ficam em <code class="font-mono">127.0.0.1</code> do daemon remoto ${esc(CTX)}: só aquela máquina acessa, não esta.`;
+  $('#remote').innerHTML = t`Daemon remoto ${`<strong class="font-semibold">${esc(CTX)}</strong>`} ${`<span class="font-mono text-xs">(${esc(WHERE.host!)})</span>`}: tudo o que você fizer aqui vale lá.`;
+  $('#run-ports-hint').innerHTML = t`portaDoHost:portaDoContainer, separadas por vírgula ou espaço. Ficam em ${code('127.0.0.1')} do daemon remoto ${esc(CTX)}: só aquela máquina acessa, não esta.`;
 }
 
 function renderCount() {
   const n = (k: Bucket) => data.filter(c => bucket(c) === k).length, running = data.filter(c => c.State === 'running').length;
   const problemTxt = problemKind ? PROBLEM_TXT[problemKind] : '';
   setIcon(problem ? '!' : n('problema') > 9 ? '9+' : String(n('problema') || ''));
-  document.title = !lastOk && !problem ? TITLE : !problem ? `${TITLE} · ${running} rodando${n('problema') ? ` · ${n('problema')} com problema` : ''}`
+  document.title = !lastOk && !problem ? TITLE : !problem ? `${TITLE} · ${t`${running} rodando`}${n('problema') ? ` · ${t`${n('problema')} com problema`}` : ''}`
     : `${TITLE} · ${problemTxt}`;
   if (problem) {
-    const t = lastOk?.toLocaleTimeString('pt-BR', {hour: '2-digit', minute: '2-digit'});
-    $('#count').textContent = lastOk ? `Desatualizado · dados de ${t}` : problemTxt[0].toUpperCase() + problemTxt.slice(1);
+    const at = lastOk?.toLocaleTimeString(LOCALE, {hour: '2-digit', minute: '2-digit'});
+    $('#count').textContent = lastOk ? t`Desatualizado · dados de ${at}` : problemTxt[0].toUpperCase() + problemTxt.slice(1);
     return;
   }
   const pill = 'shrink-0 whitespace-nowrap rounded px-2 py-0.5 max-lg:py-3 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent';
@@ -284,8 +289,8 @@ function renderCount() {
     `<button data-id="count-${k}" data-a="filter" aria-pressed="${only === k}" onclick="filterBy('${k}')"
       class="${pill} rounded-none font-mono text-data hover:bg-hover aria-pressed:bg-fg-strong aria-pressed:text-canvas ${color}"><span class="font-semibold tabular-nums">${n(k)}</span> ${n(k) === 1 ? one : many}</button>`).join('');
   $('#count').innerHTML = (segs ? `<span class="flex max-lg:max-w-full max-lg:overflow-x-auto [scrollbar-width:none] rounded ring-1 ring-line divide-x divide-line">${segs}</span>`
-    : '<span>0 containers</span>') + (only || $<HTMLInputElement>('#q').value.trim()
-    ? `<button data-id="count-clear" data-a="filter" onclick="clearFilters()" class="${pill} text-accent-fg underline underline-offset-4 hover:text-accent-soft">Limpar filtros</button>` : '');
+    : `<span>${t`0 containers`}</span>`) + (only || $<HTMLInputElement>('#q').value.trim()
+    ? `<button data-id="count-clear" data-a="filter" onclick="clearFilters()" class="${pill} text-accent-fg underline underline-offset-4 hover:text-accent-soft">${t`Limpar filtros`}</button>` : '');
 }
 
 function filterBy(k: Bucket) { only = only === k ? '' : k; render(); }
@@ -341,7 +346,7 @@ function tabKey(e: KeyboardEvent) {
 
 function copyAddr(h: string) {
   const a = `${PORT_HOST}:${h}`;
-  navigator.clipboard.writeText(a).then(() => toast(`Copiado: ${a}`, true), () => toast('Não consegui copiar.'));
+  navigator.clipboard.writeText(a).then(() => toast(t`Copiado: ${a}`, true), () => toast(t`Não consegui copiar.`));
 }
 
 // no daemon remoto, a porta abre daqui só pelo host dele e só se o bind não for o loopback de lá (127.0.0.1, ::1):
@@ -356,14 +361,14 @@ function portChip(c: Container, [h, p, proto]: Port) {
   // texto mono, como o PORTS do docker ps: o link sublinha no hover, e o padding vira alvo de toque no celular
   const base = 'whitespace-nowrap font-mono text-xs px-1 py-0.5 max-lg:px-2 max-lg:py-3.5 rounded underline-offset-4 focus-visible:outline-2 focus-visible:outline-accent';
   // faixa longa: não há um endereço para abrir ou copiar, então o chip só informa
-  if (!reachable(c, h)) return `<span title="Só no loopback do daemon remoto ${esc(CTX)}: não abre daqui"
+  if (!reachable(c, h)) return `<span title="${t`Só no loopback do daemon remoto ${esc(CTX)}: não abre daqui`}"
     class="${base} text-muted">${label}</span>`;
-  if (h.includes('-')) return `<span title="Faixa de portas: ${h} do host → ${p} do container"
+  if (h.includes('-')) return `<span title="${t`Faixa de portas: ${h} do host → ${p} do container`}"
     class="${base} text-muted">${label}</span>`;
   return c.State === 'running' && proto === 'tcp' && !NOT_HTTP.has(+p)
-    ? `<a href="http://${PORT_HOST}:${h}" target="_blank" rel="noopener" aria-label="Abrir ${PORT_HOST}:${h} em nova aba (porta ${p} do container)"
-        title="Abrir no navegador" class="${base} text-accent-fg hover:underline hover:bg-accent/10">${label}<svg ${svg}><path d="M6 3h7v7M13 3 4 12"/></svg></a>`
-    : `<button onclick="copyAddr('${h}')" aria-label="Copiar ${PORT_HOST}:${h} (porta ${p}/${proto} do container)" title="Copiar ${PORT_HOST}:${h}"
+    ? `<a href="http://${PORT_HOST}:${h}" target="_blank" rel="noopener" aria-label="${t`Abrir ${PORT_HOST}:${h} em nova aba (porta ${p} do container)`}"
+        title="${t`Abrir no navegador`}" class="${base} text-accent-fg hover:underline hover:bg-accent/10">${label}<svg ${svg}><path d="M6 3h7v7M13 3 4 12"/></svg></a>`
+    : `<button onclick="copyAddr('${h}')" aria-label="${t`Copiar ${PORT_HOST}:${h} (porta ${p}/${proto} do container)`}" title="${t`Copiar ${PORT_HOST}:${h}`}"
         class="${base} text-fg-soft hover:text-fg-strong hover:underline hover:bg-hover">${label}<svg ${svg}><rect x="5.5" y="5.5" width="7.5" height="7.5" rx="1.5"/><path d="M3 10.5V4a1 1 0 0 1 1-1h6.5"/></svg></button>`;
 }
 
@@ -372,7 +377,7 @@ function errHtml(c: Container) {
   const e = errors.get(c.ID);
   if (!e) return '';
   if (e.state !== c.State) { errors.delete(c.ID); return ''; }
-  return `<details data-keep="err" class="mt-1 text-xs text-bad-fg"><summary class="cursor-pointer w-fit py-1 max-lg:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent">Falhou ao ${e.what.toLowerCase()} · ver erro</summary>
+  return `<details data-keep="err" class="mt-1 text-xs text-bad-fg"><summary class="cursor-pointer w-fit py-1 max-lg:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent">${t`Falhou ao ${e.what.toLowerCase()} · ver erro`}</summary>
     <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-bad-soft">${esc(e.msg)}</pre></details>`;
 }
 
@@ -384,9 +389,9 @@ async function loadHealth(id: string) {
   let txt: string;
   try {
     const r = await api('/api/health/' + id), h: unknown = await r.json(), last = r.ok ? (h as Health)?.Log?.at(-1) : undefined;
-    txt = !r.ok ? `Não consegui ler o healthcheck: ${h}`
-        : last ? `código ${last.ExitCode} · ${last.Output.trim() || '(sem saída)'}` : 'Nenhum probe rodou ainda.';
-  } catch { txt = 'Não consegui ler o healthcheck.'; }
+    txt = !r.ok ? t`Não consegui ler o healthcheck: ${h}`
+        : last ? t`código ${last.ExitCode} · ${last.Output.trim() || t`(sem saída)`}` : t`Nenhum probe rodou ainda.`;
+  } catch { txt = t`Não consegui ler o healthcheck.`; }
   health[id + c.Status] = txt;
   render();
 }
@@ -426,12 +431,12 @@ const RESTART_ICON = '<svg aria-hidden="true" viewBox="0 0 16 16" fill="none" st
 const X_ICON = '<svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="size-4"><path d="M4 4l8 8M12 4l-8 8"/></svg>';
 // todo estado armado tem o × ao lado do Confirmar (no toque não há Esc, e esperar 8 s não é saída) e o mesmo aviso,
 // que começa pelo contexto quando o daemon é remoto: a confirmação diz onde vai apagar
-const cancelBtn = (id: string, what: string) => `<button data-id="${id}" data-a="cancel" aria-label="Cancelar ${what}" title="Cancelar (Esc)"
+const cancelBtn = (id: string, what: string) => `<button data-id="${id}" data-a="cancel" aria-label="${t`Cancelar ${what}`}" title="${t`Cancelar (Esc)`}"
   onclick="disarm()" class="grid place-items-center shrink-0 lg:w-9 max-lg:w-11 ${BTN} text-fg hover:bg-hover">${X_ICON}</button>`;
 const armNote = (text: string, cls = 'w-full [contain:inline-size] lg:text-right text-balance') => `<p aria-hidden="true" class="${cls} text-xs text-bad-soft">${
-  REMOTE ? `<span class="font-semibold text-warn-fg">${esc(CTX)}</span> · ` : ''}${text} ${TOUCH ? 'Cancela sozinho em 8 s.' : 'Esc cancela.'}</p>`;
+  REMOTE ? `<span class="font-semibold text-warn-fg">${esc(CTX)}</span> · ` : ''}${text} ${TOUCH ? t`Cancela sozinho em 8 s.` : t`Esc cancela.`}</p>`;
 function rowHtml(c: Container, withProject: boolean) {
-  const b = busy.get(c.ID), t = TONE[b ? 'busy' : tone(c)], st = status(c), pp = ports(c.Ports), p = project(c);
+  const b = busy.get(c.ID), tn = TONE[b ? 'busy' : tone(c)], st = status(c), pp = ports(c.Ports), p = project(c), bt = b && busyText(c, b);
   const armed = arming?.id === c.ID, prim = PRIMARY[c.State], sec = SECONDARY[c.State];
   const u = c.State === 'running' && !b && stats[sid(c.ID)] ? usage(stats[sid(c.ID)]) : null, h = series.get(sid(c.ID)) ?? [];
   const slot = (w = 'lg:w-20') => `<span aria-hidden="true" class="${w} shrink-0 max-lg:hidden"></span>`;
@@ -441,43 +446,44 @@ function rowHtml(c: Container, withProject: boolean) {
   // ações raras (reiniciar, pausar, remover, exec) ficam no "⋯": a linha mostra só a ação principal e Logs
   const svc = p && workingDir(c) && service(c);  // compose restart só com a pasta no label, como o compose up
   // Reiniciar (o ciclo de quem desenvolve: muda, reinicia, olha os logs) fica à vista, em ícone para caber; sai do "⋯"
-  const restart = c.State === 'running' ? `<button data-id="${c.ID}" data-a="restart" ${b ? 'aria-disabled="true"' : ''} aria-label="Reiniciar ${esc(c.Names)}"
-      aria-describedby="st-${c.ID}" title="Reiniciar (r)" onclick="act('restart','${c.ID}')"
+  const restart = c.State === 'running' ? `<button data-id="${c.ID}" data-a="restart" ${b ? 'aria-disabled="true"' : ''} aria-label="${t`Reiniciar ${esc(c.Names)}`}"
+      aria-describedby="st-${c.ID}" title="${t`Reiniciar (r)`}" onclick="act('restart','${c.ID}')"
       class="grid place-items-center shrink-0 lg:w-9 max-lg:w-11 ${BTN} text-fg hover:bg-hover">${RESTART_ICON}</button>` : slot('lg:w-9');
-  const more = [sec && sec !== 'restart' && [sec, LABEL[sec]], svc && ['srestart', `Reiniciar serviço ${esc(svc)}`], c.State === 'running' && ['pause', 'Pausar'],
-                c.State === 'running' && ['shell', 'Abrir terminal'], c.State === 'running' && ['exec', 'Copiar docker exec'],
-                removable(c) ? ['remove', 'Remover…'] : ['noremove', 'Pare antes de remover']].filter((x): x is [MenuAction, string] => !!x);
-  const menu = !more.length ? slot('lg:w-9') : menuBox(c.ID, `Mais ações para ${esc(c.Names)}`, !!b,
-    more.map(([a, text]) => a === 'noremove' ? `<button data-id="${c.ID}" data-a="m-noremove" aria-disabled="true" aria-label="Remover (indisponível: pare o container antes)" title="O docker só remove container parado (sem -f)"
-      class="${MENU_ITEM} text-muted cursor-not-allowed hover:bg-transparent">${text}</button>` : `<button data-id="${c.ID}" data-a="m-${a}" ${b || (a === 'srestart' && composing.has(p)) ? 'aria-disabled="true"' : ''} onclick="menuPick(this); ${a === 'exec' ? `copyExec('${c.ID}')` : a === 'shell' ? `openShell('${c.ID}')`
-      : a === 'srestart' ? `restartService('${c.ID}')` : `act('${a}','${c.ID}')`}"
+  const more = [sec && sec !== 'restart' && [sec, LABEL[sec]], svc && ['srestart', t`Reiniciar serviço ${esc(svc)}`],
+                svc && ['sbuild', t`Reconstruir serviço ${esc(svc)}`], c.State === 'running' && ['pause', t`Pausar`],
+                c.State === 'running' && ['shell', t`Abrir terminal`], c.State === 'running' && ['exec', t`Copiar docker exec`],
+                removable(c) ? ['remove', t`Remover…`] : ['noremove', t`Pare antes de remover`]].filter((x): x is [MenuAction, string] => !!x);
+  const menu = !more.length ? slot('lg:w-9') : menuBox(c.ID, t`Mais ações para ${esc(c.Names)}`, !!b,
+    more.map(([a, text]) => a === 'noremove' ? `<button data-id="${c.ID}" data-a="m-noremove" aria-disabled="true" aria-label="${t`Remover (indisponível: pare o container antes)`}" title="${t`O docker só remove container parado (sem -f)`}"
+      class="${MENU_ITEM} text-muted cursor-not-allowed hover:bg-transparent">${text}</button>` : `<button data-id="${c.ID}" data-a="m-${a}" ${b || ((a === 'srestart' || a === 'sbuild') && composing.has(p)) ? 'aria-disabled="true"' : ''} onclick="menuPick(this); ${a === 'exec' ? `copyExec('${c.ID}')` : a === 'shell' ? `openShell('${c.ID}')`
+      : a === 'srestart' || a === 'sbuild' ? `serviceAct('${a.slice(1)}','${c.ID}')` : `act('${a}','${c.ID}')`}"
       class="${MENU_ITEM} ${a === 'remove' ? 'text-bad-fg' : 'text-fg'}">${text}</button>`).join(''));
   const healthBox = hasHealth(c) && !b ? `<details data-keep="health" class="mt-1 text-xs" ontoggle="this.open && loadHealth('${c.ID}')">
-      <summary class="cursor-pointer w-fit py-1 max-lg:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent text-muted hover:text-fg">Ver último healthcheck</summary>
-      <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-fg-soft">${esc(health[c.ID + c.Status] || 'Carregando…')}</pre></details>` : '';
+      <summary class="cursor-pointer w-fit py-1 max-lg:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent text-muted hover:text-fg">${t`Ver último healthcheck`}</summary>
+      <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-fg-soft">${esc(health[c.ID + c.Status] || t`Carregando…`)}</pre></details>` : '';
   // no card do celular, imagem, status e portas recuam até o nome (pl-14 = checkbox + bolinha + os gaps)
   const on = sel.has(c.ID);
   return `<tr data-row data-key="c:${c.ID}" role="row" class="border-t border-line/70 ${on ? 'bg-accent/10' : 'hover:bg-raised/70'} transition motion-reduce:transition-none max-lg:block max-lg:px-4 max-lg:py-4 max-lg:space-y-1.5">
     <th role="rowheader" scope="row" class="py-3 pl-4 pr-6 max-lg:block max-lg:p-0 text-left font-normal"><div class="flex items-center gap-3">
-      <input type="checkbox" data-id="${c.ID}" data-a="sel" ${on ? 'checked' : ''} aria-label="Selecionar ${esc(c.Names)}" onchange="toggleSel('${c.ID}')" class="${CHECK}">
-      <span aria-hidden="true" class="size-2 shrink-0 rounded-full ${t[0]}"></span>
+      <input type="checkbox" data-id="${c.ID}" data-a="sel" ${on ? 'checked' : ''} aria-label="${t`Selecionar ${esc(c.Names)}`}" onchange="toggleSel('${c.ID}')" class="${CHECK}">
+      <span aria-hidden="true" class="size-2 shrink-0 rounded-full ${tn[0]}"></span>
       <div class="min-w-0"><div class="font-mono text-data font-semibold text-fg-strong lg:truncate lg:max-w-[28ch]" title="${esc(c.Names)} · ${c.ID.slice(0, 12)}">${esc(c.Names)}</div>${
            withProject && p ? `<div class="font-mono text-xs text-muted">${esc(p)}</div>` : ''}</div></div></th>
     <td role="cell" class="font-mono text-xs text-muted pr-4 max-lg:block max-lg:p-0 max-lg:pl-14 [overflow-wrap:anywhere]">
-      <span class="sr-only lg:hidden">Imagem: </span><div class="lg:truncate lg:max-w-[24ch] lg:[direction:rtl] lg:text-left" title="${esc(c.Image)}"><bdi dir="ltr">${esc(shortImage(c.Image))}</bdi></div></td>
+      <span class="sr-only lg:hidden">${t`Imagem:`} </span><div class="lg:truncate lg:max-w-[24ch] lg:[direction:rtl] lg:text-left" title="${esc(c.Image)}"><bdi dir="ltr">${esc(shortImage(c.Image))}</bdi></div></td>
     <td role="cell" class="font-mono text-data pr-4 lg:min-w-[24ch] max-lg:block max-lg:p-0 max-lg:pl-14" title="${esc(c.Status)}">
-      <span id="st-${c.ID}" class="${t[1]}">${b ? VERB[b] : esc(st[0])}${st[1] && !b ? `<span class="block text-xs text-muted">${st[1]}</span>` : ''}</span>${
+      <span id="st-${c.ID}" class="${tn[1]}">${bt || esc(st[0])}${st[1] && !b ? `<span class="block text-xs text-muted">${st[1]}</span>` : ''}</span>${
       // [contain:inline-size]: a linha do log ocupa a largura que a coluna já tem, sem alargá-la (a tabela estourava)
-      fell(c) && !b && tails[tailKey(c)] ? `<span class="block [contain:inline-size] mt-1 font-mono text-xs text-fg-soft lg:truncate [overflow-wrap:anywhere]" title="${esc(tails[tailKey(c)])}"><span aria-hidden="true" class="text-dim">› </span><span class="sr-only">Última linha do log: </span>${esc(tails[tailKey(c)])}</span>` : ''}${
+      fell(c) && !b && tails[tailKey(c)] ? `<span class="block [contain:inline-size] mt-1 font-mono text-xs text-fg-soft lg:truncate [overflow-wrap:anywhere]" title="${esc(tails[tailKey(c)])}"><span aria-hidden="true" class="text-dim">› </span><span class="sr-only">${t`Última linha do log:`} </span>${esc(tails[tailKey(c)])}</span>` : ''}${
       u ? `<span id="us-${c.ID}" class="block text-xs font-mono text-muted" title="${esc(u[2])}"><span class="whitespace-nowrap">${esc(u[0])} ${spark(h, 'cpu')}</span> <span class="whitespace-nowrap max-xl:block"><span class="max-xl:hidden">· </span>${esc(u[1])} ${spark(h, 'mem')}</span></span>` : ''}${b ? '' : errHtml(c) + healthBox}</td>
     <td role="cell" class="pr-4 max-lg:hidden max-lg:has-[div]:block max-lg:p-0 max-lg:pl-14">${pp.length
       ? `<div class="flex flex-wrap gap-1 max-lg:gap-x-2 max-lg:-ml-2 max-lg:-my-3">${pp.map(x => portChip(c, x)).join('')}</div>` : ''}</td>
     <td role="cell" class="pr-4 max-lg:block max-lg:p-0 max-lg:pt-2"><div class="flex justify-end max-lg:justify-start items-center gap-1.5 max-lg:gap-2">
       ${prim ? btn(prim, prim === 'start' ? 'text-ok-fg hover:bg-ok/10' : undefined) : slot()}${restart}${btn('logs', 'text-fg-soft hover:text-fg-strong hover:bg-hover', undefined, undefined, ghost())}
-      ${armed ? menuBox(c.ID, `Mais ações para ${esc(c.Names)}`, true, '') : menu}
+      ${armed ? menuBox(c.ID, t`Mais ações para ${esc(c.Names)}`, true, '') : menu}
     </div>${armed ? `<div class="mt-1.5 flex flex-wrap items-center justify-end max-lg:justify-start gap-x-1.5 gap-y-1 [contain:inline-size]">${
-      armNote(`Remover ${esc(c.Names)} de vez? Os volumes ficam.`, 'basis-full lg:text-right text-balance')}${
-      btn('remove', 'bg-danger text-white ring-danger hover:bg-danger-hover', 'Remover', `Confirmar remoção de ${esc(c.Names)}`)}${cancelBtn(c.ID, `remoção de ${esc(c.Names)}`)}</div>` : ''}</td></tr>`;
+      armNote(t`Remover ${esc(c.Names)} de vez? Os volumes ficam.`, 'basis-full lg:text-right text-balance')}${
+      btn('remove', 'bg-danger text-white ring-danger hover:bg-danger-hover', t`Remover`, t`Confirmar remoção de ${esc(c.Names)}`)}${cancelBtn(c.ID, t`remoção de ${esc(c.Names)}`)}</div>` : ''}</td></tr>`;
 }
 
 // "⋯" das ações raras, de um container ou de um projeto: o id e o aria-label dizem de quem é
@@ -518,7 +524,7 @@ function closeMenus(except?: Element | null) {
 document.addEventListener('click', e => closeMenus(e.target instanceof Element ? e.target.closest('details[data-keep="menu"]') : null));
 
 const bandHead = (text: string, cls: string) => `<tr data-key="h:attn" role="row" class="max-lg:block"><th role="columnheader" colspan="5" scope="colgroup"
-  class="max-lg:block px-4 pt-4 pb-2 text-left font-mono text-xs font-semibold uppercase border-t border-line ${cls}">${text}<span class="ml-3 font-sans font-normal normal-case text-bad-soft/80">healthcheck falhando, loop de reinício ou saída com erro</span></th></tr>`;
+  class="max-lg:block px-4 pt-4 pb-2 text-left font-mono text-xs font-semibold uppercase border-t border-line ${cls}">${text}<span class="ml-3 font-sans font-normal normal-case text-bad-soft/80">${t`healthcheck falhando, loop de reinício ou saída com erro`}</span></th></tr>`;
 
 // cabeçalho do projeto compose: contagem e ações para o stack inteiro (sempre sobre todos os containers do projeto).
 // Como na linha: uma ação principal (Iniciar tudo se algo está parado, senão Parar tudo), Logs e o resto no "⋯"
@@ -530,12 +536,12 @@ function groupHead(k: string, label: string) {
   // com um container só, o botão diz qual: "Iniciar worker" em vez de "Iniciar tudo (1)"
   const sbtn = (a: Action, text: string, cls: string) => {
     const list = stackList(a, k), n = list.length, one = n === 1 ? `${LABEL[a]} ${esc(list[0].Names)}` : '', label = one || `${text} (${n})`;
-    return k && n ? `<button data-id="stack-${ek}" data-a="${a === prim ? a : `m-${a}`}" data-p="${ek}" ${off} aria-label="${one ? `${one} do projeto ${ek}` : `${text} do projeto ${ek} (${n})`}"
+    return k && n ? `<button data-id="stack-${ek}" data-a="${a === prim ? a : `m-${a}`}" data-p="${ek}" ${off} aria-label="${one ? t`${one} do projeto ${ek}` : t`${text} do projeto ${ek} (${n})`}"
       title="${esc(list.map(c => c.Names).join(', '))}" onclick="${a === prim ? '' : 'menuPick(this); '}stackAct('${a}', this.dataset.p)" class="${cls}">${label}</button>` : '';
   };
   // compose up/pull/down e logs do projeto: só com o working_dir no label (o servidor precisa dele para achar o projeto)
   const cbtn = (a: ComposeAction, text: string, cls = MENU_ITEM + ' text-fg') =>
-    `<button data-id="stack-${ek}" data-a="m-${a}" data-p="${ek}" ${off} aria-label="${text.replace('…', '')} do projeto ${ek}"
+    `<button data-id="stack-${ek}" data-a="m-${a}" data-p="${ek}" ${off} aria-label="${t`${text.replace('…', '')} do projeto ${ek}`}"
       onclick="menuPick(this); composeAct('${a}', this.dataset.p)" class="${cls}">${composing.get(k) === a ? COMPOSE_VERB[a] : text}</button>`;
   // grupos do menu, separados por um traço: Reiniciar/Parar ou Iniciar, os comandos do compose e, por último, o down
   const groups = [STACK.filter(([a]) => a !== prim).map(([a, text]) => sbtn(a, text, MENU_ITEM + ' text-fg')).join(''),
@@ -548,15 +554,15 @@ function groupHead(k: string, label: string) {
   return `<tr data-key="g:${ek}" role="row" class="max-lg:block"><th role="columnheader" colspan="5" scope="colgroup" class="max-lg:block px-4 pt-3 pb-2.5 text-left font-normal border-t border-line-strong bg-raised">
     <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
       <span class="font-mono text-data font-semibold ${k ? 'text-fg-strong' : 'text-muted'}">${label}</span>${strip}
-      ${k ? `<span class="font-mono text-xs ${verb ? 'text-fg-strong' : 'text-muted'}">compose · ${verb ? COMPOSE_VERB[verb] : `${on} de ${all.length} rodando`}</span>` : ''}
-      ${k && inBand ? `<span class="text-xs text-bad-fg">${inBand} na faixa de atenção, acima</span>` : ''}
-      <span class="lg:ml-auto max-lg:w-full flex flex-wrap items-center gap-1.5 max-lg:gap-2">${sbtn(prim, prim === 'start' ? 'Iniciar tudo' : 'Parar tudo',
+      ${k ? `<span class="font-mono text-xs ${verb ? 'text-fg-strong' : 'text-muted'}">compose · ${verb ? COMPOSE_VERB[verb] : t`${on} de ${all.length} rodando`}</span>` : ''}
+      ${k && inBand ? `<span class="text-xs text-bad-fg">${t`${inBand} na faixa de atenção, acima`}</span>` : ''}
+      <span class="lg:ml-auto max-lg:w-full flex flex-wrap items-center gap-1.5 max-lg:gap-2">${sbtn(prim, prim === 'start' ? t`Iniciar tudo` : t`Parar tudo`,
         `${BTN} ${prim === 'start' ? 'text-ok-fg hover:bg-ok/10' : 'text-fg hover:bg-hover'}`)}${dir
-        ? `<button data-id="stack-${ek}" data-a="plogs" data-p="${ek}" aria-label="Logs do projeto ${ek}" onclick="projectLogs(this.dataset.p)"
-            class="lg:w-20 ${ghost()} text-fg-soft hover:text-fg-strong hover:bg-hover">Logs</button>` : ''}${armed
-        ? `<button data-id="stack-${ek}" data-a="down" data-p="${ek}" aria-label="Confirmar compose down do projeto ${ek}" onclick="composeAct('down', this.dataset.p)"
-            class="${BTN} bg-danger text-white ring-danger hover:bg-danger-hover">Derrubar ${ek}</button>${cancelBtn(`stack-${ek}`, `compose down do projeto ${ek}`)}`
-        : groups.length ? menuBox(`stack-${ek}`, `Mais ações do projeto ${ek}`, anyBusy, groups.join('<hr class="my-1 border-line">')) : ''}</span>
+        ? `<button data-id="stack-${ek}" data-a="plogs" data-p="${ek}" aria-label="${t`Logs do projeto ${ek}`}" onclick="projectLogs(this.dataset.p)"
+            class="lg:w-20 ${ghost()} text-fg-soft hover:text-fg-strong hover:bg-hover">${t`Logs`}</button>` : ''}${armed
+        ? `<button data-id="stack-${ek}" data-a="down" data-p="${ek}" aria-label="${t`Confirmar compose down do projeto ${ek}`}" onclick="composeAct('down', this.dataset.p)"
+            class="${BTN} bg-danger text-white ring-danger hover:bg-danger-hover">${t`Derrubar ${ek}`}</button>${cancelBtn(`stack-${ek}`, t`compose down do projeto ${ek}`)}`
+        : groups.length ? menuBox(`stack-${ek}`, t`Mais ações do projeto ${ek}`, anyBusy, groups.join('<hr class="my-1 border-line">')) : ''}</span>
       
     </div></th></tr>`;
 }
@@ -577,17 +583,17 @@ function render() {
   const label = only ? BUCKETS.find(([k]) => k === only)![1] + ' ' : '';
   const f = (document.activeElement as HTMLElement | null)?.dataset;  // re-render não pode roubar o foco do teclado
   patchRows(rows.length
-    ? [...(attn.length ? [bandHead(`Precisa de atenção · ${attn.length}`, 'text-bad-fg bg-bad/10'), ...attn.map(c => row(c, true))] : []),
-       ...keys.flatMap(k => [...(heads ? [groupHead(k, k ? esc(k) : keys.length > 1 ? 'Sem projeto compose' : 'Demais containers')] : []),
+    ? [...(attn.length ? [bandHead(t`Precisa de atenção · ${attn.length}`, 'text-bad-fg bg-bad/10'), ...attn.map(c => row(c, true))] : []),
+       ...keys.flatMap(k => [...(heads ? [groupHead(k, k ? esc(k) : keys.length > 1 ? t`Sem projeto compose` : t`Demais containers`)] : []),
                              ...groups.get(k)!.map(c => row(c))])]
     : [`<tr data-key="empty" role="row" class="max-lg:block"><td role="cell" colspan="5" class="max-lg:block py-16 px-4 text-center text-muted">${
-      !lastOk ? (problem ? 'Sem dados ainda.' : 'Carregando…')  // nunca recebeu dados: não afirma que a lista está vazia
-      : !data.length ? 'Nenhum container ainda. Crie um em “Novo container” ou com <code class="font-mono">docker run</code>.'
-      : `Nenhum container ${label}${q ? `corresponde a “${esc(q)}”` : 'agora'}.`}</td></tr>`]);
+      !lastOk ? (problem ? t`Sem dados ainda.` : t`Carregando…`)  // nunca recebeu dados: não afirma que a lista está vazia
+      : !data.length ? t`Nenhum container ainda. Crie um em “Novo container” ou com ${code('docker run')}.`
+      : q ? t`Nenhum container ${label}corresponde a “${esc(q)}”.` : t`Nenhum container ${label}agora.`}</td></tr>`]);
   dirty = false;
   // o aviso do compose down fica preso no pé da tela: dentro da tabela, ou empurrava as linhas ou cobria uma delas
   const dk = arming?.a === 'down' ? arming.name : '';
-  const dock = dk ? armNote(`Derrubar ${esc(dk)}? ${esc(downNote(dk))}`, 'max-w-[80ch]') : '';
+  const dock = dk ? armNote(t`Derrubar ${esc(dk)}? ${esc(downNote(dk))}`, 'max-w-[80ch]') : '';
   if ($('#armdock').innerHTML !== dock) $('#armdock').innerHTML = dock;
   $('#armdock').classList.toggle('hidden', !dock);
   renderCount();
@@ -598,9 +604,9 @@ function render() {
   if (f?.id) refocus(f.id, f.a);
   saveHash();
   // só escreve na região viva quando a mensagem muda, para não apagar o anúncio de uma ação em andamento
-  const say = arming ? `${REMOTE ? `No daemon remoto ${CTX}: ` : ''}${arming.a === 'down' ? `Clique em Derrubar ${arming.name} para derrubar o projeto.`
-    : arming.a === 'prune' ? `Clique em Limpar para apagar ${arming.name}.` : `Clique em Remover para apagar ${arming.name} de vez.`} ${arming.note} ${TOUCH ? 'Cancela sozinho em 8 segundos.' : 'Esc cancela.'}`
-            : q || only ? `${rows.length} de ${data.length} containers` : '';
+  const say = arming ? `${REMOTE ? t`No daemon remoto ${CTX}: ` : ''}${arming.a === 'down' ? t`Clique em Derrubar ${arming.name} para derrubar o projeto.`
+    : arming.a === 'prune' ? t`Clique em Limpar para apagar ${arming.name}.` : t`Clique em Remover para apagar ${arming.name} de vez.`} ${arming.note} ${TOUCH ? t`Cancela sozinho em 8 segundos.` : t`Esc cancela.`}`
+            : q || only ? t`${rows.length} de ${data.length} containers` : '';
   if (say !== lastSay) $('#shown').textContent = lastSay = say;
 }
 
@@ -659,10 +665,10 @@ async function run(a: Action, c: Container): Promise<boolean> {
   try {
     const r = await api(`/api/${a}/${c.ID}`, {method: 'POST'});
     const msg: string = await r.json();
-    if (!r.ok) errors.set(c.ID, {msg: msg || 'erro sem mensagem', state: c.State, what: LABEL[a]});
+    if (!r.ok) errors.set(c.ID, {msg: msg || t`erro sem mensagem`, state: c.State, what: LABEL[a]});
     return r.ok;
   } catch {
-    errors.set(c.ID, {msg: 'Sem resposta do servidor do Docker GUI.', state: c.State, what: LABEL[a]});
+    errors.set(c.ID, {msg: t`Sem resposta do servidor do Docker GUI.`, state: c.State, what: LABEL[a]});
     return false;
   } finally { busy.delete(c.ID); render(); }
 }
@@ -673,24 +679,24 @@ async function act(a: RowAction, id: string) {
   if (arming?.id === id && a !== 'remove') return disarm();
   const c = data.find(c => c.ID === id);
   if (!c || busy.has(id)) return;
-  if (a === 'remove' && !confirmed(id, c.Names, 'remove', 'Os volumes não são afetados.')) return;
+  if (a === 'remove' && !confirmed(id, c.Names, 'remove', t`Os volumes não são afetados.`)) return;
   const trs = [...document.querySelectorAll<HTMLElement>('#rows tr[data-row]')], i = trs.findIndex(tr => tr.dataset.key === 'c:' + id);
   const near = (trs[i + 1] || trs[i - 1])?.dataset.key?.slice(2), since = new Date().toISOString();
   const done = run(a, c);
   $('#shown').textContent = `${VERB[a]} ${c.Names}`;
-  if (!(await done)) { toast(`Não deu para ${LABEL[a].toLowerCase()} ${c.Names}. O erro ficou na linha.`); return load(); }
+  if (!(await done)) { toast(t`Não deu para ${LABEL[a].toLowerCase()} ${c.Names}. O erro ficou na linha.`); return load(); }
   if (!UP.includes(a)) {
     // pausado parece "ligado" na lista; o desfazer evita esquecer o container congelado
     // e o Parar oferece Iniciar de novo, como no lote e no projeto (pausado que parou fica de fora: iniciar não devolve a pausa)
-    toast(`${c.Names} ${DONE[a]}.`, true, a === 'pause' ? ['Retomar', () => act('unpause', id)]
-      : a === 'stop' && c.State !== 'paused' ? ['Iniciar de novo', () => act('start', id)] : null);
+    toast(`${c.Names} ${DONE[a]}.`, true, a === 'pause' ? [t`Retomar`, () => act('unpause', id)]
+      : a === 'stop' && c.State !== 'paused' ? [t`Iniciar de novo`, () => act('start', id)] : null);
     await load();
     if (a === 'remove') (document.querySelector<HTMLElement>(`[data-id="${near}"][data-a="logs"]`) || $('#q')).focus();
     return;
   }
-  toast(`${c.Names} ${DONE[a]}, conferindo se ficou de pé…`, true);
+  toast(t`${c.Names} ${DONE[a]}, conferindo se ficou de pé…`, true);
   // com os logs dele abertos: liga o ao vivo (o anterior caiu quando o container parou) e marca onde o novo log começa
-  if ($<HTMLDialogElement>('#dlg').open && logId === id) { mark = {at: since, label: `${DONE[a]} às ${new Date().toLocaleTimeString('pt-BR')}`}; toggleFollow(true); }
+  if ($<HTMLDialogElement>('#dlg').open && logId === id) { mark = {at: since, label: t`${DONE[a]} às ${new Date().toLocaleTimeString(LOCALE)}`}; toggleFollow(true); }
   confirmUp([c.ID]);
 }
 
@@ -701,12 +707,12 @@ async function confirmUp(ids: string[]) {
   await load();
   const cs = ids.map(id => data.find(c => c.ID === id)).filter((c): c is Container => !!c);
   const fell = cs.filter(c => c.State !== 'running' || isProblem(c));
-  if (!fell.length) return toast(cs.length === 1 ? `${cs[0].Names} está de pé.` : `Os ${cs.length} containers estão de pé.`, true);
-  if (fell.length === 1) toast(`${fell[0].Names} subiu mas não ficou bem: ${status(fell[0])[0]}.`, false, ['Ver logs', () => logs(fell[0].ID)]);
-  else toast(`${fell.length} containers subiram mas não ficaram bem. Veja a faixa de atenção.`);
+  if (!fell.length) return toast(cs.length === 1 ? t`${cs[0].Names} está de pé.` : t`Os ${cs.length} containers estão de pé.`, true);
+  if (fell.length === 1) toast(t`${fell[0].Names} subiu mas não ficou bem: ${status(fell[0])[0]}.`, false, [t`Ver logs`, () => logs(fell[0].ID)]);
+  else toast(t`${fell.length} containers subiram mas não ficaram bem. Veja a faixa de atenção.`);
 }
 
-const STACK: [Action, string][] = [['start', 'Iniciar tudo'], ['restart', 'Reiniciar tudo'], ['stop', 'Parar tudo']];
+const STACK: [Action, string][] = [['start', t`Iniciar tudo`], ['restart', t`Reiniciar tudo`], ['stop', t`Parar tudo`]];
 // em quem a ação de lote faz sentido: Iniciar só nos parados, Reiniciar nos rodando, Remover só no que não está de pé
 const fits = (a: Action, c: Container) => a === 'start' ? PRIMARY[c.State] === 'start' : a === 'restart' ? c.State === 'running'
   : a === 'remove' ? removable(c) : STOPPABLE.includes(c.State);
@@ -715,7 +721,7 @@ const stackList = (a: Action, p: string, ids?: string[]) => data.filter(c => pro
 function copyExec(id: string) {
   // data-cli: binário e --context com que o servidor foi iniciado (ex.: "podman", "docker --context prod")
   const cmd = `${document.documentElement.dataset.cli} exec -it ${data.find(c => c.ID === id)!.Names} sh`;
-  navigator.clipboard.writeText(cmd).then(() => toast(`Copiado: ${cmd}`, true), () => toast(`Não consegui copiar. O comando é: ${cmd}`));
+  navigator.clipboard.writeText(cmd).then(() => toast(t`Copiado: ${cmd}`, true), () => toast(t`Não consegui copiar. O comando é: ${cmd}`));
 }
 
 // ids: limita a ação a containers específicos (usado pelo "Iniciar de novo" depois de um Parar tudo)
@@ -723,22 +729,22 @@ async function stackAct(a: Action, p: string, ids?: string[]) {
   const list = stackList(a, p, ids);
   if (!list.length || composing.has(p) || list.some(c => busy.has(c.ID))) return;
   const all = Promise.all(list.map(c => run(a, c)));
-  $('#shown').textContent = `${VERB[a]} ${list.length} containers de ${p}`;
+  $('#shown').textContent = t`${VERB[a]} ${list.length} containers de ${p}`;
   const res = await all, fails = res.filter(ok => !ok).length, okIds = list.filter((c, i) => res[i] && c.State !== 'paused').map(c => c.ID);
-  if (fails) toast(`${p}: ${fails} de ${list.length} ${fails === 1 ? 'falhou' : 'falharam'}. ${fails === 1 ? 'O erro ficou na linha' : 'Os erros ficaram nas linhas'}.`);
-  else if (a === 'stop') toast(`${p}: ${list.length} parados.`, true, okIds.length ? ['Iniciar de novo', () => stackAct('start', p, okIds)] : null);
-  else toast(`${p}: ${list.length} ${a === 'start' ? 'iniciados' : 'reiniciados'}, conferindo se ficaram de pé…`, true);
+  if (fails) toast(fails === 1 ? t`${p}: 1 de ${list.length} falhou. O erro ficou na linha.` : t`${p}: ${fails} de ${list.length} falharam. Os erros ficaram nas linhas.`);
+  else if (a === 'stop') toast(t`${p}: ${list.length} parados.`, true, okIds.length ? [t`Iniciar de novo`, () => stackAct('start', p, okIds)] : null);
+  else toast(a === 'start' ? t`${p}: ${list.length} iniciados, conferindo se ficaram de pé…` : t`${p}: ${list.length} reiniciados, conferindo se ficaram de pé…`, true);
   if (!fails && UP.includes(a)) return confirmUp(okIds);
   load();
 }
 
 // ---- seleção e ações em lote ----
-const BULK: [Action, string][] = [['start', 'Iniciar'], ['stop', 'Parar'], ['restart', 'Reiniciar'], ['remove', 'Remover…']];
+const BULK: [Action, string][] = [['start', t`Iniciar`], ['stop', t`Parar`], ['restart', t`Reiniciar`], ['remove', t`Remover…`]];
 const bulkList = (a: Action, ids: string[] = [...sel]) => data.filter(c => ids.includes(c.ID) && fits(a, c));
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 // "cron e velho", "a, b e c" ou "a, b, c e mais 4": a confirmação diz o que vai apagar, não só quantos
-const names = (cs: Container[], max = 3) => cs.length > max ? `${cs.slice(0, max).map(c => c.Names).join(', ')} e mais ${cs.length - max}`
-  : cs.map(c => c.Names).join(', ').replace(/, ([^,]*)$/, ' e $1');
+const names = (cs: Container[], max = 3) => cs.length > max ? t`${cs.slice(0, max).map(c => c.Names).join(', ')} e mais ${cs.length - max}`
+  : cs.map(c => c.Names).join(', ').replace(/, ([^,]*)$/, (_, last) => t` e ${last}`);
 
 // mudar a seleção desarma o Remover em lote: o número no Confirmar tem que ser o que vai ser apagado
 function changeSel(fn: () => void) {
@@ -757,23 +763,23 @@ function renderBulk() {
   all.indeterminate = mine > 0 && mine < visible.length;
   all.disabled = !visible.length;
   const n = sel.size, hidden = n - mine, armed = arming?.id === 'bulk';
-  const say = n ? `${plural(n, 'container selecionado', 'containers selecionados')}${hidden ? `, ${hidden} fora do filtro` : ''}`
-                : 'Nenhum container selecionado';
+  const say = n ? `${plural(n, t`container selecionado`, t`containers selecionados`)}${hidden ? t`, ${hidden} fora do filtro` : ''}`
+                : t`Nenhum container selecionado`;
   if (say !== lastSel) $('#sel-live').textContent = lastSel = say;  // só anuncia quando a contagem muda
   const btn = ([a, text]: [Action, string]) => {
     const k = armed && a === 'remove' ? armedIds.length : bulkList(a).length;
     if (!k || armed && a !== 'remove') return '';  // como no Parar tudo, só o que faz sentido; armado, só o Confirmar e o ×
     const cls = armed && a === 'remove' ? 'bg-danger text-white ring-danger hover:bg-danger-hover'
               : a === 'start' ? 'text-ok-fg hover:bg-ok/10' : a === 'remove' ? 'text-bad-fg hover:bg-bad/10' : 'text-fg hover:bg-hover';
-    const aria = armed && a === 'remove' ? `Confirmar remoção de ${plural(k, 'container', 'containers')}` : `${text.replace('…', '')} ${plural(k, 'selecionado', 'selecionados')}`;
+    const aria = armed && a === 'remove' ? t`Confirmar remoção de ${plural(k, 'container', 'containers')}` : `${text.replace('…', '')} ${plural(k, t`selecionado`, t`selecionados`)}`;
     return `<button data-id="bulk" data-a="${a}" ${bulkBusy ? 'aria-disabled="true"' : ''} aria-label="${aria}" title="${esc(bulkList(a, armed && a === 'remove' ? armedIds : undefined).map(c => c.Names).join(', '))}"
-      onclick="bulkAct('${a}')" class="${BTN} ${cls}">${bulkBusy === a ? `${VERB[a]} (${k})` : armed && a === 'remove' ? `Remover ${plural(k, 'container', 'containers')}` : `${text} (${k})`}</button>`;
+      onclick="bulkAct('${a}')" class="${BTN} ${cls}">${bulkBusy === a ? `${VERB[a]} (${k})` : armed && a === 'remove' ? t`Remover ${plural(k, 'container', 'containers')}` : `${text} (${k})`}</button>`;
   };
-  const html = !n ? '' : `<p class="mr-auto text-sm font-medium text-fg-strong">${plural(n, 'selecionado', 'selecionados')}${
-      hidden ? `<span class="font-normal text-muted"> · ${hidden} fora do filtro</span>` : ''}</p>
-    <div class="flex flex-wrap gap-1.5">${BULK.map(btn).join('')}${armed ? cancelBtn('bulk', 'remoção em lote') : ''}
-      ${armed ? '' : `<button data-id="bulk" data-a="clear" onclick="clearSel()" class="${BTN} text-muted hover:bg-hover">Limpar seleção</button>`}</div>
-    ${armed ? armNote(`Remover ${esc(names(data.filter(c => armedIds.includes(c.ID)), 10))} de vez? Os volumes ficam.`) : ''}`;
+  const html = !n ? '' : `<p class="mr-auto text-sm font-medium text-fg-strong">${plural(n, t`selecionado`, t`selecionados`)}${
+      hidden ? `<span class="font-normal text-muted"> · ${t`${hidden} fora do filtro`}</span>` : ''}</p>
+    <div class="flex flex-wrap gap-1.5">${BULK.map(btn).join('')}${armed ? cancelBtn('bulk', t`remoção em lote`) : ''}
+      ${armed ? '' : `<button data-id="bulk" data-a="clear" onclick="clearSel()" class="${BTN} text-muted hover:bg-hover">${t`Limpar seleção`}</button>`}</div>
+    ${armed ? armNote(t`Remover ${esc(names(data.filter(c => armedIds.includes(c.ID)), 10))} de vez? Os volumes ficam.`) : ''}`;
   $('#bulk').classList.toggle('hidden', !n);  // a altura dela vira --dock (ResizeObserver lá embaixo)
   if (html !== bulkHtml) $('#bulk').innerHTML = bulkHtml = html;  // o render roda a cada poll: só troca se mudou
 }
@@ -794,7 +800,7 @@ async function bulkAct(a: Action, ids?: string[]) {
   if (a === 'remove' && !ids) {
     if (arming?.id !== 'bulk') armedIds = bulkList('remove').map(c => c.ID);
     const k = armedIds.length, name = names(data.filter(c => armedIds.includes(c.ID)));
-    if (!k || !confirmed('bulk', name, 'remove', 'Os volumes não são afetados.')) return;
+    if (!k || !confirmed('bulk', name, 'remove', t`Os volumes não são afetados.`)) return;
     ids = armedIds;
   }
   const list = bulkList(a, ids).filter(c => !busy.has(c.ID));
@@ -808,13 +814,13 @@ async function bulkAct(a: Action, ids?: string[]) {
   const fails = list.filter((_, i) => !res[i]).map((c): [string, string] => [c.Names, errors.get(c.ID)?.msg || '']);
   const msg = bulkSummary(DONE[a], res.filter(Boolean).length, fails);
   if (!fails.length && UP.includes(a)) {
-    toast(`${msg.slice(0, -1)}, conferindo se ficaram de pé…`, true);
+    toast(t`${msg.slice(0, -1)}, conferindo se ficaram de pé…`, true);
     return confirmUp(okIds);
   }
   // o aviso só depois de reler a lista: o desfazer filtra pelo estado atual e, com os dados de antes, não acharia nada
   await load();
   // pausado que parou fica de fora do desfazer, como no Parar tudo: iniciar não devolveria a pausa
-  toast(msg, !fails.length, a === 'stop' && okIds.length ? ['Iniciar de novo', () => bulkAct('start', okIds)] : null);
+  toast(msg, !fails.length, a === 'stop' && okIds.length ? [t`Iniciar de novo`, () => bulkAct('start', okIds)] : null);
   if (a === 'remove' && (!document.activeElement || document.activeElement === document.body)) $('#q').focus();
 }
 
@@ -833,13 +839,13 @@ function confirmed(id: string, name: string, a: Arming['a'], note: string): bool
 }
 
 // docker compose up/up --build/pull/down no projeto inteiro (down pede confirmação: o projeto some da lista),
-// ou restart de um serviço (svc)
+// ou restart/build de um serviço (svc)
 async function composeAct(a: ComposeAction, p: string, svc = '') {
   const c = data.find(c => project(c) === p);
   if (!c || composing.has(p) || data.some(c => project(c) === p && busy.has(c.ID))) return;
   if (a === 'down' && !confirmed(`stack-${p}`, p, 'down', downNote(p))) return;
-  // no restart, as linhas do serviço (todas as réplicas) ficam "Reiniciando…" e depois passam pelo confirmUp
-  const ids = svc ? data.filter(c => project(c) === p && service(c) === svc).map(c => c.ID) : [];
+  // por serviço, as linhas dele (todas as réplicas) ficam ocupadas e depois passam pelo confirmUp
+  const mine = () => data.filter(c => project(c) === p && service(c) === svc).map(c => c.ID), ids = svc ? mine() : [];
   const what = `${COMPOSE_CMD[a]}${svc ? ` ${svc}` : ''}`;
   let ok = false;
   composing.set(p, a); ids.forEach(id => busy.set(id, 'restart')); render();
@@ -850,25 +856,31 @@ async function composeAct(a: ComposeAction, p: string, svc = '') {
     const msg: string = await r.json();
     ok = r.ok;
     // o compose escreve o progresso no stderr: no erro, a última linha é a que explica
-    toast(r.ok ? `${p}: ${what} concluído${ids.length ? ', conferindo se ficou de pé…' : '.'}`
-               : `${p}: ${what} falhou. ${msg.trim().split('\n').at(-1) || 'Erro sem mensagem.'}`, r.ok);
-  } catch { toast(`${p}: sem resposta do servidor do Docker GUI.`); }
+    toast(r.ok ? ids.length ? t`${p}: ${what} concluído, conferindo se ficou de pé…` : t`${p}: ${what} concluído.`
+               : t`${p}: ${what} falhou. ${msg.trim().split('\n').at(-1) || t`Erro sem mensagem.`}`, r.ok);
+  } catch { toast(t`${p}: sem resposta do servidor do Docker GUI.`); }
   composing.delete(p); ids.forEach(id => busy.delete(id)); render();
-  if (ok && ids.length) return confirmUp(ids);
   await load();
+  // o build recria o container quando a imagem mudou: o ID novo é o que tem que ficar de pé
+  const now = svc ? mine() : [];
+  if (ok && now.length) return confirmUp(now);
   if (a === 'down') $('#q').focus();
 }
 
 // o que o compose down leva, pelo nome (primeiro os da faixa de atenção: são os que você mais quer saber se vão junto). Depois dele o projeto some da lista (a pasta vinha dos labels dos containers),
 // então o up para voltar é pelo terminal
 const downNote = (p: string) =>
-  `Remove ${names(data.filter(c => project(c) === p).sort((a, b) => +isProblem(b) - +isProblem(a)), 10)} e as redes do projeto. Os volumes ficam; para subir de novo, use compose up no terminal.`;
+  t`Remove ${names(data.filter(c => project(c) === p).sort((a, b) => +isProblem(b) - +isProblem(a)), 10)} e as redes do projeto. Os volumes ficam; para subir de novo, use compose up no terminal.`;
 
-// "Reiniciar serviço" do menu "⋯": compose restart do serviço do container (o servidor confere o nome nos labels)
-function restartService(id: string) {
+// "Reiniciar serviço" e "Reconstruir serviço" do menu "⋯": compose restart ou up --build --no-deps do serviço do
+// container (o servidor confere o nome nos labels)
+function serviceAct(a: 'restart' | 'build', id: string) {
   const c = data.find(c => c.ID === id);
-  if (c) composeAct('restart', project(c), service(c));
+  if (c) composeAct(a, project(c), service(c));
 }
+
+// a linha ocupada diz o que está acontecendo: no build do serviço, "Reconstruindo…" (no busy fica o restart)
+const busyText = (c: Container, b: Action) => composing.get(project(c)) === 'build' ? COMPOSE_VERB.build : VERB[b];
 
 // desarma sozinho depois de 8s, mas nunca enquanto o mouse ou o foco estão no Confirmar ou no × (WCAG 2.2.1).
 // No toque não há hover e o foco fica parado no último botão tocado: lá vale o relógio, como o aviso promete
@@ -876,7 +888,7 @@ function armTick() {
   if (!arming) return;
   const els = [...document.querySelectorAll(`[data-id="${arming.id}"]:is([data-a="${arming.a}"], [data-a="cancel"])`)];
   if (!TOUCH && els.some(el => el.matches(':hover') || el === document.activeElement)) arming.timer = setTimeout(armTick, 1000);
-  else { disarm(); toast('Confirmação cancelada: passaram 8 s sem o segundo clique. Nada foi apagado.', true); }
+  else { disarm(); toast(t`Confirmação cancelada: passaram 8 s sem o segundo clique. Nada foi apagado.`, true); }
 }
 
 function disarm(redraw = true) {
@@ -928,17 +940,17 @@ function renderDlg() {
   if (logProject) {  // projeto inteiro: só a contagem; as ações ficam no cabeçalho do projeto
     const p = logProject.project, all = data.filter(c => project(c) === p), on = all.filter(c => c.State === 'running').length;
     $('#dlg-status').innerHTML = `<span class="text-muted">${all.length
-      ? `Projeto compose · ${on} de ${all.length} rodando · todos os serviços` : 'Este projeto não tem mais containers.'}</span>`;
+      ? t`Projeto compose · ${on} de ${all.length} rodando · todos os serviços` : t`Este projeto não tem mais containers.`}</span>`;
     $('#dlg-acts').innerHTML = '';
     return;
   }
   const c = data.find(c => c.ID === logId);
   if (!c) {
-    $('#dlg-status').innerHTML = '<span class="text-muted">Este container não existe mais.</span>';
+    $('#dlg-status').innerHTML = `<span class="text-muted">${t`Este container não existe mais.`}</span>`;
     $('#dlg-acts').innerHTML = '';
     return;
   }
-  const b = busy.get(c.ID), t = TONE[b ? 'busy' : tone(c)], st = status(c);
+  const b = busy.get(c.ID), tn = TONE[b ? 'busy' : tone(c)], st = status(c);
   const h = hasHealth(c) && health[c.ID + c.Status];
   if (hasHealth(c) && !h) loadHealth(c.ID);
   // uso de recursos com sparkline maior, e rede e disco, que não cabem na tabela
@@ -946,18 +958,18 @@ function renderDlg() {
   // uma linha para cada coisa: status, último healthcheck (inteiro no title) e uso, com rede e disco no fim (fora do celular)
   // depois de reiniciar daqui, o status diz quando foi: a marca no log só aparece se o container escrever algo novo
   const again = mark && c.State === 'running' && !b ? `<span class="text-muted"> · ${esc(mark.label)}</span>` : '';
-  $('#dlg-status').innerHTML = `<span class="${t[1]}">${b ? VERB[b] : esc(st[0])}</span>${st[1] && !b ? `<span class="text-muted"> · ${st[1]}</span>` : ''}${again}${b ? '' : errHtml(c)}${
-    h ? `<div class="mt-1 text-xs text-muted lg:truncate" title="${esc(h)}"><span class="font-sans">Último healthcheck:</span> <span class="text-fg-soft">${esc(h)}</span></div>` : ''}${
+  $('#dlg-status').innerHTML = `<span class="${tn[1]}">${b ? busyText(c, b) : esc(st[0])}</span>${st[1] && !b ? `<span class="text-muted"> · ${st[1]}</span>` : ''}${again}${b ? '' : errHtml(c)}${
+    h ? `<div class="mt-1 text-xs text-muted lg:truncate" title="${esc(h)}"><span class="font-sans">${t`Último healthcheck:`}</span> <span class="text-fg-soft">${esc(h)}</span></div>` : ''}${
     s && u ? `<div id="dlg-usage" class="mt-1 text-xs text-muted"><span class="whitespace-nowrap"><span class="text-fg-soft">${esc(u[0])}</span> ${spark(hs, 'cpu', 96, 20)}</span> <span class="whitespace-nowrap">· <span class="text-fg-soft">${esc(u[1])}</span> ${spark(hs, 'mem', 96, 20)}</span>${
-      io(s).length ? `<span class="max-lg:hidden text-fg-soft" title="Totais desde que o container subiu">${io(s).map(x => ` <span class="whitespace-nowrap">· ${esc(x)}</span>`).join('')}</span>` : ''}</div>` : ''}`;
+      io(s).length ? `<span class="max-lg:hidden text-fg-soft" title="${t`Totais desde que o container subiu`}">${io(s).map(x => ` <span class="whitespace-nowrap">· ${esc(x)}</span>`).join('')}</span>` : ''}</div>` : ''}`;
   // Reiniciar à vista e primeiro (é o ciclo: reiniciar e ver o log novo), depois a ação principal; o resto no "⋯"
   // (remover fica na lista, onde a confirmação aparece)
   const prim = PRIMARY[c.State], sec = SECONDARY[c.State];
-  const more = [sec && sec !== 'restart' && [sec, LABEL[sec]], c.State === 'running' && ['exec', 'Copiar docker exec']].filter((x): x is [string, string] => !!x);
-  $('#dlg-acts').innerHTML = (sec === 'restart' ? `<button data-id="dlg" data-a="restart" ${b ? 'aria-disabled="true"' : ''} aria-label="Reiniciar ${esc(c.Names)}" title="Reiniciar (r)"
-      onclick="act('restart', '${c.ID}')" class="inline-flex items-center gap-1.5 ${BTN} text-fg hover:bg-hover">${RESTART_ICON}Reiniciar</button>` : '') + (prim ? `<button data-id="dlg" data-a="${prim}" ${b ? 'aria-disabled="true"' : ''} aria-label="${LABEL[prim]} ${esc(c.Names)}" onclick="act('${prim}', '${c.ID}')"
+  const more = [sec && sec !== 'restart' && [sec, LABEL[sec]], c.State === 'running' && ['exec', t`Copiar docker exec`]].filter((x): x is [string, string] => !!x);
+  $('#dlg-acts').innerHTML = (sec === 'restart' ? `<button data-id="dlg" data-a="restart" ${b ? 'aria-disabled="true"' : ''} aria-label="${t`Reiniciar ${esc(c.Names)}`}" title="${t`Reiniciar (r)`}"
+      onclick="act('restart', '${c.ID}')" class="inline-flex items-center gap-1.5 ${BTN} text-fg hover:bg-hover">${RESTART_ICON}${t`Reiniciar`}</button>` : '') + (prim ? `<button data-id="dlg" data-a="${prim}" ${b ? 'aria-disabled="true"' : ''} aria-label="${LABEL[prim]} ${esc(c.Names)}" onclick="act('${prim}', '${c.ID}')"
       class="${BTN} ${prim === 'start' ? 'text-ok-fg hover:bg-ok/10' : 'text-fg hover:bg-hover'}">${LABEL[prim]}</button>` : '')
-    + (more.length ? menuBox('dlg', `Mais ações para ${esc(c.Names)} nos logs`, !!b, more.map(([a, text]) =>
+    + (more.length ? menuBox('dlg', t`Mais ações para ${esc(c.Names)} nos logs`, !!b, more.map(([a, text]) =>
       `<button data-id="dlg" data-a="m-${a}" ${b ? 'aria-disabled="true"' : ''} onclick="menuPick(this); ${a === 'exec' ? `copyExec('${c.ID}')` : `act('${a}', '${c.ID}')`}"
         class="${MENU_ITEM} text-fg">${text}</button>`).join('')) : '');
 }
@@ -971,11 +983,50 @@ const MARK = 'rounded-sm bg-accent/30 text-fg-strong';  // o acento é a seleç�
 // linhas carregadas (cada uma com o \n), que o filtro relê; ocorrências e linhas que casaram; tudo veio (log curto)
 let tailAt = 0, buf: string[] = [], hits = 0, hitLines = 0, complete = false, streamOpen = false;
 
-const fmt = (n: number) => n.toLocaleString('pt-BR');
+const fmt = (n: number) => n.toLocaleString(LOCALE);
+// janela dos logs (--since, no servidor: LOG_SINCE no docker_gui.py); '' = o log inteiro
+const SINCE_TXT: Record<string, string> = {start: t`desde que o container subiu`, '5m': t`dos últimos 5 min`, '15m': t`dos últimos 15 min`,
+                                           '1h': t`da última hora`, '24h': t`das últimas 24 h`};
+let since = '';
 // o compose aplica o --tail em cada container do projeto
-const hist = () => TAILS[tailAt] === 'all' ? 'todas as linhas'
-  : `últimas ${fmt(+TAILS[tailAt])} linhas${logProject ? ' de cada container' : ''}`;
+const hist = () => (TAILS[tailAt] === 'all' ? t`todas as linhas`
+  : logProject ? t`últimas ${fmt(+TAILS[tailAt])} linhas de cada container` : t`últimas ${fmt(+TAILS[tailAt])} linhas`) + (since ? ` ${SINCE_TXT[since]}` : '');
 const filterRe = () => logFilter($<HTMLInputElement>('#lf').value);
+// nível e serviço: filtram na página, como o texto. level 'warn' = avisos e erros; svcPick = serviço do compose
+let level = '', svcPick = '';
+const narrowed = () => !!(level || svcPick);
+// "api-1  | " -> "api" (as réplicas juntas); com container_name, o prefixo é o nome inteiro
+const svcOf = (prefix: string) => prefix.replace(/(-\d+)?\s.*$/s, '');
+function keep(line: string) {
+  if (!narrowed()) return true;
+  const pre = logProject ? line.match(SVC_PREFIX)?.[0] ?? '' : '';
+  if (svcPick && svcOf(pre) !== svcPick) return false;
+  const lv = logLevel(line.slice(pre.length));
+  return !level || lv === 'bad' || (level === 'warn' && lv === 'warn');
+}
+// serviços que apareceram nos logs do projeto, para o seletor (do prefixo, não dos labels: com container_name ele muda)
+const svcSet = new Set<string>();
+function seeSvcs(lines: string[]) {
+  if (!logProject) return;
+  const n = svcSet.size;
+  for (const l of lines) { const pre = l.match(SVC_PREFIX)?.[0]; if (pre) svcSet.add(svcOf(pre)); }
+  if (svcSet.size !== n) renderSvcs();
+}
+function renderSvcs() {
+  const sv = $<HTMLSelectElement>('#lsvc');
+  sv.hidden = !logProject;
+  sv.replaceChildren(new Option(t`Todos os serviços`, ''), ...[...svcSet].sort().map(v => new Option(v, v)));
+  sv.value = svcPick;
+}
+// trocar nível ou serviço redesenha a caixa com o que já veio; trocar o período pede de novo ao docker
+function logPick() {
+  level = $<HTMLSelectElement>('#llevel').value; svcPick = $<HTMLSelectElement>('#lsvc').value;
+  paint();
+}
+function sinceChange() {
+  since = $<HTMLSelectElement>('#lsince').value; complete = false;
+  if (stream) toggleFollow(true); else fetchLogs();
+}
 
 // põe text em el com os trechos que casam com re marcados; devolve quantos casaram
 function markInto(el: HTMLElement, text: string, re: RegExp | null) {
@@ -995,7 +1046,7 @@ const SVC_PREFIX = /^\S+\s+\|\s?/, SVC_TONES = ['text-svc-1', 'text-svc-2', 'tex
 // Réplicas (api-1, api-2) ficam com a cor do serviço, e a cor fica guardada por projeto: reabrir os logs não troca as cores
 const svcSeen = new Map<string, string>(), svcCount = new Map<string, number>();
 const svcTone = (prefix: string) => {
-  const p = logProject?.project ?? '', key = `${p}/${prefix.replace(/-\d+\s.*$/s, '')}`;
+  const p = logProject?.project ?? '', key = `${p}/${svcOf(prefix)}`;
   if (!svcSeen.has(key)) {
     const n = svcCount.get(p) ?? 0;
     svcSeen.set(key, SVC_TONES[n % SVC_TONES.length]); svcCount.set(p, n + 1);
@@ -1010,6 +1061,7 @@ const TS = /^\d{4}-\d\d-\d\dT\S+\s/;  // o --timestamps do docker logs
 // a linha (com os trechos marcados, o prefixo do serviço colorido, o timestamp apagado e a cor do nível), ou null se o
 // filtro não casou (aí nem entra na caixa). ponytail: um trecho que casa atravessando o prefixo ou o timestamp não conta
 function hitNode(line: string, re: RegExp | null) {
+  if (!keep(line)) return null;
   const pre = logProject ? line.match(SVC_PREFIX)?.[0] ?? '' : '', span = document.createElement('span');
   const rest = line.slice(pre.length), ts = rest.match(TS)?.[0] ?? '';
   let n = 0;
@@ -1023,16 +1075,17 @@ function hitNode(line: string, re: RegExp | null) {
   // o timestamp aparece como HH:MM:SS na hora local (a mesma da marca do reinício), desenhado pelo CSS (data-t); o texto
   // continua o do docker, para Copiar e Baixar levarem a linha inteira, e o valor UTC vai no title.
   // ponytail: o filtro conta o que casar no timestamp escondido
-  const t = ts && new Date(ts.trim().replace(/(\.\d{3})\d+/, '$1'));
-  if (t && !isNaN(+t)) {
+  const at = ts && new Date(ts.trim().replace(/(\.\d{3})\d+/, '$1'));
+  if (at && !isNaN(+at)) {
     const el = part(ts.trimEnd(), 'text-[0px] text-muted before:content-[attr(data-t)] before:text-xs');
-    el.dataset.t = t.toLocaleTimeString('pt-BR'); el.title = ts.trim();
+    el.dataset.t = at.toLocaleTimeString(LOCALE); el.title = ts.trim();
     part(ts.slice(ts.trimEnd().length), '');
   } else part(ts, 'text-muted');
   const lv = LEVEL_TONE[logLevel(rest)];
   if (lv) part(rest.slice(ts.length), lv); else n += markInto(span, rest.slice(ts.length), re);
   if (re && !n) return null;
-  if (re) { hits += n; hitLines++; }
+  if (re) hits += n;
+  if (re || narrowed()) hitLines++;
   return span;
 }
 // até o teto do ao vivo, um nó por linha (para as cores); acima disso, texto cru, que pesa menos
@@ -1054,9 +1107,10 @@ function markNode(line: string) {
 }
 
 function renderHits() {
-  const txt = !filterRe() ? '' : hits
-    ? `${fmt(hits)} ${hits === 1 ? 'ocorrência' : 'ocorrências'} em ${fmt(hitLines)} ${hitLines === 1 ? 'linha' : 'linhas'}`
-    : 'Nenhuma ocorrência';
+  const txt = filterRe() ? (hits
+    ? t`${fmt(hits)} ${hits === 1 ? t`ocorrência` : t`ocorrências`} em ${fmt(hitLines)} ${hitLines === 1 ? t`linha` : t`linhas`}`
+    : t`Nenhuma ocorrência`)
+    : narrowed() ? (hitLines ? `${fmt(hitLines)} ${hitLines === 1 ? t`linha` : t`linhas`}` : t`Nenhuma linha`) : '';
   if ($('#lcount').textContent !== txt) $('#lcount').textContent = txt;  // é aria-live: só fala quando muda
 }
 
@@ -1065,11 +1119,11 @@ function renderHits() {
 function paint() {
   const lb = $('#lb'), re = filterRe(), atEnd = lb.scrollHeight - lb.scrollTop - lb.clientHeight < 40;
   hits = hitLines = 0; marked = false;
-  if (buf.length && (re || stream || colored())) {  // sem linhas, a caixa tem um aviso ("(sem logs)", erro): fica
+  if (buf.length && (re || narrowed() || stream || colored())) {  // sem linhas, a caixa tem um aviso ("(sem logs)", erro): fica
     // num fragment, um a um: espalhar o log inteiro em argumentos (replaceChildren(...)) estoura a pilha
     const frag = document.createDocumentFragment();
     for (const l of buf) {
-      const m = markNode(l), n = re || colored() ? hitNode(l, re) : l;
+      const m = markNode(l), n = re || narrowed() || colored() ? hitNode(l, re) : l;
       if (m) frag.append(m);
       if (n) frag.append(n);
     }
@@ -1082,7 +1136,7 @@ function paint() {
 // "Carregar mais": diz quanto vem. Sem mais o que pedir, aria-disabled (continua no Tab, como o Atualizar)
 function renderMore() {
   const next = TAILS[tailAt + 1], b = $('#more');
-  b.textContent = !next || complete ? 'Tudo carregado' : next === 'all' ? 'Carregar tudo' : `Carregar ${fmt(+next)} linhas`;
+  b.textContent = !next || complete ? t`Tudo carregado` : next === 'all' ? t`Carregar tudo` : t`Carregar ${fmt(+next)} linhas`;
   b.toggleAttribute('data-done', !next || complete);  // com tudo na caixa, vira texto (page.html)
   b.setAttribute('aria-disabled', String(!next || complete || (!!stream && tailAt + 1 >= LIVE_TAILS)));
 }
@@ -1090,22 +1144,24 @@ function renderMore() {
 // more: veio do "Carregar mais", com as linhas antigas entrando em cima; a tela fica parada nas mesmas linhas
 async function fetchLogs(more = false) {
   const lb = $('#lb'), atEnd = lb.scrollHeight - lb.scrollTop - lb.clientHeight < 40;  // só gruda no fim se já estava lá
-  const fromEnd = lb.scrollHeight - lb.scrollTop, tail = TAILS[tailAt], who = logProject ?? logId;
+  const fromEnd = lb.scrollHeight - lb.scrollTop, tail = TAILS[tailAt], who = logProject ?? logId, win = since;
   try {
-    const r = await api(logProject ? `/api/compose/logs?${new URLSearchParams({...logProject, tail})}` : `/api/logs/${logId}?tail=${tail}`);
+    const q = new URLSearchParams({...logProject, tail, ...(win ? {since: win} : {})});
+    const r = await api(logProject ? `/api/compose/logs?${q}` : `/api/logs/${logId}?${q}`);
     const j: string = await r.json();
     // o ao vivo já conectou: ele é quem preenche a caixa. Conectando ainda (ou preso no limite de conexões do navegador),
     // a resposta entra: senão a caixa ficava em "Carregando…" até o stream abrir, se abrisse
     if (streamOpen) return;
     // já pediram outro container (ou projeto) ou mais histórico: vale a resposta nova
-    if (who !== (logProject ?? logId) || tail !== TAILS[tailAt]) return;
+    if (who !== (logProject ?? logId) || tail !== TAILS[tailAt] || win !== since) return;
     buf = r.ok && j ? j.match(/[^\n]*\n|[^\n]+$/g)! : [];
+    seeSvcs(buf);
     // menos linhas que o pedido: o log inteiro já está aqui (no projeto, o total abaixo do pedido também garante isso)
     complete = r.ok && (tail === 'all' || buf.length < +tail);
     if (buf.length) paint();
-    else { lb.textContent = r.ok ? '(sem logs)' : `Não consegui ler os logs: ${j}`; renderHits(); }
-    $('#lmeta').textContent = `${hist().replace(/^./, c => c.toUpperCase())} · atualizado às ${new Date().toLocaleTimeString('pt-BR')}`;
-  } catch { buf = []; lb.textContent = 'Não consegui carregar os logs. O servidor do Docker GUI está rodando?'; }
+    else { lb.textContent = r.ok ? since ? t`Nada no log nesse período.` : t`(sem logs)` : t`Não consegui ler os logs: ${j}`; renderHits(); }
+    $('#lmeta').textContent = t`${hist().replace(/^./, c => c.toUpperCase())} · atualizado às ${new Date().toLocaleTimeString(LOCALE)}`;
+  } catch { buf = []; lb.textContent = t`Não consegui carregar os logs. O servidor do Docker GUI está rodando?`; }
   renderMore();
   if (more) lb.scrollTop = lb.scrollHeight - fromEnd;
   else if (atEnd) lb.scrollTop = lb.scrollHeight;
@@ -1114,8 +1170,12 @@ async function fetchLogs(more = false) {
 function openLogs(title: string, running: boolean) {
   tailAt = 0; buf = []; complete = false; mark = null;
   $('#lt').textContent = title;
-  $<HTMLInputElement>('#lf').value = '';  // cada container (ou projeto) começa sem filtro
-  $('#lb').textContent = 'Carregando…'; $('#lmeta').textContent = hist().replace(/^./, c => c.toUpperCase()); $('#dlg-msg').innerHTML = '';
+  // cada container (ou projeto) começa sem filtro e com o log inteiro; "desde que subiu" é de um container só
+  $<HTMLInputElement>('#lf').value = since = level = svcPick = '';
+  $<HTMLSelectElement>('#llevel').value = $<HTMLSelectElement>('#lsince').value = '';
+  $<HTMLOptionElement>('#lsince-start').hidden = $<HTMLOptionElement>('#lsince-start').disabled = !!logProject;
+  svcSet.clear(); renderSvcs();
+  $('#lb').textContent = t`Carregando…`; $('#lmeta').textContent = hist().replace(/^./, c => c.toUpperCase()); $('#dlg-msg').innerHTML = '';
   $('#insp').hidden = !!logProject;  // a configuração (inspect) é de um container só
   renderHits(); renderMore();
   $<HTMLDialogElement>('#dlg').showModal(); renderDlg(); fetchLogs();
@@ -1140,7 +1200,7 @@ function projectLogs(p: string) {
 // mais histórico: 500 -> 2000 -> 10000 -> tudo. Ao vivo, reconecta pedindo mais (até 10000)
 function loadMore() {
   if ($('#more').getAttribute('aria-disabled') === 'true') {
-    if (stream && TAILS[tailAt + 1]) toast(`Ao vivo, o histórico vai até ${fmt(+TAILS[LIVE_TAILS - 1])} linhas. Para carregar tudo, desligue o ao vivo.`);
+    if (stream && TAILS[tailAt + 1]) toast(t`Ao vivo, o histórico vai até ${fmt(+TAILS[LIVE_TAILS - 1])} linhas. Para carregar tudo, desligue o ao vivo.`);
     return;
   }
   tailAt++;
@@ -1157,17 +1217,19 @@ function flushLogs() {
   const lb = $('#lb'), atEnd = lb.scrollHeight - lb.scrollTop - lb.clientHeight < 40, re = filterRe();
   const add = pending.splice(0);
   buf.push(...add);
+  seeSvcs(add);
   // anexar (em vez de trocar o texto) não apaga a seleção de quem está copiando
   lb.append(...add.flatMap(l => [markNode(l), hitNode(l, re)]).filter(n => !!n));
   // o teto vale para as linhas carregadas; na tela, com filtro, só as que casaram têm nó (a marca do reinício sai junto)
   for (const l of buf.splice(0, Math.max(0, buf.length - Math.max(MAX_LINES, +TAILS[tailAt])))) {
     const n = re ? (l.split(re).length - 1) / 2 : 1;
-    if (!n) continue;
+    if (!n || !keep(l)) continue;
     while ((lb.firstChild as HTMLElement | null)?.dataset?.mark) lb.firstChild!.remove();
     lb.firstChild!.remove();
-    if (re) { hits -= n; hitLines--; }
+    if (re) hits -= n;
+    if (re || narrowed()) hitLines--;
   }
-  if (re) renderHits();
+  if (re || narrowed()) renderHits();
   if (atEnd) lb.scrollTop = lb.scrollHeight;
 }
 
@@ -1179,19 +1241,19 @@ function toggleFollow(on = !stream, why = '') {
   if (on) {
     tailAt = Math.min(tailAt, LIVE_TAILS - 1); complete = false;
     // EventSource não manda header: o token vai na query, só nestas rotas
-    const q = new URLSearchParams({...logProject, t: TOKEN, tail: TAILS[tailAt]});
+    const q = new URLSearchParams({...logProject, t: TOKEN, tail: TAILS[tailAt], ...(since ? {since} : {})});
     const es = stream = new EventSource(logProject ? `/api/compose/logs/stream?${q}` : `/api/logs/${logId}/stream?${q}`);
     // cada conexão (inclusive a reconexão automática) recomeça do histórico pedido: limpa para não duplicar
     es.onopen = () => {
       streamOpen = true;
       pending = []; buf = []; hits = hitLines = 0; marked = false; $('#lb').textContent = ''; renderHits();
-      $('#lmeta').textContent = `Ao vivo · ${hist()} e as novas`;
+      $('#lmeta').textContent = t`Ao vivo · ${hist()} e as novas`;
     };
     es.onmessage = e => { if (pending.push(JSON.parse(e.data)) === 1) setTimeout(flushLogs, 50); };
-    es.addEventListener('end', () => toggleFollow(false, logProject ? 'os containers pararam' : 'o container parou'));
+    es.addEventListener('end', () => toggleFollow(false, logProject ? t`os containers pararam` : t`o container parou`));
     // queda de rede: o EventSource reconecta sozinho; CLOSED é recusa do servidor (token, erro)
-    es.onerror = () => { if (es.readyState === EventSource.CLOSED) toggleFollow(false, 'falhou'); else $('#lmeta').textContent = 'Ao vivo · reconectando…'; };
-  } else if (was) $('#lmeta').textContent = `Ao vivo parado às ${new Date().toLocaleTimeString('pt-BR')}${why ? ` · ${why}` : ''}`;
+    es.onerror = () => { if (es.readyState === EventSource.CLOSED) toggleFollow(false, t`falhou`); else $('#lmeta').textContent = t`Ao vivo · reconectando…`; };
+  } else if (was) $('#lmeta').textContent = t`Ao vivo parado às ${new Date().toLocaleTimeString(LOCALE)}${why ? ` · ${why}` : ''}`;
   $('#follow').setAttribute('aria-pressed', String(on));
   $('#refresh').setAttribute('aria-disabled', String(on));  // com o ao vivo ligado, Atualizar é redundante (mas continua no Tab)
   renderMore();
@@ -1210,23 +1272,23 @@ function refreshLogs() {
 }
 
 function copyLogs() {
-  navigator.clipboard.writeText($('#lb').textContent ?? '').then(() => toast('Logs copiados.', true), () => toast('Não consegui copiar.'));
+  navigator.clipboard.writeText($('#lb').textContent ?? '').then(() => toast(t`Logs copiados.`, true), () => toast(t`Não consegui copiar.`));
 }
 
 // o mesmo texto do select do "Novo container"
-const RESTART_TXT: Record<string, string> = {no: 'não reinicia', 'on-failure': 'se sair com erro', 'unless-stopped': 'sempre, menos se você parar', always: 'sempre'};
+const RESTART_TXT: Record<string, string> = {no: t`não reinicia`, 'on-failure': t`se sair com erro`, 'unless-stopped': t`sempre, menos se você parar`, always: t`sempre`};
 function inspectHtml(d: Inspect, reveal: boolean) {
-  const list = (xs: string[], none = 'nenhum') => xs.length ? xs.map(x => `<div>${x}</div>`).join('') : `<span class="font-sans text-muted">${none}</span>`;
+  const list = (xs: string[], none = t`nenhum`) => xs.length ? xs.map(x => `<div>${x}</div>`).join('') : `<span class="font-sans text-muted">${none}</span>`;
   const nets = Object.entries(d.Networks).map(([n, ip]) => esc(ip ? `${n} · ${ip}` : n));
-  const mounts = d.Mounts.map(m => esc(`${[m.Type, m.Name || m.Source].filter(Boolean).join(' ')} → ${m.Destination}${m.RW ? '' : ' (somente leitura)'}`));
-  const env = d.Env.map(([k, v]) => `${esc(k)}=${v === null ? '<span aria-hidden="true">••••••</span><span class="sr-only">(oculto)</span>' : esc(v)}`);
+  const mounts = d.Mounts.map(m => esc(`${[m.Type, m.Name || m.Source].filter(Boolean).join(' ')} → ${m.Destination}${m.RW ? '' : t` (somente leitura)`}`));
+  const env = d.Env.map(([k, v]) => `${esc(k)}=${v === null ? `<span aria-hidden="true">••••••</span><span class="sr-only">${t`(oculto)`}</span>` : esc(v)}`);
   const dt = 'font-sans text-muted';
   return `<dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 font-mono text-fg-soft [overflow-wrap:anywhere]">
     <dt class="${dt}">Restart</dt><dd>${esc(d.Restart)}${RESTART_TXT[d.Restart.split(':')[0]] ? `<span class="font-sans text-muted"> · ${RESTART_TXT[d.Restart.split(':')[0]]}</span>` : ''}</dd>
-    <dt class="${dt}">Redes</dt><dd>${list(nets, 'nenhuma')}</dd>
+    <dt class="${dt}">${t`Redes`}</dt><dd>${list(nets, t`nenhuma`)}</dd>
     <dt class="${dt}">Mounts</dt><dd>${list(mounts)}</dd>
-    <dt class="${dt}">Env</dt><dd>${list(env, 'nenhuma')}${d.Env.length ? `<button id="insp-env" onclick="loadInspect(${!reveal})"
-      class="mt-1.5 ${BTN} font-sans text-fg hover:bg-hover">${reveal ? 'Ocultar valores' : 'Revelar valores'}</button>` : ''}</dd></dl>`;
+    <dt class="${dt}">Env</dt><dd>${list(env, t`nenhuma`)}${d.Env.length ? `<button id="insp-env" onclick="loadInspect(${!reveal})"
+      class="mt-1.5 ${BTN} font-sans text-fg hover:bg-hover">${reveal ? t`Ocultar valores` : t`Revelar valores`}</button>` : ''}</dd></dl>`;
 }
 
 // abrir o "Configuração" sempre busca mascarado; o valor real do env só vem pelo botão Revelar
@@ -1235,8 +1297,8 @@ async function loadInspect(reveal = false) {
   let html: string;
   try {
     const r = await api(`/api/inspect/${id}${reveal ? '/env' : ''}`), j: unknown = await r.json();
-    html = r.ok ? inspectHtml(j as Inspect, reveal) : esc(`Não consegui ler o inspect: ${j}`);
-  } catch { html = 'Não consegui ler o inspect.'; }
+    html = r.ok ? inspectHtml(j as Inspect, reveal) : esc(t`Não consegui ler o inspect: ${j}`);
+  } catch { html = t`Não consegui ler o inspect.`; }
   if (id !== logId || !$<HTMLDetailsElement>('#insp').open) return;  // trocou de container ou fechou enquanto carregava
   $('#insp-body').innerHTML = html;
   if (refocus) $('#insp-env')?.focus();
@@ -1254,7 +1316,7 @@ function downloadLogs() {
 function afterClose() {
   toggleFollow(false);
   // fecha o "Configuração" e apaga o que estava nele: env revelado não fica na página
-  $('#insp').removeAttribute('open'); $('#insp-body').textContent = 'Carregando…';
+  $('#insp').removeAttribute('open'); $('#insp-body').textContent = t`Carregando…`;
   // a linha pode ter sido redesenhada com o modal aberto; foca o botão Logs atual dela (ou o do cabeçalho do projeto)
   document.querySelector<HTMLElement>(logProject ? `[data-id="${CSS.escape(`stack-${logProject.project}`)}"][data-a="plogs"]`
                                                  : `[data-id="${logId}"][data-a="logs"]`)?.focus();
@@ -1271,7 +1333,7 @@ function openShell(id: string) {
   const c = data.find(c => c.ID === id);
   if (!c) return;
   $('#shell-name').textContent = c.Names;
-  $('#shell-status').textContent = 'Conectando…';
+  $('#shell-status').textContent = t`Conectando…`;
   $<HTMLDialogElement>('#shell').showModal();
   const term = new Terminal({cursorBlink: true, fontSize: 13, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace'});
   const fit = new FitAddon(), enc = new TextEncoder();
@@ -1283,13 +1345,13 @@ function openShell(id: string) {
   ws.binaryType = 'arraybuffer';
   // a primeira mensagem tem que ser o tamanho: o servidor só sobe o docker exec depois dela
   const size = () => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({cols: term.cols, rows: term.rows})); };
-  ws.onopen = () => { size(); $('#shell-status').textContent = 'Conectado. Esc vai para o terminal; feche pelo ×.'; term.focus(); };
+  ws.onopen = () => { size(); $('#shell-status').textContent = t`Conectado. Esc vai para o terminal; feche pelo ×.`; term.focus(); };
   // binário é a saída do terminal; texto é um aviso do servidor (no Windows, imagem sem TTY), que vai para o status
   ws.onmessage = e => {
     if (typeof e.data === 'string') $('#shell-status').textContent = e.data;
     else term.write(new Uint8Array(e.data));
   };
-  ws.onclose = () => { $('#shell-status').textContent = 'Sessão encerrada.'; };
+  ws.onclose = () => { $('#shell-status').textContent = t`Sessão encerrada.`; };
   term.onData(d => { if (ws.readyState === WebSocket.OPEN) ws.send(enc.encode(d)); });
   term.onResize(size);
   const ro = new ResizeObserver(() => fit.fit());
@@ -1333,7 +1395,7 @@ function markRunErrors(errors: RunErrors) {
 
 // o botão lembra o que vai acontecer: com 0.0.0.0, a porta fica aberta para a rede
 function createLabel() {
-  if (!creating) $('#create-go').textContent = runField('public').checked ? 'Criar e expor na rede' : 'Criar e iniciar';
+  if (!creating) $('#create-go').textContent = runField('public').checked ? t`Criar e expor na rede` : t`Criar e iniciar`;
 }
 
 async function createContainer(e: SubmitEvent) {
@@ -1347,14 +1409,14 @@ async function createContainer(e: SubmitEvent) {
   const go = $('#create-go'), label = spec.name || spec.image;
   creating = true;
   go.setAttribute('aria-disabled', 'true');
-  go.textContent = 'Criando… (baixa a imagem se faltar)';
+  go.textContent = t`Criando… (baixa a imagem se faltar)`;
   $<HTMLFieldSetElement>('#create-fields').disabled = true;
-  $('#shown').textContent = `Criando ${label}…`;
+  $('#shown').textContent = t`Criando ${label}…`;
   let ok = false, msg: string;
   try {
     const r = await api('/api/run', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(spec)});
     msg = await r.json(); ok = r.ok;
-  } catch { msg = 'Sem resposta do servidor do Docker GUI.'; }
+  } catch { msg = t`Sem resposta do servidor do Docker GUI.`; }
   creating = false;
   go.removeAttribute('aria-disabled');
   $<HTMLFieldSetElement>('#create-fields').disabled = false;
@@ -1364,45 +1426,53 @@ async function createContainer(e: SubmitEvent) {
     // o formulário fica como estava, para corrigir e tentar de novo. O docker escreve o progresso do pull no
     // stderr: no aviso fora do modal vai só a última linha, que é a que explica
     if (shown) {
-      $('#create-msg').innerHTML = `<p class="font-medium">Não deu para criar ${esc(label)}.</p>
-        <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-xs">${esc(msg || 'Erro sem mensagem.')}</pre>`;
+      $('#create-msg').innerHTML = `<p class="font-medium">${t`Não deu para criar ${esc(label)}.`}</p>
+        <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-xs">${esc(msg || t`Erro sem mensagem.`)}</pre>`;
       go.focus();  // o Enter num campo desabilitado durante o envio deixaria o foco no <body>
-    } else toast(`Não deu para criar ${label}. ${msg.trim().split('\n').at(-1) || 'Erro sem mensagem.'}`);
+    } else toast(t`Não deu para criar ${label}. ${msg.trim().split('\n').at(-1) || t`Erro sem mensagem.`}`);
     return load();  // run que falha no start (porta ocupada) deixa o container criado e parado
   }
   $<HTMLFormElement>('#create-form').reset(); markRunErrors({}); createLabel();
   if (shown) $<HTMLDialogElement>('#create').close();
-  toast(`${label} criado, conferindo se ficou de pé…`, true);
+  toast(t`${label} criado, conferindo se ficou de pé…`, true);
   await load();
   // o ps do docker traz o ID curto e o do podman, o inteiro; o run devolve o inteiro
   const c = data.find(c => msg.startsWith(c.ID));
-  if (c) confirmUp([c.ID]); else toast(`${label} criado.`, true);
+  if (c) confirmUp([c.ID]); else toast(t`${label} criado.`, true);
 }
 
-type DiskKind = 'images' | 'volumes' | 'buildcache';
-// [Type do docker system df, categoria da API de prune, rótulo, o que o prune apaga, aviso]; Containers fica de fora:
-// parado se remove na lista. Volumes sem -a no servidor: o aviso deles sai da lista de volumes (volumeNote)
+type DiskKind = 'containers' | 'images' | 'volumes' | 'buildcache';
+// [Type do docker system df, categoria da API de prune, rótulo, o que o prune apaga, aviso]. Containers parados ficam na
+// aba Imagens, antes delas: são eles que seguram as imagens "em uso". O aviso deles e o dos volumes (sem -a no servidor)
+// dizem quais saem, pela lista de cada um (containerNote, volumeNote)
 const DISK: [string, DiskKind, string, string, string][] = [
-  ['Images', 'images', 'Imagens', 'as imagens que nenhum container usa', 'Dá para baixar de novo.'],
-  ['Local Volumes', 'volumes', 'Volumes', 'os volumes que nenhum container usa', 'Os dados deles se perdem.'],
-  ['Build Cache', 'buildcache', 'Build cache', 'o cache de build', 'O próximo build fica mais lento.']];
+  ['Containers', 'containers', t`Containers parados`, t`os containers parados`, t`Os logs deles se perdem; os volumes ficam.`],
+  ['Images', 'images', t`Imagens`, t`as imagens que nenhum container usa`, t`Dá para baixar de novo.`],
+  ['Local Volumes', 'volumes', t`Volumes`, t`os volumes que nenhum container usa`, t`Os dados deles se perdem.`],
+  ['Build Cache', 'buildcache', t`Build cache`, t`o cache de build`, t`O próximo build fica mais lento.`]];
 let disk: DiskUsage[] | string | null = null, diskBusy: DiskKind | '' = '';  // string = erro
 const diskHtml: Record<string, string> = {};
 const PODMAN = /^podman\b/.test(document.documentElement.dataset.cli ?? '');
 // o volume prune diz exatamente o que leva, pela lista de volumes (no Docker só os anônimos, no Podman os nomeados também)
 function volumeNote(): string {
   const vs = objs.volumes;
-  if (!Array.isArray(vs)) return vs === null ? 'Conferindo quais volumes saem…' : 'Não consegui ler a lista de volumes; o prune leva os sem uso.';
+  if (!Array.isArray(vs)) return vs === null ? t`Conferindo quais volumes saem…` : t`Não consegui ler a lista de volumes; o prune leva os sem uso.`;
   const out = prunedVolumes(vs as Volume[], PODMAN), shown = out.slice(0, 10).map(v => anonVolume(v.Name) ? v.Name.slice(0, 12) + '…' : v.Name);
-  return !out.length ? 'Nenhum volume sem uso para apagar.'
-    : `Vai apagar ${plural(out.length, PODMAN ? 'volume sem uso' : 'volume anônimo sem uso', PODMAN ? 'volumes sem uso' : 'volumes anônimos sem uso')}: ${
-      shown.join(', ')}${out.length > 10 ? ` e mais ${out.length - 10}` : ''}. Os dados deles se perdem.${PODMAN ? '' : ' Os nomeados ficam.'}`;
+  return !out.length ? t`Nenhum volume sem uso para apagar.`
+    : t`Vai apagar ${plural(out.length, PODMAN ? t`volume sem uso` : t`volume anônimo sem uso`, PODMAN ? t`volumes sem uso` : t`volumes anônimos sem uso`)}: ${
+      shown.join(', ')}${out.length > 10 ? t` e mais ${out.length - 10}` : ''}. Os dados deles se perdem.` + (PODMAN ? '' : t` Os nomeados ficam.`);
+}
+// o container prune leva todo container que não está de pé (parado, criado, morto), pela lista que a página já tem
+function containerNote(note: string): string {
+  const out = data.filter(removable);
+  return out.length ? t`Vai remover ${names(out, 10)}. ${note}` : t`Nenhum container parado para remover.`;
 }
 // quanto o prune libera e de quantos itens (do df), antes do que ele não desfaz
 const pruneNote = (d: DiskUsage | undefined, note: string) => {
   const idle = d ? +d.TotalCount - +d.Active : 0;
   if (d?.Type === 'Local Volumes') return volumeNote();
-  return d ? `Libera até ${d.Reclaimable.split(' ')[0]}${idle > 0 ? `, de ${plural(idle, 'item sem uso', 'itens sem uso')}` : ''}. ${note}` : note;
+  if (d?.Type === 'Containers') return containerNote(note);
+  return d ? t`Libera até ${d.Reclaimable.split(' ')[0]}${idle > 0 ? t`, de ${plural(idle, t`item sem uso`, t`itens sem uso`)}` : ''}. ${note}` : note;
 };
 
 // abrir a aba (e depois de uma limpeza ou remoção) relê a lista dela e, se ela tem, o df
@@ -1414,15 +1484,15 @@ async function loadTab() {
 async function loadDf() {
   try {
     const r = await api('/api/df'), j: unknown = await r.json();
-    disk = r.ok ? j as DiskUsage[] : `Não consegui ler o uso de disco: ${j}`;
-  } catch { disk = 'Não consegui ler o uso de disco. O servidor do Docker GUI está rodando?'; }
+    disk = r.ok ? j as DiskUsage[] : t`Não consegui ler o uso de disco: ${j}`;
+  } catch { disk = t`Não consegui ler o uso de disco. O servidor do Docker GUI está rodando?`; }
   render();
 }
 
 // build cache fica na aba Imagens: é o que o build deixa junto com elas
 function renderDisk() {
   for (const panel of ['images', 'volumes'] as const) {
-    const html = disk === null ? '<p class="py-3 text-muted">Carregando…</p>'
+    const html = disk === null ? `<p class="py-3 text-muted">${t`Carregando…`}</p>`
       : typeof disk === 'string' ? `<p class="py-3 text-bad-fg">${esc(disk)}</p>`
       : DISK.filter(([, k]) => (k === 'volumes') === (panel === 'volumes')).map(([type, k, label, what, note]) => {
         const d = (disk as DiskUsage[]).find(d => d.Type === type), id = 'df-' + k, armed = arming?.id === id;
@@ -1433,11 +1503,11 @@ function renderDisk() {
             <span class="h-full bg-accent" style="width:${Math.round(share * 100)}%"></span></div>`;
         return `<div class="flex flex-wrap items-center gap-x-3 gap-y-2 py-3">
           <div class="mr-auto min-w-0 flex-1"><div class="font-medium text-fg-strong">${label}</div>
-            <div class="font-mono text-xs text-muted">${esc(d.Size)} no total · ${esc(d.Reclaimable)} liberável · ${esc(d.TotalCount)} ${d.TotalCount === '1' ? 'item' : 'itens'}, ${esc(d.Active)} em uso</div>${bar}</div>
+            <div class="font-mono text-xs text-muted">${t`${esc(d.Size)} no total · ${esc(d.Reclaimable)} liberável · ${esc(d.TotalCount)} ${d.TotalCount === '1' ? t`item` : t`itens`}, ${esc(d.Active)} em uso`}</div>${bar}</div>
           <button data-id="${id}" data-a="prune" ${diskBusy ? 'aria-disabled="true"' : ''} onclick="prune('${k}')"
-            aria-label="${armed ? `Confirmar limpeza de ${label.toLowerCase()}` : `Limpar ${label.toLowerCase()}`}" class="${BTN} ${cls}">${
-            diskBusy === k ? 'Limpando…' : armed ? `Limpar ${label.toLowerCase()}` : 'Limpar…'}</button>${armed ? cancelBtn(id, `limpeza de ${label.toLowerCase()}`) : ''}
-          ${armed ? armNote(`Apagar ${what}? ${esc(pruneNote(d, note))}`) : ''}
+            aria-label="${armed ? t`Confirmar limpeza de ${label.toLowerCase()}` : t`Limpar ${label.toLowerCase()}`}" class="${BTN} ${cls}">${
+            diskBusy === k ? t`Limpando…` : armed ? t`Limpar ${label.toLowerCase()}` : t`Limpar…`}</button>${armed ? cancelBtn(id, t`limpeza de ${label.toLowerCase()}`) : ''}
+          ${armed ? armNote(t`Apagar ${what}? ${esc(pruneNote(d, note))}`) : ''}
         </div>`;
       }).join('');
     if (html !== diskHtml[panel]) $('#df-' + panel).innerHTML = diskHtml[panel] = html;  // o render roda a cada poll: só troca se mudou
@@ -1449,16 +1519,16 @@ async function prune(k: DiskKind) {
   if (k === 'volumes' && !Array.isArray(objs.volumes)) loadObjects('volumes');  // o aviso diz quais saem
   if (diskBusy || !confirmed('df-' + k, what, 'prune', pruneNote(d, note))) return;
   diskBusy = k; render();
-  $('#shown').textContent = `Limpando ${label.toLowerCase()}…`;
+  $('#shown').textContent = t`Limpando ${label.toLowerCase()}…`;
   try {
     const r = await api('/api/prune/' + k, {method: 'POST'}), msg: string = await r.json();
     // image/volume prune terminam em "Total reclaimed space: 1.2GB"; builder prune, em "Total: 1.2GB"
     const freed = msg.match(/Total(?: reclaimed space)?:\s*(\S+)/)?.[1];
-    if (r.ok) toast(`${label}: ${freed ? `${freed} liberados` : 'limpeza feita'}.`, true);
-    else toast(`Não deu para limpar ${label.toLowerCase()}: ${msg || 'erro sem mensagem'}`);
-  } catch { toast('Sem resposta do servidor do Docker GUI.'); }
+    if (r.ok) toast(`${label}: ${freed ? t`${freed} liberados` : t`limpeza feita`}.`, true);
+    else toast(t`Não deu para limpar ${label.toLowerCase()}: ${msg || t`erro sem mensagem`}`);
+  } catch { toast(t`Sem resposta do servidor do Docker GUI.`); }
   diskBusy = '';
-  await loadTab();
+  await Promise.all([loadTab(), k === 'containers' && load()]);
 }
 
 // imagens, volumes e redes um a um: cada lista só vai ao docker quando a aba abre (e depois de uma remoção)
@@ -1467,9 +1537,9 @@ type Obj = Image | Volume | Network;
 const KINDS: ObjKind[] = ['images', 'volumes', 'networks'];
 // [rota de /api/rm, com artigo, rótulo, plural, particípio, aviso da confirmação, lista vazia]
 const OBJ: Record<ObjKind, [rm: string, one: string, label: string, many: string, done: string, note: string, none: string]> = {
-  images: ['image', 'a imagem', 'Imagem', 'Imagens', 'removida', 'Dá para baixar de novo.', 'Nenhuma imagem.'],
-  volumes: ['volume', 'o volume', 'Volume', 'Volumes', 'removido', 'Os dados dele se perdem.', 'Nenhum volume.'],
-  networks: ['network', 'a rede', 'Rede', 'Redes', 'removida', '', 'Nenhuma rede.']};
+  images: ['image', t`a imagem`, t`Imagem`, t`Imagens`, t`removida`, t`Dá para baixar de novo.`, t`Nenhuma imagem.`],
+  volumes: ['volume', t`o volume`, t`Volume`, t`Volumes`, t`removido`, t`Os dados dele se perdem.`, t`Nenhum volume.`],
+  networks: ['network', t`a rede`, t`Rede`, t`Redes`, t`removida`, '', t`Nenhuma rede.`]};
 const objs: Record<ObjKind, Obj[] | string | null> = {images: null, volumes: null, networks: null};  // string = erro
 const objHtml: Partial<Record<ObjKind, string>> = {}, objErr = new Map<string, string>();  // data-id -> erro da remoção
 let objBusy = '';
@@ -1477,20 +1547,20 @@ let objBusy = '';
 // o que vai para a API (ID para imagem e rede, nome para volume) e o que aparece na tela
 const objRef = (k: ObjKind, o: Obj) => k === 'volumes' ? (o as Volume).Name : (o as Image | Network).ID;
 const anon = anonVolume;
-const objName = (k: ObjKind, o: Obj) => k === 'images' ? (o as Image).Tags.join(', ') || `sem tag ${(o as Image).ID.slice(0, 12)}`
+const objName = (k: ObjKind, o: Obj) => k === 'images' ? (o as Image).Tags.join(', ') || t`sem tag ${(o as Image).ID.slice(0, 12)}`
   : anon((o as Volume | Network).Name) ? (o as Volume).Name.slice(0, 12) : (o as Volume | Network).Name;
 
 async function loadObjects(k: ObjKind) {
   try {
     const r = await api('/api/' + k), j: unknown = await r.json();
-    objs[k] = r.ok ? j as Obj[] : `Não consegui ler a lista: ${j}`;
-  } catch { objs[k] = 'Não consegui ler a lista. O servidor do Docker GUI está rodando?'; }
+    objs[k] = r.ok ? j as Obj[] : t`Não consegui ler a lista: ${j}`;
+  } catch { objs[k] = t`Não consegui ler a lista. O servidor do Docker GUI está rodando?`; }
   render();
 }
 
 // colunas de cada lista, no ritmo do `docker images` / `docker volume ls` / `docker network ls`: [título, só leitor de tela no celular]
-const OBJ_COLS: Record<ObjKind, string[]> = {images: ['Imagem', 'ID', 'Tamanho', 'Criada', 'Em uso por'],
-  volumes: ['Volume', 'Driver', 'Em uso por'], networks: ['Rede', 'Driver', 'Escopo', 'Em uso por']};
+const OBJ_COLS: Record<ObjKind, string[]> = {images: [t`Imagem`, 'ID', t`Tamanho`, t`Criada`, t`Em uso por`],
+  volumes: [t`Volume`, 'Driver', t`Em uso por`], networks: [t`Rede`, 'Driver', t`Escopo`, t`Em uso por`]};
 function objItem(k: ObjKind, o: Obj) {
   const r = objRef(k, o), id = `rm-${k}-${r}`, armed = arming?.id === id, what = `${OBJ[k][1]} ${objName(k, o)}`;
   const err = objErr.get(id), hint = err && rmHint(err), tag = (t: string, title: string) =>
@@ -1499,18 +1569,18 @@ function objItem(k: ObjKind, o: Obj) {
   let title = esc(objName(k, o)), cells: string[];
   if (k === 'images') {
     const i = o as Image;
-    if (!i.Tags.length) title = `sem tag${tag('dangling', 'nenhuma tag aponta para ela')}`;
-    cells = [esc(i.ID.slice(0, 12)), esc(i.Size), i.Created ? `há ${age(i.Created)}` : '—'];
+    if (!i.Tags.length) title = `${t`sem tag`}${tag('dangling', t`nenhuma tag aponta para ela`)}`;
+    cells = [esc(i.ID.slice(0, 12)), esc(i.Size), i.Created ? t`há ${age(i.Created)}` : '—'];
   } else if (k === 'volumes') {
     const v = o as Volume;
-    if (anon(v.Name)) title = `<span title="${esc(v.Name)}">${title}…</span>${tag('anônimo', 'criado sem nome, por um container')}`;
+    if (anon(v.Name)) title = `<span title="${esc(v.Name)}">${title}…</span>${tag(t`anônimo`, t`criado sem nome, por um container`)}`;
     cells = [esc(v.Driver)];
   } else {
     const n = o as Network;
-    if (n.Builtin) title += tag('padrão', 'vem com o daemon e não pode ser removida');
+    if (n.Builtin) title += tag(t`padrão`, t`vem com o daemon e não pode ser removida`);
     cells = [esc(n.Driver), esc(n.Scope)];
   }
-  cells.push(o.Containers.length ? `<span class="text-fg-soft">${esc(o.Containers.join(', '))}</span>` : 'nenhum container');
+  cells.push(o.Containers.length ? `<span class="text-fg-soft">${esc(o.Containers.join(', '))}</span>` : t`nenhum container`);
   // rede padrão não remove; rede sem ID (formato antigo do podman) não tem como
   const canRm = k !== 'networks' || (!(o as Network).Builtin && !!(o as Network).ID);
   const cls = armed ? 'bg-danger text-white ring-danger hover:bg-danger-hover' : 'text-fg hover:bg-hover';
@@ -1523,9 +1593,9 @@ function objItem(k: ObjKind, o: Obj) {
     ${cells.map((c, i) => `<td class="py-2.5 pr-4 max-lg:block max-lg:p-0 max-lg:px-4 align-top font-mono text-xs text-muted [overflow-wrap:anywhere]"><span class="lg:sr-only">${cols[i]}: </span>${c}</td>`).join('')}
     <td class="py-2 pr-4 max-lg:block max-lg:p-0 max-lg:px-4 max-lg:pt-2 align-top"><div class="flex justify-end max-lg:justify-start items-center gap-1.5">${canRm
       ? `<button data-id="${esc(id)}" data-a="rm" data-k="${k}" data-r="${esc(r)}" ${objBusy ? 'aria-disabled="true"' : ''}
-      onclick="rmObj(this.dataset.k, this.dataset.r)" aria-label="${armed ? `Confirmar remoção de ${esc(what)}` : `Remover ${esc(what)}`}"
-      class="${BTN} ${cls}">${objBusy === id ? 'Removendo…' : armed ? 'Remover' : 'Remover…'}</button>${armed ? cancelBtn(id, `remoção de ${esc(what)}`) : ''}` : ''}</div>
-      ${armed ? armNote(`Remover ${esc(what)}? ${OBJ[k][5]}`, 'mt-1.5 [contain:inline-size] max-lg:[contain:none] lg:text-right text-balance') : ''}</td></tr>`;
+      onclick="rmObj(this.dataset.k, this.dataset.r)" aria-label="${armed ? t`Confirmar remoção de ${esc(what)}` : t`Remover ${esc(what)}`}"
+      class="${BTN} ${cls}">${objBusy === id ? t`Removendo…` : armed ? t`Remover` : t`Remover…`}</button>${armed ? cancelBtn(id, t`remoção de ${esc(what)}`) : ''}` : ''}</div>
+      ${armed ? armNote(t`Remover ${esc(what)}? ${OBJ[k][5]}`, 'mt-1.5 [contain:inline-size] max-lg:[contain:none] lg:text-right text-balance') : ''}</td></tr>`;
 }
 
 // quantos o docker system df conta na categoria (redes não entram no df)
@@ -1534,11 +1604,11 @@ const dfCount = (k: ObjKind) => Array.isArray(disk) ? +(disk.find(d => d.Type ==
 function renderObjects() {
   for (const k of KINDS) {
     const v = objs[k];
-    const html = v === null ? '<p class="py-3 text-muted">Carregando…</p>'
+    const html = v === null ? `<p class="py-3 text-muted">${t`Carregando…`}</p>`
       : typeof v === 'string' ? `<p class="py-3 text-bad-fg">${esc(v)}</p>`
-      : !v.length ? `<p class="py-3 px-4 text-muted">${OBJ[k][6]}${dfCount(k) ? ` O docker system df conta ${dfCount(k)}: a lista pode ter vindo antes do df. Troque de aba e volte para ler de novo.` : ''}</p>`
+      : !v.length ? `<p class="py-3 px-4 text-muted">${OBJ[k][6]}${dfCount(k) ? t` O docker system df conta ${dfCount(k)}: a lista pode ter vindo antes do df. Troque de aba e volte para ler de novo.` : ''}</p>`
       : `<table aria-label="${OBJ[k][3]}" class="w-full text-left max-lg:block"><thead class="max-lg:hidden font-mono text-[11px] uppercase text-muted"><tr>${
-        OBJ_COLS[k].map((h, i) => `<th scope="col" class="py-3 ${i ? '' : 'pl-4 '}pr-4 font-medium">${h}</th>`).join('')}<th scope="col" class="pr-4"><span class="sr-only">Ações</span></th></tr></thead>
+        OBJ_COLS[k].map((h, i) => `<th scope="col" class="py-3 ${i ? '' : 'pl-4 '}pr-4 font-medium">${h}</th>`).join('')}<th scope="col" class="pr-4"><span class="sr-only">${t`Ações`}</span></th></tr></thead>
         <tbody class="max-lg:block">${v.map(o => objItem(k, o)).join('')}</tbody></table>`;
     if (html !== objHtml[k]) $(`#obj-${k}-list`).innerHTML = objHtml[k] = html;  // o render roda a cada poll
     $(`#obj-${k}-n`).textContent = Array.isArray(v) ? ` · ${v.length}` : '';
@@ -1554,17 +1624,17 @@ async function rmObj(k: ObjKind, r: string) {
   const btns = [...document.querySelectorAll<HTMLElement>(`#obj-${k}-list [data-a="rm"]`)], i = btns.findIndex(b => b.dataset.id === id);
   const near = (btns[i + 1] || btns[i - 1])?.dataset.id;
   objErr.delete(id); objBusy = id; render();
-  $('#shown').textContent = `Removendo ${one} ${name}…`;
+  $('#shown').textContent = t`Removendo ${one} ${name}…`;
   let ok = false;
   try {
     const res = await api(`/api/rm/${rm}/${encodeURIComponent(r)}`, {method: 'POST'}), msg: string = await res.json();
     ok = res.ok;
     if (ok) toast(`${label} ${name} ${done}.`, true);
     else {
-      objErr.set(id, msg || 'erro sem mensagem');
-      toast(`Não deu para remover ${one} ${name}. ${rmHint(msg) || 'O erro ficou na lista.'}`);
+      objErr.set(id, msg || t`erro sem mensagem`);
+      toast(t`Não deu para remover ${one} ${name}. ${rmHint(msg) || t`O erro ficou na lista.`}`);
     }
-  } catch { toast('Sem resposta do servidor do Docker GUI.'); }
+  } catch { toast(t`Sem resposta do servidor do Docker GUI.`); }
   objBusy = '';
   await loadTab();  // imagem e volume mudam o df também
   if (ok) (document.querySelector<HTMLElement>(`[data-id="${near}"][data-a="rm"]`) || $('#tab-' + k)).focus();
@@ -1574,8 +1644,8 @@ async function rmObj(k: ObjKind, r: string) {
 // esta lista é a interface completa entre o HTML e o código
 Object.assign(window, {
   act, afterClose, askNotify, bulkAct, clearFilters, clearSel, composeAct, copyAddr, copyExec, copyLogs, disarm, downloadLogs,
-  filterBy, followClick, loadHealth, loadInspect, loadMore, menuPick, openCreate, openShell, pickTab, placeMenu, projectLogs,
-  prune, refreshLogs, restartService, rmObj, runToastAction, selectAll, stackAct, toggleSel,
+  filterBy, followClick, loadHealth, loadInspect, loadMore, logPick, menuPick, openCreate, openShell, pickTab, placeMenu, projectLogs,
+  prune, refreshLogs, rmObj, serviceAct, runToastAction, selectAll, sinceChange, stackAct, toggleSel,
 });
 
 $('#dlg').addEventListener('close', afterClose);

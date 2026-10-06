@@ -5,6 +5,9 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "module": "preserve",
     "moduleResolution": "bundler",
+    // format.ts importa "./i18n.ts" com a extensão (o Node exige) e o i18n.ts importa o en.json
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
     "noEmit": true,
     "strict": true,
     "noUnusedLocals": true,

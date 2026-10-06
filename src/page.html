@@ -132,6 +132,17 @@
     <label for="lf" class="sr-only">Filtrar linhas dos logs</label>
     <input id="lf" type="search" placeholder="Filtrar linhas…" aria-keyshortcuts="/" aria-describedby="lcount" autocomplete="off" spellcheck="false"
       class="flex-1 min-w-48 sm:max-w-72 rounded bg-canvas ring-1 ring-line-strong/80 px-2.5 py-1 max-lg:py-3 text-xs max-lg:text-sm text-fg-strong placeholder:text-muted focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+    <!-- nível e serviço filtram na página, como o texto; a janela (--since) vai ao docker. O serviço só nos logs do projeto -->
+    <label for="llevel" class="sr-only">Nível das linhas</label>
+    <select id="llevel" onchange="logPick()" class="rounded bg-canvas ring-1 ring-line-strong/80 px-1.5 py-1 max-lg:py-3 text-xs max-lg:text-sm text-fg-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+      <option value="">Todos os níveis</option><option value="warn">Avisos e erros</option><option value="bad">Só erros</option></select>
+    <label for="lsvc" class="sr-only">Serviço</label>
+    <select id="lsvc" hidden onchange="logPick()" class="rounded bg-canvas ring-1 ring-line-strong/80 px-1.5 py-1 max-lg:py-3 text-xs max-lg:text-sm text-fg-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+      <option value="">Todos os serviços</option></select>
+    <label for="lsince" class="sr-only">Período</label>
+    <select id="lsince" onchange="sinceChange()" class="rounded bg-canvas ring-1 ring-line-strong/80 px-1.5 py-1 max-lg:py-3 text-xs max-lg:text-sm text-fg-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+      <option value="">Desde o começo</option><option id="lsince-start" value="start">Desde que subiu</option><option value="5m">Últimos 5 min</option>
+      <option value="15m">Últimos 15 min</option><option value="1h">Última hora</option><option value="24h">Últimas 24 h</option></select>
     <span id="lcount" aria-live="polite" aria-atomic="true" class="text-xs text-muted empty:hidden"></span>
     <span class="ml-auto flex flex-wrap items-center gap-1.5 max-lg:gap-2">
       <button id="follow" aria-pressed="false" aria-label="Acompanhar ao vivo" onclick="followClick()" class="group px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover aria-pressed:bg-accent/15 aria-pressed:text-accent-soft aria-pressed:ring-accent/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"><span aria-hidden="true" class="hidden group-aria-pressed:inline-block size-1.5 mr-1.5 align-middle rounded-full bg-accent animate-pulse motion-reduce:animate-none"></span>Ao vivo</button>

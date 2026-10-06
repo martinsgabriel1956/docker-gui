@@ -23,7 +23,7 @@ Um arquivo Python só, que usa só a biblioteca padrão e o `docker` CLI que a p
 - Roda com `python3 docker_gui.py`; abre o navegador num link com token. Uso em janela ao lado do editor e do terminal.
 - Lista ao vivo pelos eventos do `docker events`, com poll de segurança.
 - Contextos do Docker (daemon remoto) e Podman funcionam; daemon remoto é sinalizado o tempo todo.
-- Interface em pt-BR.
+- Interface em pt-BR ou em inglês, pelo locale do sistema ou pelo `--lang`.
 
 ## Capabilities and Constraints
 
@@ -36,7 +36,7 @@ Um arquivo Python só, que usa só a biblioteca padrão e o `docker` CLI que a p
 ## Brand Commitments
 
 - Nome: Docker GUI. Sem logo próprio.
-- Voz: pt-BR direto, frases curtas, verbos do CLI literais nos menus, confirmações que dizem o que sai e o que fica.
+- Voz: pt-BR direto (em inglês, o mesmo tom), frases curtas, verbos do CLI literais nos menus, confirmações que dizem o que sai e o que fica.
 
 ## Evidence on Hand
 

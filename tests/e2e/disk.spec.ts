@@ -15,17 +15,35 @@ const openTab = async (page: import('@playwright/test').Page, k: 'images' | 'vol
   await expect(page.locator(`#obj-${k}-list`)).not.toHaveText('Carregando…');
 };
 
-test('cada aba mostra o uso de disco dela: build cache junto das imagens', async ({ page, gui }) => {
+test('cada aba mostra o uso de disco dela: containers parados e build cache junto das imagens', async ({ page, gui }) => {
   await gui.open({ containers: [ctr('web')], df: DF });
   await openTab(page, 'images');
   const df = page.locator('#df-images');
   await expect(df).toContainText('4.01GB no total · 1.2GB (29%) liberável · 10 itens, 7 em uso');
   await expect(df).toContainText('Build cache');
+  // os parados seguram as imagens "em uso": vêm antes delas
+  await expect(df.locator('div.font-medium')).toHaveText(['Containers parados', 'Imagens', 'Build cache']);
   await expect(df).not.toContainText('Volumes');
   await openTab(page, 'volumes');
   await expect(page.locator('#df-volumes')).toContainText('1.147GB no total');
   await expect(page.locator('#df-volumes')).not.toContainText('Build cache');
-  await expect(page.locator('main')).not.toContainText('643.1kB');  // containers ficam na lista, não aqui
+  await expect(page.locator('#df-volumes')).not.toContainText('643.1kB');
+});
+
+test('limpar containers parados diz quais saem e tira eles da lista', async ({ page, gui }) => {
+  const exited = { State: 'exited', Status: 'Exited (0) 3 days ago' };
+  await gui.open({ containers: [ctr('web'), ctr('cron', exited), ctr('velho', { State: 'created', Status: 'Created' }),
+                                ctr('pausado', { State: 'paused', Status: 'Up 1 hour (Paused)' })], df: DF });
+  await openTab(page, 'images');
+  await page.getByRole('button', { name: 'Limpar containers parados' }).click();
+  // a lista sai da página (o df só conta): parado e criado vão, rodando e pausado ficam
+  await expect(page.locator('#df-images')).toContainText('Apagar os containers parados? Vai remover cron e velho. Os logs deles se perdem; os volumes ficam. Esc cancela.');
+  await page.waitForTimeout(700);
+  await page.getByRole('button', { name: 'Confirmar limpeza de containers parados' }).click();
+  await expect(page.locator('#toast')).toHaveText('Containers parados: 53.25kB liberados.');
+  expect(gui.read().pruned).toEqual(['container prune -f']);
+  await page.locator('#tab-containers').click();
+  await expect(page.locator('#rows tr[data-row]')).toHaveCount(2);  // a lista relê na hora, sem esperar o evento
 });
 
 test('limpar imagens usa a confirmação em 2 passos', async ({ page, gui }) => {
@@ -239,7 +257,9 @@ test('limpar volumes diz quais saem: no Docker, só os anônimos sem uso', async
 test('cada categoria do disco tem a barra do que a limpeza libera', async ({ page, gui }) => {
   await gui.open({ ...OBJECTS(), df: DF });
   await openTab(page, 'images');
-  // 1.2GB (29%) das imagens; o build cache não traz a porcentagem e sai pela conta (tudo)
-  await expect(page.locator('#df-images span[style]').first()).toHaveAttribute('style', 'width:29%');
+  // 53.25kB (8%) dos containers parados, 1.2GB (29%) das imagens; o build cache não traz a porcentagem e sai pela conta (tudo)
+  await expect(page.locator('#df-images span[style]')).toHaveCount(3);
+  await expect(page.locator('#df-images span[style]').nth(0)).toHaveAttribute('style', 'width:8%');
+  await expect(page.locator('#df-images span[style]').nth(1)).toHaveAttribute('style', 'width:29%');
   await expect(page.locator('#df-images span[style]').last()).toHaveAttribute('style', 'width:100%');
 });
