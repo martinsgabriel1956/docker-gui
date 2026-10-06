@@ -59,12 +59,11 @@
   <div id="banner" role="alert" class="hidden mb-4 rounded-lg ring-1 ring-warn/30 bg-warn/10 px-4 py-3 text-sm"></div>
 
   <section id="panel-containers" role="tabpanel" aria-labelledby="tab-containers">
-    <div class="flex flex-wrap items-start justify-between gap-4 mb-6 max-lg:mb-4">
-      <div class="min-w-0 max-lg:w-full flex flex-wrap items-center gap-x-4 gap-y-2">
-        <button id="new" onclick="openCreate()" class="px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 rounded text-sm font-medium ring-1 ring-accent/40 bg-accent/10 text-accent-fg hover:bg-accent/20 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">+ Novo container</button>
+    <!-- no celular a triagem vem primeiro: contagens, busca e, por último, o "Novo container" (tarefa rara) -->
+    <div class="flex flex-wrap items-center gap-x-4 gap-y-3 mb-6 max-lg:mb-4">
+        <button id="new" onclick="openCreate()" class="max-lg:order-3 px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 rounded text-sm font-medium ring-1 ring-accent/40 bg-accent/10 text-accent-fg hover:bg-accent/20 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">+ Novo container</button>
         <div id="count" role="group" aria-label="Filtrar por estado" class="min-w-0 max-lg:w-full flex flex-wrap gap-1 text-sm text-muted">Carregando…</div>
-      </div>
-      <div class="w-full sm:w-72">
+      <div class="w-full sm:w-72 lg:ml-auto max-lg:order-2">
         <label for="q" class="sr-only">Filtrar containers por nome, imagem ou projeto</label>
         <input id="q" type="search" placeholder="Filtrar por nome, imagem ou projeto…" aria-describedby="q-hint"
           class="w-full rounded bg-raised ring-1 ring-line px-3 py-2 max-lg:py-3 text-sm text-fg-strong placeholder:text-muted focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
@@ -100,14 +99,14 @@
   <!-- o docker system df é caro (soma os volumes): só roda ao abrir a aba, nunca no poll -->
   <section id="panel-images" role="tabpanel" aria-labelledby="tab-images" hidden class="space-y-4">
     <div id="df-images" class="rounded-lg ring-1 ring-line bg-raised/40 px-4 text-sm divide-y divide-line/70"></div>
-    <div id="obj-images-list" class="rounded-lg ring-1 ring-line bg-raised/40 px-4 text-sm"></div>
+    <div id="obj-images-list" class="rounded-lg ring-1 ring-line bg-raised/40 text-sm overflow-x-auto"></div>
   </section>
   <section id="panel-volumes" role="tabpanel" aria-labelledby="tab-volumes" hidden class="space-y-4">
     <div id="df-volumes" class="rounded-lg ring-1 ring-line bg-raised/40 px-4 text-sm divide-y divide-line/70"></div>
-    <div id="obj-volumes-list" class="rounded-lg ring-1 ring-line bg-raised/40 px-4 text-sm"></div>
+    <div id="obj-volumes-list" class="rounded-lg ring-1 ring-line bg-raised/40 text-sm overflow-x-auto"></div>
   </section>
   <section id="panel-networks" role="tabpanel" aria-labelledby="tab-networks" hidden class="space-y-4">
-    <div id="obj-networks-list" class="rounded-lg ring-1 ring-line bg-raised/40 px-4 text-sm"></div>
+    <div id="obj-networks-list" class="rounded-lg ring-1 ring-line bg-raised/40 text-sm overflow-x-auto"></div>
   </section>
 </main>
 
@@ -156,7 +155,8 @@
     <button id="more" onclick="loadMore()" class="data-done:ring-0 data-done:px-0 data-done:min-h-0 data-done:opacity-100 data-done:text-muted data-done:cursor-default px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent aria-disabled:opacity-40">Carregar 2.000 linhas</button>
     <div id="dlg-msg" role="status" aria-live="polite" class="empty:hidden basis-full"></div>
   </div>
-  <pre id="lb" tabindex="0" aria-label="Saída dos logs" class="flex-1 min-h-40 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent overflow-auto p-4 text-xs leading-relaxed font-mono text-fg-soft whitespace-pre-wrap [overflow-wrap:anywhere]"></pre>
+  <!-- vazia com o ao vivo ligado (o container não escreveu nada ainda): o CSS diz isso, sem entrar no Copiar -->
+  <pre id="lb" tabindex="0" aria-label="Saída dos logs" data-empty="Nada no log ainda. As linhas novas aparecem aqui assim que o container escrever." class="empty:before:content-[attr(data-empty)] empty:before:font-sans empty:before:text-muted flex-1 min-h-40 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent overflow-auto p-4 text-xs leading-relaxed font-mono text-fg-soft whitespace-pre-wrap [overflow-wrap:anywhere]"></pre>
 </dialog>
 
 <!-- Esc vai para o programa do terminal (vim, less...): fecha só pelo × -->

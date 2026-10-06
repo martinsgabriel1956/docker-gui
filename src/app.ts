@@ -237,16 +237,15 @@ async function loadStats() {
 // setTimeout encadeado em vez de setInterval: um docker lento não empilha consultas
 async function statsLoop() { if (!document.hidden) await loadStats(); setTimeout(statsLoop, 5000); }
 
-// sparkline em SVG inline, sem animação. A janela tem largura fixa (HISTORY leituras) com a linha de base
-// inteira: a série cresce da direita até preencher. Para leitor de tela e no hover, um texto com mín, máx e o
-// valor atual. O CPU tem piso de 1% na escala, para ruído de 0,01% não parecer pico
+// sparkline em SVG inline, sem animação e sem linha de base: a série ocupa a largura toda (estica até a janela de
+// HISTORY leituras encher). Para leitor de tela e no hover, um texto com mín, máx e o valor atual. O CPU tem piso de 10% na escala: 0,8% fica baixo e 80% no topo (com 1%, qualquer carga enchia a altura)
 const CPU_FMT = (n: number) => `${n.toFixed(2)}%`;
 function spark(h: Sample[], k: 'cpu' | 'mem', w = 48, ht = 14) {
   if (h.length < 2) return '';
   const vs = h.map(s => s[k]), label = esc(trend(k === 'cpu' ? 'CPU' : 'Memória', vs, h.at(-1)!.t - h[0].t, k === 'cpu' ? CPU_FMT : fmtBytes));
   return `<span role="img" data-spark="${k}" aria-label="${label}" title="${label}" class="inline-block align-middle -mt-0.5 mr-0.5"><svg aria-hidden="true"
     viewBox="0 0 ${w} ${ht}" width="${w}" height="${ht}" fill="none" stroke-linecap="round" stroke-linejoin="round">
-    <polyline points="${sparkPoints(vs, w, ht, HISTORY, k === 'cpu' ? 1 : 0)}" stroke-width="1.5" class="stroke-accent"/></svg></span>`;
+    <polyline points="${sparkPoints(vs, w, ht, HISTORY, k === 'cpu' ? 10 : 0)}" stroke-width="1.5" class="stroke-accent"/></svg></span>`;
 }
 
 // onde a página age (docker_gui.py, where()): "docker · producao". Remoto fica em âmbar, com o endereço para o leitor de
@@ -284,7 +283,7 @@ function renderCount() {
   const segs = BUCKETS.filter(([k]) => n(k) || only === k).map(([k, one, many, color]) =>
     `<button data-id="count-${k}" data-a="filter" aria-pressed="${only === k}" onclick="filterBy('${k}')"
       class="${pill} rounded-none font-mono text-data hover:bg-hover aria-pressed:bg-fg-strong aria-pressed:text-canvas ${color}"><span class="font-semibold tabular-nums">${n(k)}</span> ${n(k) === 1 ? one : many}</button>`).join('');
-  $('#count').innerHTML = (segs ? `<span class="flex max-lg:max-w-full max-lg:overflow-x-auto rounded ring-1 ring-line divide-x divide-line">${segs}</span>`
+  $('#count').innerHTML = (segs ? `<span class="flex max-lg:max-w-full max-lg:overflow-x-auto [scrollbar-width:none] rounded ring-1 ring-line divide-x divide-line">${segs}</span>`
     : '<span>0 containers</span>') + (only || $<HTMLInputElement>('#q').value.trim()
     ? `<button data-id="count-clear" data-a="filter" onclick="clearFilters()" class="${pill} text-accent-fg underline underline-offset-4 hover:text-accent-soft">Limpar filtros</button>` : '');
 }
@@ -437,7 +436,7 @@ function rowHtml(c: Container, withProject: boolean) {
   const u = c.State === 'running' && !b && stats[sid(c.ID)] ? usage(stats[sid(c.ID)]) : null, h = series.get(sid(c.ID)) ?? [];
   const slot = (w = 'lg:w-20') => `<span aria-hidden="true" class="${w} shrink-0 max-lg:hidden"></span>`;
   const btn = (a: RowAction, cls = 'text-fg hover:bg-hover', text = LABEL[a], aria = `${LABEL[a]} ${esc(c.Names)}`, base = BTN) =>
-    `<button data-id="${c.ID}" data-a="${a}" ${b && a !== 'logs' ? 'aria-disabled="true"' : ''}
+    `<button data-id="${c.ID}" data-a="${a}" ${(b || armed && a !== 'remove') && a !== 'logs' ? 'aria-disabled="true"' : ''}
       aria-label="${aria}" aria-describedby="st-${c.ID}" onclick="act('${a}','${c.ID}')" class="lg:w-20 max-lg:min-w-24 shrink-0 ${base} ${cls}">${text}</button>`;
   // ações raras (reiniciar, pausar, remover, exec) ficam no "⋯": a linha mostra só a ação principal e Logs
   const svc = p && workingDir(c) && service(c);  // compose restart só com a pasta no label, como o compose up
@@ -449,7 +448,7 @@ function rowHtml(c: Container, withProject: boolean) {
                 c.State === 'running' && ['shell', 'Abrir terminal'], c.State === 'running' && ['exec', 'Copiar docker exec'],
                 removable(c) ? ['remove', 'Remover…'] : ['noremove', 'Pare antes de remover']].filter((x): x is [MenuAction, string] => !!x);
   const menu = !more.length ? slot('lg:w-9') : menuBox(c.ID, `Mais ações para ${esc(c.Names)}`, !!b,
-    more.map(([a, text]) => a === 'noremove' ? `<button data-id="${c.ID}" data-a="m-noremove" aria-disabled="true" title="O docker só remove container parado (sem -f)"
+    more.map(([a, text]) => a === 'noremove' ? `<button data-id="${c.ID}" data-a="m-noremove" aria-disabled="true" aria-label="Remover (indisponível: pare o container antes)" title="O docker só remove container parado (sem -f)"
       class="${MENU_ITEM} text-muted cursor-not-allowed hover:bg-transparent">${text}</button>` : `<button data-id="${c.ID}" data-a="m-${a}" ${b || (a === 'srestart' && composing.has(p)) ? 'aria-disabled="true"' : ''} onclick="menuPick(this); ${a === 'exec' ? `copyExec('${c.ID}')` : a === 'shell' ? `openShell('${c.ID}')`
       : a === 'srestart' ? `restartService('${c.ID}')` : `act('${a}','${c.ID}')`}"
       class="${MENU_ITEM} ${a === 'remove' ? 'text-bad-fg' : 'text-fg'}">${text}</button>`).join(''));
@@ -470,14 +469,15 @@ function rowHtml(c: Container, withProject: boolean) {
       <span id="st-${c.ID}" class="${t[1]}">${b ? VERB[b] : esc(st[0])}${st[1] && !b ? `<span class="block text-xs text-muted">${st[1]}</span>` : ''}</span>${
       // [contain:inline-size]: a linha do log ocupa a largura que a coluna já tem, sem alargá-la (a tabela estourava)
       fell(c) && !b && tails[tailKey(c)] ? `<span class="block [contain:inline-size] mt-1 font-mono text-xs text-fg-soft lg:truncate [overflow-wrap:anywhere]" title="${esc(tails[tailKey(c)])}"><span aria-hidden="true" class="text-dim">› </span><span class="sr-only">Última linha do log: </span>${esc(tails[tailKey(c)])}</span>` : ''}${
-      u ? `<span id="us-${c.ID}" class="block text-xs font-mono text-muted" title="${esc(u[2])}"><span class="whitespace-nowrap">${esc(u[0])} ${spark(h, 'cpu')}</span> <span class="whitespace-nowrap">· ${esc(u[1])} ${spark(h, 'mem')}</span></span>` : ''}${b ? '' : errHtml(c) + healthBox}</td>
+      u ? `<span id="us-${c.ID}" class="block text-xs font-mono text-muted" title="${esc(u[2])}"><span class="whitespace-nowrap">${esc(u[0])} ${spark(h, 'cpu')}</span> <span class="whitespace-nowrap max-xl:block"><span class="max-xl:hidden">· </span>${esc(u[1])} ${spark(h, 'mem')}</span></span>` : ''}${b ? '' : errHtml(c) + healthBox}</td>
     <td role="cell" class="pr-4 max-lg:hidden max-lg:has-[div]:block max-lg:p-0 max-lg:pl-14">${pp.length
       ? `<div class="flex flex-wrap gap-1 max-lg:gap-x-2 max-lg:-ml-2 max-lg:-my-3">${pp.map(x => portChip(c, x)).join('')}</div>` : ''}</td>
     <td role="cell" class="pr-4 max-lg:block max-lg:p-0 max-lg:pt-2"><div class="flex justify-end max-lg:justify-start items-center gap-1.5 max-lg:gap-2">
-      ${armed ? btn('remove', 'bg-danger text-white ring-danger hover:bg-danger-hover', 'Apagar', `Confirmar remoção de ${esc(c.Names)}`)
-        : prim ? btn(prim, prim === 'start' ? 'text-ok-fg hover:bg-ok/10' : undefined) : slot()}${restart}${btn('logs', 'text-fg-soft hover:text-fg-strong hover:bg-hover', undefined, undefined, ghost())}
-      ${armed ? cancelBtn(c.ID, `remoção de ${esc(c.Names)}`) : menu}
-    </div>${armed ? armNote(`Apagar ${esc(c.Names)} de vez? Os volumes ficam.`, 'mt-1.5 [contain:inline-size] lg:text-right text-balance') : ''}</td></tr>`;
+      ${prim ? btn(prim, prim === 'start' ? 'text-ok-fg hover:bg-ok/10' : undefined) : slot()}${restart}${btn('logs', 'text-fg-soft hover:text-fg-strong hover:bg-hover', undefined, undefined, ghost())}
+      ${armed ? menuBox(c.ID, `Mais ações para ${esc(c.Names)}`, true, '') : menu}
+    </div>${armed ? `<div class="mt-1.5 flex flex-wrap items-center justify-end max-lg:justify-start gap-x-1.5 gap-y-1 [contain:inline-size]">${
+      armNote(`Remover ${esc(c.Names)} de vez? Os volumes ficam.`, 'basis-full lg:text-right text-balance')}${
+      btn('remove', 'bg-danger text-white ring-danger hover:bg-danger-hover', 'Remover', `Confirmar remoção de ${esc(c.Names)}`)}${cancelBtn(c.ID, `remoção de ${esc(c.Names)}`)}</div>` : ''}</td></tr>`;
 }
 
 // "⋯" das ações raras, de um container ou de um projeto: o id e o aria-label dizem de quem é
@@ -599,7 +599,7 @@ function render() {
   saveHash();
   // só escreve na região viva quando a mensagem muda, para não apagar o anúncio de uma ação em andamento
   const say = arming ? `${REMOTE ? `No daemon remoto ${CTX}: ` : ''}${arming.a === 'down' ? `Clique em Derrubar ${arming.name} para derrubar o projeto.`
-    : arming.a === 'prune' ? `Clique em Limpar para apagar ${arming.name}.` : `Clique em Apagar para apagar ${arming.name} de vez.`} ${arming.note} ${TOUCH ? 'Cancela sozinho em 8 segundos.' : 'Esc cancela.'}`
+    : arming.a === 'prune' ? `Clique em Limpar para apagar ${arming.name}.` : `Clique em Remover para apagar ${arming.name} de vez.`} ${arming.note} ${TOUCH ? 'Cancela sozinho em 8 segundos.' : 'Esc cancela.'}`
             : q || only ? `${rows.length} de ${data.length} containers` : '';
   if (say !== lastSay) $('#shown').textContent = lastSay = say;
 }
@@ -669,6 +669,8 @@ async function run(a: Action, c: Container): Promise<boolean> {
 
 async function act(a: RowAction, id: string) {
   if (a === 'logs') return logs(id);
+  // com a remoção armada, a principal fica inerte: clicar nela por hábito só cancela
+  if (arming?.id === id && a !== 'remove') return disarm();
   const c = data.find(c => c.ID === id);
   if (!c || busy.has(id)) return;
   if (a === 'remove' && !confirmed(id, c.Names, 'remove', 'Os volumes não são afetados.')) return;
@@ -765,13 +767,13 @@ function renderBulk() {
               : a === 'start' ? 'text-ok-fg hover:bg-ok/10' : a === 'remove' ? 'text-bad-fg hover:bg-bad/10' : 'text-fg hover:bg-hover';
     const aria = armed && a === 'remove' ? `Confirmar remoção de ${plural(k, 'container', 'containers')}` : `${text.replace('…', '')} ${plural(k, 'selecionado', 'selecionados')}`;
     return `<button data-id="bulk" data-a="${a}" ${bulkBusy ? 'aria-disabled="true"' : ''} aria-label="${aria}" title="${esc(bulkList(a, armed && a === 'remove' ? armedIds : undefined).map(c => c.Names).join(', '))}"
-      onclick="bulkAct('${a}')" class="${BTN} ${cls}">${bulkBusy === a ? `${VERB[a]} (${k})` : armed && a === 'remove' ? `Apagar ${plural(k, 'container', 'containers')}` : `${text} (${k})`}</button>`;
+      onclick="bulkAct('${a}')" class="${BTN} ${cls}">${bulkBusy === a ? `${VERB[a]} (${k})` : armed && a === 'remove' ? `Remover ${plural(k, 'container', 'containers')}` : `${text} (${k})`}</button>`;
   };
   const html = !n ? '' : `<p class="mr-auto text-sm font-medium text-fg-strong">${plural(n, 'selecionado', 'selecionados')}${
       hidden ? `<span class="font-normal text-muted"> · ${hidden} fora do filtro</span>` : ''}</p>
     <div class="flex flex-wrap gap-1.5">${BULK.map(btn).join('')}${armed ? cancelBtn('bulk', 'remoção em lote') : ''}
       ${armed ? '' : `<button data-id="bulk" data-a="clear" onclick="clearSel()" class="${BTN} text-muted hover:bg-hover">Limpar seleção</button>`}</div>
-    ${armed ? armNote(`Apagar ${esc(names(data.filter(c => armedIds.includes(c.ID)), 10))} de vez? Os volumes ficam.`) : ''}`;
+    ${armed ? armNote(`Remover ${esc(names(data.filter(c => armedIds.includes(c.ID)), 10))} de vez? Os volumes ficam.`) : ''}`;
   $('#bulk').classList.toggle('hidden', !n);  // a altura dela vira --dock (ResizeObserver lá embaixo)
   if (html !== bulkHtml) $('#bulk').innerHTML = bulkHtml = html;  // o render roda a cada poll: só troca se mudou
 }
@@ -942,7 +944,9 @@ function renderDlg() {
   // uso de recursos com sparkline maior, e rede e disco, que não cabem na tabela
   const s = c.State === 'running' && !b ? stats[sid(c.ID)] : undefined, u = s && usage(s), hs = series.get(sid(c.ID)) ?? [];
   // uma linha para cada coisa: status, último healthcheck (inteiro no title) e uso, com rede e disco no fim (fora do celular)
-  $('#dlg-status').innerHTML = `<span class="${t[1]}">${b ? VERB[b] : esc(st[0])}</span>${st[1] && !b ? `<span class="text-muted"> · ${st[1]}</span>` : ''}${b ? '' : errHtml(c)}${
+  // depois de reiniciar daqui, o status diz quando foi: a marca no log só aparece se o container escrever algo novo
+  const again = mark && c.State === 'running' && !b ? `<span class="text-muted"> · ${esc(mark.label)}</span>` : '';
+  $('#dlg-status').innerHTML = `<span class="${t[1]}">${b ? VERB[b] : esc(st[0])}</span>${st[1] && !b ? `<span class="text-muted"> · ${st[1]}</span>` : ''}${again}${b ? '' : errHtml(c)}${
     h ? `<div class="mt-1 text-xs text-muted lg:truncate" title="${esc(h)}"><span class="font-sans">Último healthcheck:</span> <span class="text-fg-soft">${esc(h)}</span></div>` : ''}${
     s && u ? `<div id="dlg-usage" class="mt-1 text-xs text-muted"><span class="whitespace-nowrap"><span class="text-fg-soft">${esc(u[0])}</span> ${spark(hs, 'cpu', 96, 20)}</span> <span class="whitespace-nowrap">· <span class="text-fg-soft">${esc(u[1])}</span> ${spark(hs, 'mem', 96, 20)}</span>${
       io(s).length ? `<span class="max-lg:hidden text-fg-soft" title="Totais desde que o container subiu">${io(s).map(x => ` <span class="whitespace-nowrap">· ${esc(x)}</span>`).join('')}</span>` : ''}</div>` : ''}`;
@@ -963,9 +967,9 @@ const TAILS = ['500', '2000', '10000', 'all'] as const;
 // o ao vivo vai até 10000: o teto de linhas na tela tem que caber o histórico, e "tudo" ao vivo não teria teto
 const LIVE_TAILS = 3;
 // trecho que casou com o filtro
-const MARK = 'rounded-sm bg-warn/30 text-fg-strong';
+const MARK = 'rounded-sm bg-accent/30 text-fg-strong';  // o acento é a seleção; amarelo é aviso
 // linhas carregadas (cada uma com o \n), que o filtro relê; ocorrências e linhas que casaram; tudo veio (log curto)
-let tailAt = 0, buf: string[] = [], hits = 0, hitLines = 0, complete = false;
+let tailAt = 0, buf: string[] = [], hits = 0, hitLines = 0, complete = false, streamOpen = false;
 
 const fmt = (n: number) => n.toLocaleString('pt-BR');
 // o compose aplica o --tail em cada container do projeto
@@ -988,12 +992,15 @@ function markInto(el: HTMLElement, text: string, re: RegExp | null) {
 // Paleta própria (theme.css, --color-svc-*): com as cores de status, um serviço que caiu podia sair verde
 const SVC_PREFIX = /^\S+\s+\|\s?/, SVC_TONES = ['text-svc-1', 'text-svc-2', 'text-svc-3', 'text-svc-4'];
 // cor pela ordem em que o serviço aparece, como o compose: os 4 primeiros nunca repetem (um hash colide com 4 cores).
-// Réplicas (api-1, api-2) ficam com a cor do serviço; openLogs zera a ordem
-const svcSeen = new Map<string, string>();
+// Réplicas (api-1, api-2) ficam com a cor do serviço, e a cor fica guardada por projeto: reabrir os logs não troca as cores
+const svcSeen = new Map<string, string>(), svcCount = new Map<string, number>();
 const svcTone = (prefix: string) => {
-  const svc = prefix.replace(/-\d+\s.*$/s, '');
-  if (!svcSeen.has(svc)) svcSeen.set(svc, SVC_TONES[svcSeen.size % SVC_TONES.length]);
-  return svcSeen.get(svc)!;
+  const p = logProject?.project ?? '', key = `${p}/${prefix.replace(/-\d+\s.*$/s, '')}`;
+  if (!svcSeen.has(key)) {
+    const n = svcCount.get(p) ?? 0;
+    svcSeen.set(key, SVC_TONES[n % SVC_TONES.length]); svcCount.set(p, n + 1);
+  }
+  return svcSeen.get(key)!;
 };
 
 // cor da linha pelo nível (ERROR, WARN, DEBUG...); o resto fica na cor da caixa
@@ -1087,7 +1094,9 @@ async function fetchLogs(more = false) {
   try {
     const r = await api(logProject ? `/api/compose/logs?${new URLSearchParams({...logProject, tail})}` : `/api/logs/${logId}?tail=${tail}`);
     const j: string = await r.json();
-    if (stream) return;  // o ao vivo ligou enquanto esta resposta vinha: ele é quem preenche a caixa
+    // o ao vivo já conectou: ele é quem preenche a caixa. Conectando ainda (ou preso no limite de conexões do navegador),
+    // a resposta entra: senão a caixa ficava em "Carregando…" até o stream abrir, se abrisse
+    if (streamOpen) return;
     // já pediram outro container (ou projeto) ou mais histórico: vale a resposta nova
     if (who !== (logProject ?? logId) || tail !== TAILS[tailAt]) return;
     buf = r.ok && j ? j.match(/[^\n]*\n|[^\n]+$/g)! : [];
@@ -1103,13 +1112,14 @@ async function fetchLogs(more = false) {
 }
 
 function openLogs(title: string, running: boolean) {
-  tailAt = 0; buf = []; complete = false; svcSeen.clear(); mark = null;
+  tailAt = 0; buf = []; complete = false; mark = null;
   $('#lt').textContent = title;
   $<HTMLInputElement>('#lf').value = '';  // cada container (ou projeto) começa sem filtro
   $('#lb').textContent = 'Carregando…'; $('#lmeta').textContent = hist().replace(/^./, c => c.toUpperCase()); $('#dlg-msg').innerHTML = '';
   $('#insp').hidden = !!logProject;  // a configuração (inspect) é de um container só
   renderHits(); renderMore();
   $<HTMLDialogElement>('#dlg').showModal(); renderDlg(); fetchLogs();
+  $('#lb').focus();  // a caixa do log: as setas rolam, / vai para o filtro e r reinicia
   if (running && wantsFollow()) toggleFollow(true);  // quem deixou o ao vivo ligado da última vez
 }
 
@@ -1164,7 +1174,7 @@ function flushLogs() {
 // ao vivo: Server-Sent Events com o docker logs -f. Fechar o EventSource derruba a conexão e o servidor mata o processo
 function toggleFollow(on = !stream, why = '') {
   const was = !!stream;
-  stream?.close(); stream = null;
+  stream?.close(); stream = null; streamOpen = false;
   if (was) flushLogs();  // o que já chegou entra antes de parar
   if (on) {
     tailAt = Math.min(tailAt, LIVE_TAILS - 1); complete = false;
@@ -1173,6 +1183,7 @@ function toggleFollow(on = !stream, why = '') {
     const es = stream = new EventSource(logProject ? `/api/compose/logs/stream?${q}` : `/api/logs/${logId}/stream?${q}`);
     // cada conexão (inclusive a reconexão automática) recomeça do histórico pedido: limpa para não duplicar
     es.onopen = () => {
+      streamOpen = true;
       pending = []; buf = []; hits = hitLines = 0; marked = false; $('#lb').textContent = ''; renderHits();
       $('#lmeta').textContent = `Ao vivo · ${hist()} e as novas`;
     };
@@ -1202,6 +1213,8 @@ function copyLogs() {
   navigator.clipboard.writeText($('#lb').textContent ?? '').then(() => toast('Logs copiados.', true), () => toast('Não consegui copiar.'));
 }
 
+// o mesmo texto do select do "Novo container"
+const RESTART_TXT: Record<string, string> = {no: 'não reinicia', 'on-failure': 'se sair com erro', 'unless-stopped': 'sempre, menos se você parar', always: 'sempre'};
 function inspectHtml(d: Inspect, reveal: boolean) {
   const list = (xs: string[], none = 'nenhum') => xs.length ? xs.map(x => `<div>${x}</div>`).join('') : `<span class="font-sans text-muted">${none}</span>`;
   const nets = Object.entries(d.Networks).map(([n, ip]) => esc(ip ? `${n} · ${ip}` : n));
@@ -1209,7 +1222,7 @@ function inspectHtml(d: Inspect, reveal: boolean) {
   const env = d.Env.map(([k, v]) => `${esc(k)}=${v === null ? '<span aria-hidden="true">••••••</span><span class="sr-only">(oculto)</span>' : esc(v)}`);
   const dt = 'font-sans text-muted';
   return `<dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 font-mono text-fg-soft [overflow-wrap:anywhere]">
-    <dt class="${dt}">Restart</dt><dd>${esc(d.Restart)}</dd>
+    <dt class="${dt}">Restart</dt><dd>${esc(d.Restart)}${RESTART_TXT[d.Restart.split(':')[0]] ? `<span class="font-sans text-muted"> · ${RESTART_TXT[d.Restart.split(':')[0]]}</span>` : ''}</dd>
     <dt class="${dt}">Redes</dt><dd>${list(nets, 'nenhuma')}</dd>
     <dt class="${dt}">Mounts</dt><dd>${list(mounts)}</dd>
     <dt class="${dt}">Env</dt><dd>${list(env, 'nenhuma')}${d.Env.length ? `<button id="insp-env" onclick="loadInspect(${!reveal})"
@@ -1475,38 +1488,44 @@ async function loadObjects(k: ObjKind) {
   render();
 }
 
+// colunas de cada lista, no ritmo do `docker images` / `docker volume ls` / `docker network ls`: [título, só leitor de tela no celular]
+const OBJ_COLS: Record<ObjKind, string[]> = {images: ['Imagem', 'ID', 'Tamanho', 'Criada', 'Em uso por'],
+  volumes: ['Volume', 'Driver', 'Em uso por'], networks: ['Rede', 'Driver', 'Escopo', 'Em uso por']};
 function objItem(k: ObjKind, o: Obj) {
   const r = objRef(k, o), id = `rm-${k}-${r}`, armed = arming?.id === id, what = `${OBJ[k][1]} ${objName(k, o)}`;
-  const err = objErr.get(id), hint = err && rmHint(err), badge = (t: string, title: string) =>
-    `<span title="${title}" class="ml-1.5 px-1.5 py-0.5 rounded text-xs font-normal ring-1 ring-line-strong text-muted">${t}</span>`;
-  // meta: HTML já escapado
-  let title = esc(objName(k, o)), meta: string[];
+  const err = objErr.get(id), hint = err && rmHint(err), tag = (t: string, title: string) =>
+    `<span title="${title}" class="ml-1.5 font-normal text-muted">(${t})</span>`;
+  // cells: HTML já escapado, na ordem de OBJ_COLS (sem o título)
+  let title = esc(objName(k, o)), cells: string[];
   if (k === 'images') {
     const i = o as Image;
-    if (!i.Tags.length) title = `sem tag${badge('dangling', 'nenhuma tag aponta para ela')}`;  // o ID vem logo abaixo
-    meta = [`<span class="font-mono">${esc(i.ID.slice(0, 12))}</span>`, esc(i.Size), ...(i.Created ? [`criada há ${age(i.Created)}`] : [])];
+    if (!i.Tags.length) title = `sem tag${tag('dangling', 'nenhuma tag aponta para ela')}`;
+    cells = [esc(i.ID.slice(0, 12)), esc(i.Size), i.Created ? `há ${age(i.Created)}` : '—'];
   } else if (k === 'volumes') {
     const v = o as Volume;
-    if (anon(v.Name)) title = `<span title="${esc(v.Name)}" class="font-mono">${title}…</span>${badge('anônimo', 'criado sem nome, por um container')}`;
-    meta = [esc(v.Driver)];
+    if (anon(v.Name)) title = `<span title="${esc(v.Name)}">${title}…</span>${tag('anônimo', 'criado sem nome, por um container')}`;
+    cells = [esc(v.Driver)];
   } else {
     const n = o as Network;
-    if (n.Builtin) title += badge('padrão', 'vem com o daemon e não pode ser removida');
-    meta = [esc(n.Driver), esc(n.Scope)];
+    if (n.Builtin) title += tag('padrão', 'vem com o daemon e não pode ser removida');
+    cells = [esc(n.Driver), esc(n.Scope)];
   }
+  cells.push(o.Containers.length ? `<span class="text-fg-soft">${esc(o.Containers.join(', '))}</span>` : 'nenhum container');
   // rede padrão não remove; rede sem ID (formato antigo do podman) não tem como
   const canRm = k !== 'networks' || (!(o as Network).Builtin && !!(o as Network).ID);
   const cls = armed ? 'bg-danger text-white ring-danger hover:bg-danger-hover' : 'text-fg hover:bg-hover';
-  return `<li class="flex flex-wrap items-center gap-x-3 gap-y-2 py-3">
-    <div class="mr-auto min-w-0 [overflow-wrap:anywhere]"><div class="font-medium text-fg-strong">${title}</div>
-      <div class="text-xs text-muted">${meta.join(' · ')} · ${o.Containers.length
-        ? `<span class="text-fg-soft">em uso por ${esc(o.Containers.join(', '))}</span>` : 'sem uso'}</div></div>
-    ${canRm ? `<button data-id="${esc(id)}" data-a="rm" data-k="${k}" data-r="${esc(r)}" ${objBusy ? 'aria-disabled="true"' : ''}
+  const cols = OBJ_COLS[k].slice(1);
+  return `<tr class="border-t border-line/70 max-lg:block max-lg:py-3">
+    <th scope="row" class="py-2.5 pl-4 pr-6 max-lg:block max-lg:p-0 max-lg:px-4 text-left font-normal align-top">
+      <div class="font-mono text-data font-semibold text-fg-strong [overflow-wrap:anywhere]">${title}</div>
+      ${err ? `<div class="mt-1 [contain:inline-size] max-lg:[contain:none] text-xs text-bad-fg">${hint ? `<p class="font-sans">${hint}</p>` : ''}
+        <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-bad-soft">${esc(err)}</pre></div>` : ''}</th>
+    ${cells.map((c, i) => `<td class="py-2.5 pr-4 max-lg:block max-lg:p-0 max-lg:px-4 align-top font-mono text-xs text-muted [overflow-wrap:anywhere]"><span class="lg:sr-only">${cols[i]}: </span>${c}</td>`).join('')}
+    <td class="py-2 pr-4 max-lg:block max-lg:p-0 max-lg:px-4 max-lg:pt-2 align-top"><div class="flex justify-end max-lg:justify-start items-center gap-1.5">${canRm
+      ? `<button data-id="${esc(id)}" data-a="rm" data-k="${k}" data-r="${esc(r)}" ${objBusy ? 'aria-disabled="true"' : ''}
       onclick="rmObj(this.dataset.k, this.dataset.r)" aria-label="${armed ? `Confirmar remoção de ${esc(what)}` : `Remover ${esc(what)}`}"
-      class="${BTN} ${cls}">${objBusy === id ? 'Removendo…' : armed ? 'Apagar' : 'Remover…'}</button>${armed ? cancelBtn(id, `remoção de ${esc(what)}`) : ''}` : ''}
-    ${armed ? armNote(`Apagar ${esc(what)}? ${OBJ[k][5]}`) : ''}
-    ${err ? `<div class="w-full text-xs text-bad-fg">${hint ? `<p>${hint}</p>` : ''}
-      <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-bad-soft">${esc(err)}</pre></div>` : ''}</li>`;
+      class="${BTN} ${cls}">${objBusy === id ? 'Removendo…' : armed ? 'Remover' : 'Remover…'}</button>${armed ? cancelBtn(id, `remoção de ${esc(what)}`) : ''}` : ''}</div>
+      ${armed ? armNote(`Remover ${esc(what)}? ${OBJ[k][5]}`, 'mt-1.5 [contain:inline-size] max-lg:[contain:none] lg:text-right text-balance') : ''}</td></tr>`;
 }
 
 // quantos o docker system df conta na categoria (redes não entram no df)
@@ -1517,8 +1536,10 @@ function renderObjects() {
     const v = objs[k];
     const html = v === null ? '<p class="py-3 text-muted">Carregando…</p>'
       : typeof v === 'string' ? `<p class="py-3 text-bad-fg">${esc(v)}</p>`
-      : !v.length ? `<p class="py-3 text-muted">${OBJ[k][6]}${dfCount(k) ? ` O uso de disco conta ${dfCount(k)}: feche e abra a lista para ler de novo.` : ''}</p>`
-      : `<ul aria-label="${OBJ[k][3]}" class="divide-y divide-line/70">${v.map(o => objItem(k, o)).join('')}</ul>`;
+      : !v.length ? `<p class="py-3 px-4 text-muted">${OBJ[k][6]}${dfCount(k) ? ` O docker system df conta ${dfCount(k)}: a lista pode ter vindo antes do df. Troque de aba e volte para ler de novo.` : ''}</p>`
+      : `<table aria-label="${OBJ[k][3]}" class="w-full text-left max-lg:block"><thead class="max-lg:hidden font-mono text-[11px] uppercase text-muted"><tr>${
+        OBJ_COLS[k].map((h, i) => `<th scope="col" class="py-3 ${i ? '' : 'pl-4 '}pr-4 font-medium">${h}</th>`).join('')}<th scope="col" class="pr-4"><span class="sr-only">Ações</span></th></tr></thead>
+        <tbody class="max-lg:block">${v.map(o => objItem(k, o)).join('')}</tbody></table>`;
     if (html !== objHtml[k]) $(`#obj-${k}-list`).innerHTML = objHtml[k] = html;  // o render roda a cada poll
     $(`#obj-${k}-n`).textContent = Array.isArray(v) ? ` · ${v.length}` : '';
   }

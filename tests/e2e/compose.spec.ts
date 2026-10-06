@@ -199,3 +199,33 @@ test('a faixa de estado do projeto tem um bloco por container, na cor do estado'
   await expect(blocks).toHaveCount(2);  // api e db; o solto não é do projeto
   await expect(blocks.first()).toHaveAttribute('title', /^api: /);
 });
+
+test('logs do projeto depois de um log ao vivo: nada do anterior vaza e a caixa não fica em Carregando…', async ({ page, gui }) => {
+  const cs = containers();
+  cs[1].logs = 'db 1\n';
+  await gui.open({ containers: cs });
+  await page.getByRole('button', { name: 'Logs db' }).click();
+  await page.locator('#follow').click();  // fica lembrado: os logs do projeto abrem ao vivo
+  await expect(page.locator('#lmeta')).toHaveText('Ao vivo · últimas 500 linhas e as novas');
+  await page.getByRole('button', { name: 'Fechar logs' }).click();
+  await page.getByRole('button', { name: 'Logs do projeto shop' }).click();
+  await expect(page.locator('#lb')).toHaveText('db-1  | db 1\n');
+  await expect(page.locator('#lmeta')).not.toContainText('parado');
+});
+
+test('cada serviço guarda a sua cor nos logs do projeto, de uma abertura para a outra', async ({ page, gui }) => {
+  const cs = containers();
+  cs[0].logs = 'api 1\n'; cs[1].logs = 'db 1\n';
+  await gui.open({ containers: cs });
+  const tone = async (svc: string) => (await page.locator('#lb span[class^="text-svc"]').filter({ hasText: svc }).first().getAttribute('class'))!;
+  await page.getByRole('button', { name: 'Logs do projeto shop' }).click();
+  await expect(page.locator('#lb')).toContainText('db 1');
+  const db = await tone('db-1'), api = await tone('api-1');
+  expect(db).not.toBe(api);
+  await page.getByRole('button', { name: 'Fechar logs' }).click();
+  gui.update(s => { s.containers[1].logs = 'db 1\ndb 2\n'; });
+  await page.getByRole('button', { name: 'Logs do projeto shop' }).click();
+  await expect(page.locator('#lb')).toContainText('db 2');
+  expect(await tone('db-1')).toBe(db);
+  expect(await tone('api-1')).toBe(api);
+});

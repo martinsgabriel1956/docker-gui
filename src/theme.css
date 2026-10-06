@@ -35,7 +35,7 @@
   --color-accent-soft: oklch(92% 0.05 200);
   /* serviços nos logs do projeto: só distinguem um do outro, então nenhum é tom de status nem o acento */
   --color-svc-1: oklch(82% 0.11 55);
-  --color-svc-2: oklch(85% 0.13 115);
+  --color-svc-2: oklch(82% 0.09 355);
   --color-svc-3: oklch(78% 0.11 250);
   --color-svc-4: oklch(78% 0.11 295);
   /* tamanho dos dados (nomes, status, imagens, portas): o mono do sistema desenha maior que o sans */
@@ -74,7 +74,7 @@
     --color-accent-fg: oklch(47% 0.08 215);
     --color-accent-soft: oklch(40% 0.07 215);
     --color-svc-1: oklch(50% 0.13 50);
-    --color-svc-2: oklch(48% 0.1 120);
+    --color-svc-2: oklch(50% 0.14 355);
     --color-svc-3: oklch(48% 0.12 250);
     --color-svc-4: oklch(47% 0.18 295);
   }
