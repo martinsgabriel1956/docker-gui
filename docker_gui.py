@@ -18,6 +18,7 @@ import struct
 import subprocess
 import sys
 import threading
+import time
 import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -69,7 +70,8 @@ PODMAN_STATE = {"configured": "created", "initialized": "created", "stopping": "
 COMPOSE = {"up": ["up", "-d"], "rebuild": ["up", "-d", "--build"], "down": ["down"], "pull": ["pull"]}
 # por serviço: o nome vai no fim do argv e só vale se for um serviço do projeto (label com.docker.compose.service).
 # build: reconstrói e recria só aquele serviço (--no-deps: as dependências ficam como estão)
-COMPOSE_SERVICE = {"restart": ["restart"], "build": ["up", "-d", "--build", "--no-deps"]}
+# svcup: sobe um serviço que ainda não tem container; esse o servidor confere no arquivo do compose (config --services)
+COMPOSE_SERVICE = {"restart": ["restart"], "build": ["up", "-d", "--build", "--no-deps"], "svcup": ["up", "-d"]}
 COMPOSE_TIMEOUT = 600
 # logs do projeto inteiro (+ o --tail de LOG_TAIL): o compose prefixa cada linha com o serviço ("api-1  | ...") e aplica
 # o --tail por container
@@ -92,6 +94,11 @@ EVENTS_SLOTS = threading.BoundedSemaphore(8)
 # (o padrão do docker e do podman; o podman não aceita "--tail all")
 LOG_TAIL = {"500": ["--tail", "500"], "2000": ["--tail", "2000"], "10000": ["--tail", "10000"], "all": [],
             "5": ["--tail", "5"]}  # 5: a última linha de quem caiu, que a lista mostra na faixa de atenção
+# histórico de um container (GET /api/history/<id>): o que o docker events ainda guarda das últimas 24 h (o daemon
+# só guarda os eventos mais recentes, de todos os containers juntos). Só o que explica uma queda; o resto é ruído
+HISTORY_EVENTS = ("start", "die", "oom", "pause", "unpause", "health_status")
+HISTORY_MAX = 100
+EVENT_TIME = re.compile(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.\d+)?(Z|[+-]\d\d:\d\d)?")
 # janela dos logs (?since=), também de lista fixa. "start" (só nos de um container) é o início atual do container,
 # lido do inspect: o log da execução de agora, sem as anteriores
 LOG_SINCE = {"5m": ["--since", "5m"], "15m": ["--since", "15m"], "1h": ["--since", "1h"], "24h": ["--since", "24h"]}
@@ -160,6 +167,7 @@ EN = {
     "língua da página e das mensagens: pt ou en (padrão: $DOCKER_GUI_LANG ou o locale do sistema)":
         "language of the page and messages: pt or en (default: $DOCKER_GUI_LANG or the system locale)",
     "Docker GUI em {url}  (Ctrl+C para sair)": "Docker GUI at {url}  (Ctrl+C to quit)",
+    "não abre o navegador; o link sai só no terminal": "don't open the browser; the link is only printed in the terminal",
 }
 
 
@@ -276,8 +284,20 @@ def images(items, use):
 
 
 def volumes(items, use):
-    return [{"Name": v["Name"], "Driver": v.get("Driver", ""), "Containers": use["volume"].get(v["Name"], [])}
-            for v in items]
+    return [{"Name": v["Name"], "Driver": v.get("Driver", ""), "Size": use["size"].get(v["Name"], ""),
+             "Containers": use["volume"].get(v["Name"], [])} for v in items]
+
+
+def volume_sizes():
+    """Tamanho de cada volume ({nome: "52.56MB"}), do `system df -v`: o volume ls não diz. Soma os arquivos (caro), por
+    isso só roda com a aba Volumes. O podman não junta --verbose e --format: lá, e em qualquer falha, fica sem tamanho."""
+    if podman():
+        return {}
+    r = docker("system", "df", "-v", "--format", "{{json .Volumes}}", timeout=ACTION_TIMEOUT)
+    try:
+        return {} if r.returncode else {v["Name"]: v.get("Size", "") for v in json.loads(r.stdout) or []}
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return {}
 
 
 def networks(items, use):
@@ -350,6 +370,41 @@ def relevant(line):
     except (ValueError, AttributeError):
         return True
     return not (name.startswith("exec") or name in EVENTS_IGNORE)
+
+
+def event_time(v):
+    """Hora do evento em epoch: o docker (e o podman 4+) manda número; o podman antigo, texto RFC 3339."""
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return v
+    m = EVENT_TIME.fullmatch(v) if isinstance(v, str) else None
+    # o fromisoformat do Python 3.7 não lê Z nem nanossegundos: a fração cai, o Z vira +00:00
+    return datetime.fromisoformat(m[1] + {"Z": "+00:00", None: "+00:00"}.get(m[2], m[2])).timestamp() if m else None
+
+
+def history(out):
+    """Saída do `docker events` (ou `podman events`) de um container -> [{"t": epoch, "a": ação, "code": código de
+    saída ou None, "health": saúde ou ""}], só as de HISTORY_EVENTS, em ordem e no máximo as HISTORY_MAX últimas.
+    O podman chama o die de "died" e põe a saúde e o código em campos à parte."""
+    events = []
+    for line in out.splitlines():
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        # docker: Action ("health_status: unhealthy"); docker antigo: status; podman: Status
+        kind, _, detail = str(ev.get("Action") or ev.get("status") or ev.get("Status") or "").partition(":")
+        kind = kind.strip().lower()
+        kind = "die" if kind == "died" else kind
+        t = event_time(ev.get("time", ev.get("Time")))
+        if kind not in HISTORY_EVENTS or t is None:
+            continue
+        attrs = (ev.get("Actor") or {}).get("Attributes") or ev.get("Attributes") or {}
+        code = attrs.get("exitCode", ev.get("ContainerExitCode"))
+        events.append({"t": t, "a": kind, "code": int(code) if str(code).lstrip("-").isdigit() else None,
+                       "health": detail.strip() or ev.get("HealthStatus") or ""})
+    return events[-HISTORY_MAX:]
 
 
 def summary(info, reveal=False):
@@ -563,6 +618,10 @@ class Handler(BaseHTTPRequestHandler):
             # sem --tail, o log inteiro de todos os containers: o prazo das ações
             r = docker(*base, *COMPOSE_LOGS, *tail, *since, timeout=READ_TIMEOUT if tail else ACTION_TIMEOUT)
             return self.send(500, json.dumps(r.stderr.strip())) if r.returncode else self.send(200, json.dumps(by_time(r.stdout)))
+        if path == "/api/compose/services":  # todos os serviços do arquivo, inclusive os que nunca subiram
+            base = self.compose_query(query)
+            services = None if base is None else self.compose_services(base)
+            return None if services is None else self.send(200, json.dumps(services))
         if self.path in LISTS or self.path == "/api/df":
             ps, st = self.path == "/api/containers", self.path == "/api/stats"
             # o ps e o stats do podman só saem completos em "json" (um array); containers() e stats() convertem
@@ -595,6 +654,17 @@ class Handler(BaseHTTPRequestHandler):
         if m:  # saída dos probes do healthcheck (não aparece em docker logs)
             r = docker("inspect", "--format", "{{json .State.Health}}", m[1])
             return self.send(500, json.dumps(r.stderr.strip())) if r.returncode else self.send(200, r.stdout.strip())
+        m = re.fullmatch(r"/api/history/([0-9a-f]{12,64})", self.path)
+        if m:  # o que aconteceu com o container: subiu, caiu (com o código), OOM, healthcheck
+            # --until: sem ele o docker events fica esperando eventos novos. O segundo seguinte, e não o atual truncado,
+            # para não perder o que acabou de acontecer (o reinício de agora); o docker espera até ele, no máximo 1 s
+            r = docker("events", "--since", "24h", "--until", str(int(time.time()) + 1), "--filter", f"container={m[1]}",
+                       "--filter", "type=container", "--format", "json" if podman() else "{{json .}}")
+            return self.send(500, json.dumps(r.stderr.strip())) if r.returncode else self.send(200, json.dumps(history(r.stdout)))
+        m = re.fullmatch(r"/api/top/([0-9a-f]{12,64})", self.path)
+        if m:  # processos do container (a tabela do docker top, como o CLI imprime)
+            r = docker("top", m[1])
+            return self.send(500 if r.returncode else 200, json.dumps((r.stderr if r.returncode else r.stdout).strip()))
         m = re.fullmatch(r"/api/inspect/([0-9a-f]{12,64})(/env)?", self.path)
         if m:  # resumo do inspect; só o /env (pedido explícito na página) traz os valores do env
             r = docker("inspect", "--format", "{{json .}}", m[1])
@@ -609,6 +679,7 @@ class Handler(BaseHTTPRequestHandler):
         use = r.stderr.strip() if r.returncode else usage()
         if isinstance(use, str):
             return self.send(500, json.dumps(use))
+        use["size"] = volume_sizes() if normalize is volumes else {}
         try:
             return self.send(200, json.dumps(normalize(rows(r.stdout), use)))
         except (ValueError, KeyError, TypeError, AttributeError):  # versão do CLI com outro formato: erro legível
@@ -931,9 +1002,14 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, KeyError, TypeError):
             return self.send(400, json.dumps(tr("corpo inválido: esperado {project, dir, service}") if service
                                              else tr("corpo inválido: esperado {project, dir}")))
-        base = self.compose_base(*key)
-        if base is None:
+        # svcup é de um serviço sem container: ele não está nos labels, e sim no arquivo do compose
+        up = action == "svcup"
+        base = self.compose_base(*key[:2] if up else key)
+        services = self.compose_services(base) if up and base is not None else None
+        if base is None or up and services is None:
             return None
+        if up and key[2] not in services:
+            return self.send(404, json.dumps(tr("serviço não encontrado no projeto")))
         # o "--" encerra as flags: mesmo vindo de um label, o nome do serviço nunca vira opção do compose
         args = [*COMPOSE_SERVICE[action], "--", key[2]] if service else COMPOSE[action]
         r = docker(*base, *args, timeout=COMPOSE_TIMEOUT)
@@ -996,6 +1072,15 @@ class Handler(BaseHTTPRequestHandler):
         return ["compose", "-p", project, "--project-directory", wd,
                 *[a for f in rows[0][2].split(",") if f for a in ("-f", f)]]
 
+    def compose_services(self, base):
+        """Serviços do arquivo do compose (config --services), inclusive os que nunca subiram. Se o compose falhar
+        (arquivo que mudou de lugar...), responde o erro e devolve None."""
+        r = docker(*base, "config", "--services")
+        if r.returncode:
+            self.send(500, json.dumps(r.stderr.strip()))
+            return None
+        return r.stdout.split()
+
     def log_message(self, *args):
         pass
 
@@ -1039,6 +1124,7 @@ def main():
     ap.add_argument("--context", help=tr("contexto do docker (docker --context); sem ele vale o DOCKER_CONTEXT ou o atual"))
     ap.add_argument("--lang", choices=("pt", "en"),
                     help=tr("língua da página e das mensagens: pt ou en (padrão: $DOCKER_GUI_LANG ou o locale do sistema)"))
+    ap.add_argument("--no-browser", action="store_true", help=tr("não abre o navegador; o link sai só no terminal"))
     args = ap.parse_args()
     LANG = args.lang or LANG
     CLI = [args.cli, *(["--context", args.context] if args.context else [])]
@@ -1051,7 +1137,8 @@ def main():
     # o token vai no #fragmento: não é enviado ao servidor nem fica em log; a página guarda e o tira da URL
     url = f"http://localhost:{server.server_address[1]}/#t={TOKEN}"
     print(tr("Docker GUI em {url}  (Ctrl+C para sair)").format(url=url))
-    webbrowser.open(url)
+    if not args.no_browser:
+        webbrowser.open(url)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -1062,7 +1149,7 @@ def main():
 # A fonte fica em src/; para mudar o visual ou o comportamento da página, veja o README.
 # >>> gerado por build.py a partir de src/: não edite à mão, mude src/ e rode python3 build.py
 CSS = r"""/*! tailwindcss v4.3.3 | MIT License | https://tailwindcss.com */
-@layer properties{@supports (((-webkit-hyphens:none)) and (not (margin-trim:inline))) or ((-moz-orient:inline) and (not (color:rgb(from red r g b)))){*,:before,:after,::backdrop{--tw-translate-x:0;--tw-translate-y:0;--tw-translate-z:0;--tw-space-y-reverse:0;--tw-divide-x-reverse:0;--tw-border-style:solid;--tw-divide-y-reverse:0;--tw-leading:initial;--tw-font-weight:initial;--tw-tracking:initial;--tw-ordinal:initial;--tw-slashed-zero:initial;--tw-numeric-figure:initial;--tw-numeric-spacing:initial;--tw-numeric-fraction:initial;--tw-shadow:0 0 #0000;--tw-shadow-color:initial;--tw-shadow-alpha:100%;--tw-inset-shadow:0 0 #0000;--tw-inset-shadow-color:initial;--tw-inset-shadow-alpha:100%;--tw-ring-color:initial;--tw-ring-shadow:0 0 #0000;--tw-inset-ring-color:initial;--tw-inset-ring-shadow:0 0 #0000;--tw-ring-inset:initial;--tw-ring-offset-width:0px;--tw-ring-offset-color:#fff;--tw-ring-offset-shadow:0 0 #0000;--tw-blur:initial;--tw-brightness:initial;--tw-contrast:initial;--tw-grayscale:initial;--tw-hue-rotate:initial;--tw-invert:initial;--tw-opacity:initial;--tw-saturate:initial;--tw-sepia:initial;--tw-drop-shadow:initial;--tw-drop-shadow-color:initial;--tw-drop-shadow-alpha:100%;--tw-drop-shadow-size:initial;--tw-content:"";--tw-outline-style:solid}}}@layer theme{:root,:host{--font-sans:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";--font-mono:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;--color-black:#000;--color-white:#fff;--spacing:.25rem;--container-7xl:80rem;--text-xs:.75rem;--text-xs--line-height:calc(1 / .75);--text-sm:.875rem;--text-sm--line-height:calc(1.25 / .875);--text-lg:1.125rem;--text-lg--line-height:calc(1.75 / 1.125);--text-xl:1.25rem;--text-xl--line-height:calc(1.75 / 1.25);--text-2xl:1.5rem;--text-2xl--line-height:calc(2 / 1.5);--font-weight-normal:400;--font-weight-medium:500;--font-weight-semibold:600;--tracking-tight:-.025em;--leading-relaxed:1.625;--radius-sm:.25rem;--radius-lg:.5rem;--animate-pulse:pulse 2s cubic-bezier(.4, 0, .6, 1) infinite;--default-transition-duration:.15s;--default-transition-timing-function:cubic-bezier(.4, 0, .2, 1);--default-font-family:var(--font-sans);--default-mono-font-family:var(--font-mono);--color-canvas:oklch(16% .012 255);--color-raised:oklch(20.5% .014 255);--color-hover:oklch(26% .016 255);--color-line:oklch(27% .014 255);--color-line-strong:oklch(37% .018 255);--color-dim:oklch(58% .02 255);--color-muted:oklch(72% .02 255);--color-fg-soft:oklch(86% .012 255);--color-fg:oklch(92% .008 255);--color-fg-strong:oklch(97% .004 255);--color-ok:oklch(78% .17 148);--color-ok-fg:oklch(85% .14 148);--color-ok-soft:oklch(91% .08 148);--color-warn:oklch(84% .16 92);--color-warn-fg:oklch(88% .14 95);--color-warn-soft:oklch(92.5% .1 97);--color-warn-strong:oklch(96% .05 97);--color-bad:oklch(69% .19 25);--color-bad-fg:oklch(79% .11 22);--color-bad-soft:oklch(88% .05 20);--color-danger:oklch(52% .2 27);--color-danger-hover:oklch(46% .18 27);--color-pause:oklch(72% .17 330);--color-pause-fg:oklch(82% .11 330);--color-accent:oklch(80% .12 200);--color-accent-fg:oklch(86% .09 200);--color-accent-soft:oklch(92% .05 200);--color-svc-1:oklch(82% .11 55);--color-svc-2:oklch(82% .09 355);--color-svc-3:oklch(78% .11 250);--color-svc-4:oklch(78% .11 295);--text-data:.8125rem;--text-data--line-height:1.25rem}}@layer base{*,:after,:before,::backdrop{box-sizing:border-box;border:0 solid;margin:0;padding:0}::file-selector-button{box-sizing:border-box;border:0 solid;margin:0;padding:0}html,:host{-webkit-text-size-adjust:100%;tab-size:4;line-height:1.5;font-family:var(--default-font-family,-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji");font-feature-settings:var(--default-font-feature-settings,normal);font-variation-settings:var(--default-font-variation-settings,normal);-webkit-tap-highlight-color:transparent}hr{height:0;color:inherit;border-top-width:1px}abbr:where([title]){-webkit-text-decoration:underline dotted;text-decoration:underline dotted}h1,h2,h3,h4,h5,h6{font-size:inherit;font-weight:inherit}a{color:inherit;-webkit-text-decoration:inherit;-webkit-text-decoration:inherit;-webkit-text-decoration:inherit;text-decoration:inherit}b,strong{font-weight:bolder}code,kbd,samp,pre{font-family:var(--default-mono-font-family,ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);font-feature-settings:var(--default-mono-font-feature-settings,normal);font-variation-settings:var(--default-mono-font-variation-settings,normal);font-size:1em}small{font-size:80%}sub,sup{vertical-align:baseline;font-size:75%;line-height:0;position:relative}sub{bottom:-.25em}sup{top:-.5em}table{text-indent:0;border-color:inherit;border-collapse:collapse}:-moz-focusring:where(:not(iframe)){outline:auto}progress{vertical-align:baseline}summary{display:list-item}ol,ul,menu{list-style:none}img,svg,video,canvas,audio,iframe,embed,object{vertical-align:middle;display:block}img,video{max-width:100%;height:auto}button,input,select,optgroup,textarea{font:inherit;font-feature-settings:inherit;font-variation-settings:inherit;letter-spacing:inherit;color:inherit;opacity:1;background-color:#0000;border-radius:0}::file-selector-button{font:inherit;font-feature-settings:inherit;font-variation-settings:inherit;letter-spacing:inherit;color:inherit;opacity:1;background-color:#0000;border-radius:0}:where(select:is([multiple],[size])) optgroup{font-weight:bolder}:where(select:is([multiple],[size])) optgroup option{padding-inline-start:20px}::file-selector-button{margin-inline-end:4px}::placeholder{opacity:1}@supports (not ((-webkit-appearance:-apple-pay-button))) or (contain-intrinsic-size:1px){::placeholder{color:currentColor}@supports (color:color-mix(in lab, red, red)){::placeholder{color:color-mix(in oklab, currentcolor 50%, transparent)}}}textarea{resize:vertical}::-webkit-search-decoration{-webkit-appearance:none}::-webkit-date-and-time-value{min-height:1lh;text-align:inherit}::-webkit-datetime-edit{display:inline-flex}::-webkit-datetime-edit-fields-wrapper{padding:0}::-webkit-datetime-edit{padding-block:0}::-webkit-datetime-edit-year-field{padding-block:0}::-webkit-datetime-edit-month-field{padding-block:0}::-webkit-datetime-edit-day-field{padding-block:0}::-webkit-datetime-edit-hour-field{padding-block:0}::-webkit-datetime-edit-minute-field{padding-block:0}::-webkit-datetime-edit-second-field{padding-block:0}::-webkit-datetime-edit-millisecond-field{padding-block:0}::-webkit-datetime-edit-meridiem-field{padding-block:0}::-webkit-calendar-picker-indicator{line-height:1}:-moz-ui-invalid{box-shadow:none}button,input:where([type=button],[type=reset],[type=submit]){appearance:button}::file-selector-button{appearance:button}::-webkit-inner-spin-button{height:auto}::-webkit-outer-spin-button{height:auto}[hidden]:where(:not([hidden=until-found])){display:none!important}}@layer components;@layer utilities{.visible{visibility:visible}.sr-only{clip-path:inset(50%);white-space:nowrap;border-width:0;width:1px;height:1px;margin:-1px;padding:0;position:absolute;overflow:hidden}.fixed{position:fixed}.sticky{position:sticky}.top-0{top:0}.bottom-4{bottom:calc(var(--spacing) * 4)}.bottom-\[calc\(1rem\+var\(--dock\,0px\)\)\]{bottom:calc(1rem + var(--dock,0px))}.left-1\/2{left:50%}.z-30{z-index:30}.z-40{z-index:40}.container{width:100%}@media (min-width:40rem){.container{max-width:40rem}}@media (min-width:48rem){.container{max-width:48rem}}@media (min-width:64rem){.container{max-width:64rem}}@media (min-width:80rem){.container{max-width:80rem}}@media (min-width:96rem){.container{max-width:96rem}}.m-auto{margin:auto}.mx-4{margin-inline:calc(var(--spacing) * 4)}.mx-auto{margin-inline:auto}.my-1{margin-block:var(--spacing)}.-mt-0\.5{margin-top:calc(var(--spacing) * -.5)}.mt-0\.5{margin-top:calc(var(--spacing) * .5)}.mt-1{margin-top:var(--spacing)}.mt-1\.5{margin-top:calc(var(--spacing) * 1.5)}.mt-2{margin-top:calc(var(--spacing) * 2)}.mr-0\.5{margin-right:calc(var(--spacing) * .5)}.mr-1\.5{margin-right:calc(var(--spacing) * 1.5)}.mr-auto{margin-right:auto}.-mb-px{margin-bottom:-1px}.mb-3{margin-bottom:calc(var(--spacing) * 3)}.mb-4{margin-bottom:calc(var(--spacing) * 4)}.mb-6{margin-bottom:calc(var(--spacing) * 6)}.ml-1{margin-left:var(--spacing)}.ml-1\.5{margin-left:calc(var(--spacing) * 1.5)}.ml-3{margin-left:calc(var(--spacing) * 3)}.ml-auto{margin-left:auto}.block{display:block}.flex{display:flex}.grid{display:grid}.hidden{display:none}.inline{display:inline}.inline-block{display:inline-block}.inline-flex{display:inline-flex}.table{display:table}.size-1\.5{width:calc(var(--spacing) * 1.5);height:calc(var(--spacing) * 1.5)}.size-2{width:calc(var(--spacing) * 2);height:calc(var(--spacing) * 2)}.size-3{width:calc(var(--spacing) * 3);height:calc(var(--spacing) * 3)}.size-4{width:calc(var(--spacing) * 4);height:calc(var(--spacing) * 4)}.size-8{width:calc(var(--spacing) * 8);height:calc(var(--spacing) * 8)}.h-1\.5{height:calc(var(--spacing) * 1.5)}.h-3{height:calc(var(--spacing) * 3)}.h-\[65vh\]{height:65vh}.h-\[min\(56rem\,92dvh\)\]{height:min(56rem,92dvh)}.h-full{height:100%}.max-h-40{max-height:calc(var(--spacing) * 40)}.max-h-\[65vh\]{max-height:65vh}.min-h-0{min-height:0}.min-h-11{min-height:calc(var(--spacing) * 11)}.min-h-40{min-height:calc(var(--spacing) * 40)}.min-h-screen{min-height:100vh}.w-1\.5{width:calc(var(--spacing) * 1.5)}.w-11{width:calc(var(--spacing) * 11)}.w-\[min\(26rem\,calc\(100vw-2rem\)\)\]{width:min(26rem,100vw - 2rem)}.w-\[min\(640px\,95vw\)\]{width:min(640px,95vw)}.w-\[min\(1100px\,95vw\)\]{width:min(1100px,95vw)}.w-fit{width:fit-content}.w-full{width:100%}.w-max{width:max-content}.max-w-7xl{max-width:var(--container-7xl)}.max-w-80{max-width:calc(var(--spacing) * 80)}.max-w-\[70ch\]{max-width:70ch}.max-w-\[80ch\]{max-width:80ch}.max-w-\[min\(28rem\,calc\(100vw-2rem\)\)\]{max-width:min(28rem,100vw - 2rem)}.max-w-\[min\(48rem\,calc\(100vw-2rem\)\)\]{max-width:min(48rem,100vw - 2rem)}.max-w-\[min\(64rem\,calc\(100vw-2rem\)\)\]{max-width:min(64rem,100vw - 2rem)}.min-w-0{min-width:0}.min-w-48{min-width:calc(var(--spacing) * 48)}.flex-1{flex:1}.shrink-0{flex-shrink:0}.basis-56{flex-basis:calc(var(--spacing) * 56)}.basis-full{flex-basis:100%}.-translate-x-1\/2{--tw-translate-x:calc(calc(1 / 2 * 100%) * -1);translate:var(--tw-translate-x) var(--tw-translate-y)}.animate-pulse{animation:var(--animate-pulse)}.cursor-not-allowed{cursor:not-allowed}.cursor-pointer{cursor:pointer}.resize{resize:both}.\[scrollbar-width\:none\]{scrollbar-width:none}.list-none{list-style-type:none}.grid-cols-\[auto_1fr\]{grid-template-columns:auto 1fr}.flex-col{flex-direction:column}.flex-wrap{flex-wrap:wrap}.place-items-center{place-items:center}.items-center{align-items:center}.items-start{align-items:flex-start}.justify-between{justify-content:space-between}.justify-end{justify-content:flex-end}.gap-0\.5{gap:calc(var(--spacing) * .5)}.gap-1{gap:var(--spacing)}.gap-1\.5{gap:calc(var(--spacing) * 1.5)}.gap-2{gap:calc(var(--spacing) * 2)}.gap-3{gap:calc(var(--spacing) * 3)}.gap-4{gap:calc(var(--spacing) * 4)}:where(.space-y-2>:not(:last-child)){--tw-space-y-reverse:0;margin-block-start:calc(calc(var(--spacing) * 2) * var(--tw-space-y-reverse));margin-block-end:calc(calc(var(--spacing) * 2) * calc(1 - var(--tw-space-y-reverse)))}:where(.space-y-4>:not(:last-child)){--tw-space-y-reverse:0;margin-block-start:calc(calc(var(--spacing) * 4) * var(--tw-space-y-reverse));margin-block-end:calc(calc(var(--spacing) * 4) * calc(1 - var(--tw-space-y-reverse)))}.gap-x-1\.5{column-gap:calc(var(--spacing) * 1.5)}.gap-x-3{column-gap:calc(var(--spacing) * 3)}.gap-x-4{column-gap:calc(var(--spacing) * 4)}.gap-y-1{row-gap:var(--spacing)}.gap-y-1\.5{row-gap:calc(var(--spacing) * 1.5)}.gap-y-2{row-gap:calc(var(--spacing) * 2)}.gap-y-3{row-gap:calc(var(--spacing) * 3)}:where(.divide-x>:not(:last-child)){--tw-divide-x-reverse:0;border-inline-style:var(--tw-border-style);border-inline-start-width:calc(1px * var(--tw-divide-x-reverse));border-inline-end-width:calc(1px * calc(1 - var(--tw-divide-x-reverse)))}:where(.divide-y>:not(:last-child)){--tw-divide-y-reverse:0;border-bottom-style:var(--tw-border-style);border-top-style:var(--tw-border-style);border-top-width:calc(1px * var(--tw-divide-y-reverse));border-bottom-width:calc(1px * calc(1 - var(--tw-divide-y-reverse)))}:where(.divide-line>:not(:last-child)){border-color:var(--color-line)}:where(.divide-line\/70>:not(:last-child)){border-color:#22272db3}@supports (color:color-mix(in lab, red, red)){:where(.divide-line\/70>:not(:last-child)){border-color:color-mix(in oklab, var(--color-line) 70%, transparent)}}.truncate{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.overflow-auto{overflow:auto}.overflow-hidden{overflow:hidden}.overflow-x-auto{overflow-x:auto}.rounded{border-radius:.25rem}.rounded-\[1px\]{border-radius:1px}.rounded-full{border-radius:3.40282e38px}.rounded-lg{border-radius:var(--radius-lg)}.rounded-none{border-radius:0}.rounded-sm{border-radius:var(--radius-sm)}.border-t{border-top-style:var(--tw-border-style);border-top-width:1px}.border-b{border-bottom-style:var(--tw-border-style);border-bottom-width:1px}.border-b-2{border-bottom-style:var(--tw-border-style);border-bottom-width:2px}.border-accent\/50{border-color:#43d5dc80}@supports (color:color-mix(in lab, red, red)){.border-accent\/50{border-color:color-mix(in oklab, var(--color-accent) 50%, transparent)}}.border-line{border-color:var(--color-line)}.border-line-strong{border-color:var(--color-line-strong)}.border-line\/70{border-color:#22272db3}@supports (color:color-mix(in lab, red, red)){.border-line\/70{border-color:color-mix(in oklab, var(--color-line) 70%, transparent)}}.border-transparent{border-color:#0000}.border-warn\/40{border-color:#f0c63066}@supports (color:color-mix(in lab, red, red)){.border-warn\/40{border-color:color-mix(in oklab, var(--color-warn) 40%, transparent)}}.bg-accent{background-color:var(--color-accent)}.bg-accent\/10{background-color:#43d5dc1a}@supports (color:color-mix(in lab, red, red)){.bg-accent\/10{background-color:color-mix(in oklab, var(--color-accent) 10%, transparent)}}.bg-accent\/15{background-color:#43d5dc26}@supports (color:color-mix(in lab, red, red)){.bg-accent\/15{background-color:color-mix(in oklab, var(--color-accent) 15%, transparent)}}.bg-accent\/30{background-color:#43d5dc4d}@supports (color:color-mix(in lab, red, red)){.bg-accent\/30{background-color:color-mix(in oklab, var(--color-accent) 30%, transparent)}}.bg-bad{background-color:var(--color-bad)}.bg-bad\/10{background-color:#fb605c1a}@supports (color:color-mix(in lab, red, red)){.bg-bad\/10{background-color:color-mix(in oklab, var(--color-bad) 10%, transparent)}}.bg-black{background-color:var(--color-black)}.bg-canvas{background-color:var(--color-canvas)}.bg-danger{background-color:var(--color-danger)}.bg-dim{background-color:var(--color-dim)}.bg-fg{background-color:var(--color-fg)}.bg-line-strong{background-color:var(--color-line-strong)}.bg-ok{background-color:var(--color-ok)}.bg-ok\/40{background-color:#5ed47666}@supports (color:color-mix(in lab, red, red)){.bg-ok\/40{background-color:color-mix(in oklab, var(--color-ok) 40%, transparent)}}.bg-pause{background-color:var(--color-pause)}.bg-raised{background-color:var(--color-raised)}.bg-raised\/40{background-color:#13181e66}@supports (color:color-mix(in lab, red, red)){.bg-raised\/40{background-color:color-mix(in oklab, var(--color-raised) 40%, transparent)}}.bg-warn{background-color:var(--color-warn)}.bg-warn\/10{background-color:#f0c6301a}@supports (color:color-mix(in lab, red, red)){.bg-warn\/10{background-color:color-mix(in oklab, var(--color-warn) 10%, transparent)}}.bg-warn\/15{background-color:#f0c63026}@supports (color:color-mix(in lab, red, red)){.bg-warn\/15{background-color:color-mix(in oklab, var(--color-warn) 15%, transparent)}}.stroke-accent{stroke:var(--color-accent)}.p-0{padding:0}.p-1{padding:var(--spacing)}.p-2{padding:calc(var(--spacing) * 2)}.p-4{padding:calc(var(--spacing) * 4)}.px-1{padding-inline:var(--spacing)}.px-1\.5{padding-inline:calc(var(--spacing) * 1.5)}.px-2{padding-inline:calc(var(--spacing) * 2)}.px-2\.5{padding-inline:calc(var(--spacing) * 2.5)}.px-3{padding-inline:calc(var(--spacing) * 3)}.px-4{padding-inline:calc(var(--spacing) * 4)}.py-0\.5{padding-block:calc(var(--spacing) * .5)}.py-1{padding-block:var(--spacing)}.py-1\.5{padding-block:calc(var(--spacing) * 1.5)}.py-2{padding-block:calc(var(--spacing) * 2)}.py-2\.5{padding-block:calc(var(--spacing) * 2.5)}.py-3{padding-block:calc(var(--spacing) * 3)}.py-4{padding-block:calc(var(--spacing) * 4)}.py-16{padding-block:calc(var(--spacing) * 16)}.pt-3{padding-top:calc(var(--spacing) * 3)}.pt-4{padding-top:calc(var(--spacing) * 4)}.pt-5{padding-top:calc(var(--spacing) * 5)}.pt-6{padding-top:calc(var(--spacing) * 6)}.pr-4{padding-right:calc(var(--spacing) * 4)}.pr-6{padding-right:calc(var(--spacing) * 6)}.pb-2{padding-bottom:calc(var(--spacing) * 2)}.pb-2\.5{padding-bottom:calc(var(--spacing) * 2.5)}.pb-3{padding-bottom:calc(var(--spacing) * 3)}.pb-\[calc\(2rem\+var\(--dock\,0px\)\)\]{padding-bottom:calc(2rem + var(--dock,0px))}.pl-4{padding-left:calc(var(--spacing) * 4)}.text-center{text-align:center}.text-left{text-align:left}.align-middle{vertical-align:middle}.align-top{vertical-align:top}.font-mono{font-family:var(--font-mono)}.font-sans{font-family:var(--font-sans)}.text-2xl{font-size:var(--text-2xl);line-height:var(--tw-leading,var(--text-2xl--line-height))}.text-data{font-size:var(--text-data);line-height:var(--tw-leading,var(--text-data--line-height))}.text-lg{font-size:var(--text-lg);line-height:var(--tw-leading,var(--text-lg--line-height))}.text-sm{font-size:var(--text-sm);line-height:var(--tw-leading,var(--text-sm--line-height))}.text-xs{font-size:var(--text-xs);line-height:var(--tw-leading,var(--text-xs--line-height))}.text-\[0px\]{font-size:0}.text-\[11px\]{font-size:11px}.leading-relaxed{--tw-leading:var(--leading-relaxed);line-height:var(--leading-relaxed)}.font-medium{--tw-font-weight:var(--font-weight-medium);font-weight:var(--font-weight-medium)}.font-normal{--tw-font-weight:var(--font-weight-normal);font-weight:var(--font-weight-normal)}.font-semibold{--tw-font-weight:var(--font-weight-semibold);font-weight:var(--font-weight-semibold)}.tracking-tight{--tw-tracking:var(--tracking-tight);letter-spacing:var(--tracking-tight)}.text-balance{text-wrap:balance}.\[overflow-wrap\:anywhere\]{overflow-wrap:anywhere}.whitespace-nowrap{white-space:nowrap}.whitespace-pre-wrap{white-space:pre-wrap}.text-accent-fg{color:var(--color-accent-fg)}.text-bad-fg{color:var(--color-bad-fg)}.text-bad-soft{color:var(--color-bad-soft)}.text-bad-soft\/80{color:#f7cbcacc}@supports (color:color-mix(in lab, red, red)){.text-bad-soft\/80{color:color-mix(in oklab, var(--color-bad-soft) 80%, transparent)}}.text-dim{color:var(--color-dim)}.text-fg{color:var(--color-fg)}.text-fg-soft{color:var(--color-fg-soft)}.text-fg-strong{color:var(--color-fg-strong)}.text-muted{color:var(--color-muted)}.text-ok-fg{color:var(--color-ok-fg)}.text-ok-soft{color:var(--color-ok-soft)}.text-pause-fg{color:var(--color-pause-fg)}.text-svc-1{color:var(--color-svc-1)}.text-svc-2{color:var(--color-svc-2)}.text-svc-3{color:var(--color-svc-3)}.text-svc-4{color:var(--color-svc-4)}.text-warn-fg{color:var(--color-warn-fg)}.text-warn-soft{color:var(--color-warn-soft)}.text-warn-strong{color:var(--color-warn-strong)}.text-white{color:var(--color-white)}.normal-case{text-transform:none}.uppercase{text-transform:uppercase}.tabular-nums{--tw-numeric-spacing:tabular-nums;font-variant-numeric:var(--tw-ordinal,) var(--tw-slashed-zero,) var(--tw-numeric-figure,) var(--tw-numeric-spacing,) var(--tw-numeric-fraction,)}.underline{text-decoration-line:underline}.underline-offset-4{text-underline-offset:4px}.antialiased{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}.accent-accent{accent-color:var(--color-accent)}.accent-danger{accent-color:var(--color-danger)}.opacity-40{opacity:.4}.opacity-70{opacity:.7}.shadow-lg{--tw-shadow:0 10px 15px -3px var(--tw-shadow-color,#0000001a), 0 4px 6px -4px var(--tw-shadow-color,#0000001a);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}.ring-1{--tw-ring-shadow:var(--tw-ring-inset,) 0 0 0 calc(1px + var(--tw-ring-offset-width)) var(--tw-ring-color,currentcolor);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}.shadow-black\/30{--tw-shadow-color:#0000004d}@supports (color:color-mix(in lab, red, red)){.shadow-black\/30{--tw-shadow-color:color-mix(in oklab, color-mix(in oklab, var(--color-black) 30%, transparent) var(--tw-shadow-alpha), transparent)}}.shadow-black\/40{--tw-shadow-color:#0006}@supports (color:color-mix(in lab, red, red)){.shadow-black\/40{--tw-shadow-color:color-mix(in oklab, color-mix(in oklab, var(--color-black) 40%, transparent) var(--tw-shadow-alpha), transparent)}}.ring-accent\/40{--tw-ring-color:#43d5dc66}@supports (color:color-mix(in lab, red, red)){.ring-accent\/40{--tw-ring-color:color-mix(in oklab, var(--color-accent) 40%, transparent)}}.ring-bad\/40{--tw-ring-color:#fb605c66}@supports (color:color-mix(in lab, red, red)){.ring-bad\/40{--tw-ring-color:color-mix(in oklab, var(--color-bad) 40%, transparent)}}.ring-bad\/50{--tw-ring-color:#fb605c80}@supports (color:color-mix(in lab, red, red)){.ring-bad\/50{--tw-ring-color:color-mix(in oklab, var(--color-bad) 50%, transparent)}}.ring-current{--tw-ring-color:currentcolor}.ring-danger{--tw-ring-color:var(--color-danger)}.ring-dim{--tw-ring-color:var(--color-dim)}.ring-line{--tw-ring-color:var(--color-line)}.ring-line-strong{--tw-ring-color:var(--color-line-strong)}.ring-line-strong\/80{--tw-ring-color:#394049cc}@supports (color:color-mix(in lab, red, red)){.ring-line-strong\/80{--tw-ring-color:color-mix(in oklab, var(--color-line-strong) 80%, transparent)}}.ring-ok\/50{--tw-ring-color:#5ed47680}@supports (color:color-mix(in lab, red, red)){.ring-ok\/50{--tw-ring-color:color-mix(in oklab, var(--color-ok) 50%, transparent)}}.ring-warn\/30{--tw-ring-color:#f0c6304d}@supports (color:color-mix(in lab, red, red)){.ring-warn\/30{--tw-ring-color:color-mix(in oklab, var(--color-warn) 30%, transparent)}}.ring-warn\/60{--tw-ring-color:#f0c63099}@supports (color:color-mix(in lab, red, red)){.ring-warn\/60{--tw-ring-color:color-mix(in oklab, var(--color-warn) 60%, transparent)}}.filter{filter:var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,)}.transition{transition-property:color,background-color,border-color,outline-color,text-decoration-color,fill,stroke,--tw-gradient-from,--tw-gradient-via,--tw-gradient-to,opacity,box-shadow,transform,translate,scale,rotate,filter,-webkit-backdrop-filter,backdrop-filter,display,content-visibility,overlay,pointer-events;transition-timing-function:var(--tw-ease,var(--default-transition-timing-function));transition-duration:var(--tw-duration,var(--default-transition-duration))}.transition-opacity{transition-property:opacity;transition-timing-function:var(--tw-ease,var(--default-transition-timing-function));transition-duration:var(--tw-duration,var(--default-transition-duration))}.\[contain\:inline-size\]{contain:inline-size}.group-has-checked\:block:is(:where(.group):has(:checked) *){display:block}.group-aria-pressed\:inline-block:is(:where(.group)[aria-pressed=true] *){display:inline-block}.selection\:bg-accent\/30 ::selection{background-color:#43d5dc4d}@supports (color:color-mix(in lab, red, red)){.selection\:bg-accent\/30 ::selection{background-color:color-mix(in oklab, var(--color-accent) 30%, transparent)}}.selection\:bg-accent\/30::selection{background-color:#43d5dc4d}@supports (color:color-mix(in lab, red, red)){.selection\:bg-accent\/30::selection{background-color:color-mix(in oklab, var(--color-accent) 30%, transparent)}}.placeholder\:font-sans::placeholder{font-family:var(--font-sans)}.placeholder\:text-muted::placeholder{color:var(--color-muted)}.backdrop\:bg-black\/40::backdrop{background-color:#0006}@supports (color:color-mix(in lab, red, red)){.backdrop\:bg-black\/40::backdrop{background-color:color-mix(in oklab, var(--color-black) 40%, transparent)}}.backdrop\:bg-black\/70::backdrop{background-color:#000000b3}@supports (color:color-mix(in lab, red, red)){.backdrop\:bg-black\/70::backdrop{background-color:color-mix(in oklab, var(--color-black) 70%, transparent)}}.before\:text-xs:before{content:var(--tw-content);font-size:var(--text-xs);line-height:var(--tw-leading,var(--text-xs--line-height))}.before\:content-\[attr\(data-mark\)\]:before{--tw-content:attr(data-mark);content:var(--tw-content)}.before\:content-\[attr\(data-t\)\]:before{--tw-content:attr(data-t);content:var(--tw-content)}.open\:flex:is([open],:popover-open,:open){display:flex}.empty\:hidden:empty{display:none}.empty\:before\:font-sans:empty:before{content:var(--tw-content);font-family:var(--font-sans)}.empty\:before\:text-muted:empty:before{content:var(--tw-content);color:var(--color-muted)}.empty\:before\:content-\[attr\(data-empty\)\]:empty:before{--tw-content:attr(data-empty);content:var(--tw-content)}@media (hover:hover){.hover\:bg-accent\/10:hover{background-color:#43d5dc1a}@supports (color:color-mix(in lab, red, red)){.hover\:bg-accent\/10:hover{background-color:color-mix(in oklab, var(--color-accent) 10%, transparent)}}.hover\:bg-accent\/20:hover{background-color:#43d5dc33}@supports (color:color-mix(in lab, red, red)){.hover\:bg-accent\/20:hover{background-color:color-mix(in oklab, var(--color-accent) 20%, transparent)}}.hover\:bg-accent\/25:hover{background-color:#43d5dc40}@supports (color:color-mix(in lab, red, red)){.hover\:bg-accent\/25:hover{background-color:color-mix(in oklab, var(--color-accent) 25%, transparent)}}.hover\:bg-bad\/10:hover{background-color:#fb605c1a}@supports (color:color-mix(in lab, red, red)){.hover\:bg-bad\/10:hover{background-color:color-mix(in oklab, var(--color-bad) 10%, transparent)}}.hover\:bg-danger-hover:hover{background-color:var(--color-danger-hover)}.hover\:bg-hover:hover{background-color:var(--color-hover)}.hover\:bg-ok\/10:hover{background-color:#5ed4761a}@supports (color:color-mix(in lab, red, red)){.hover\:bg-ok\/10:hover{background-color:color-mix(in oklab, var(--color-ok) 10%, transparent)}}.hover\:bg-raised\/70:hover{background-color:#13181eb3}@supports (color:color-mix(in lab, red, red)){.hover\:bg-raised\/70:hover{background-color:color-mix(in oklab, var(--color-raised) 70%, transparent)}}.hover\:bg-transparent:hover{background-color:#0000}.hover\:text-accent-soft:hover{color:var(--color-accent-soft)}.hover\:text-fg:hover{color:var(--color-fg)}.hover\:text-fg-strong:hover{color:var(--color-fg-strong)}.hover\:underline:hover{text-decoration-line:underline}}.focus\:not-sr-only:focus{clip-path:none;white-space:normal;width:auto;height:auto;margin:0;padding:0;position:static;overflow:visible}.focus\:fixed:focus{position:fixed}.focus\:top-3:focus{top:calc(var(--spacing) * 3)}.focus\:left-3:focus{left:calc(var(--spacing) * 3)}.focus\:z-50:focus{z-index:50}.focus\:rounded:focus{border-radius:.25rem}.focus\:bg-fg-strong:focus{background-color:var(--color-fg-strong)}.focus\:px-3:focus{padding-inline:calc(var(--spacing) * 3)}.focus\:py-2:focus{padding-block:calc(var(--spacing) * 2)}.focus\:text-sm:focus{font-size:var(--text-sm);line-height:var(--tw-leading,var(--text-sm--line-height))}.focus\:text-canvas:focus{color:var(--color-canvas)}.focus\:ring-accent:focus{--tw-ring-color:var(--color-accent)}.focus\:outline-none:focus{--tw-outline-style:none;outline-style:none}.focus-visible\:outline-2:focus-visible{outline-style:var(--tw-outline-style);outline-width:2px}.focus-visible\:-outline-offset-2:focus-visible{outline-offset:calc(2px * -1)}.focus-visible\:outline-offset-2:focus-visible{outline-offset:2px}.focus-visible\:outline-accent:focus-visible{outline-color:var(--color-accent)}.disabled\:cursor-default:disabled{cursor:default}.aria-disabled\:cursor-wait[aria-disabled=true]{cursor:wait}.aria-disabled\:opacity-40[aria-disabled=true]{opacity:.4}.aria-disabled\:opacity-60[aria-disabled=true]{opacity:.6}.aria-invalid\:ring-bad[aria-invalid=true],.aria-invalid\:focus\:ring-bad[aria-invalid=true]:focus{--tw-ring-color:var(--color-bad)}.aria-pressed\:bg-accent\/15[aria-pressed=true]{background-color:#43d5dc26}@supports (color:color-mix(in lab, red, red)){.aria-pressed\:bg-accent\/15[aria-pressed=true]{background-color:color-mix(in oklab, var(--color-accent) 15%, transparent)}}.aria-pressed\:bg-fg-strong[aria-pressed=true]{background-color:var(--color-fg-strong)}.aria-pressed\:text-accent-soft[aria-pressed=true]{color:var(--color-accent-soft)}.aria-pressed\:text-canvas[aria-pressed=true]{color:var(--color-canvas)}.aria-pressed\:ring-accent\/40[aria-pressed=true]{--tw-ring-color:#43d5dc66}@supports (color:color-mix(in lab, red, red)){.aria-pressed\:ring-accent\/40[aria-pressed=true]{--tw-ring-color:color-mix(in oklab, var(--color-accent) 40%, transparent)}}.aria-selected\:border-accent[aria-selected=true]{border-color:var(--color-accent)}.aria-selected\:text-fg-strong[aria-selected=true]{color:var(--color-fg-strong)}.data-done\:min-h-0[data-done]{min-height:0}.data-done\:cursor-default[data-done]{cursor:default}.data-done\:px-0[data-done]{padding-inline:0}.data-done\:text-muted[data-done]{color:var(--color-muted)}.data-done\:opacity-100[data-done]{opacity:1}.data-done\:ring-0[data-done]{--tw-ring-shadow:var(--tw-ring-inset,) 0 0 0 calc(0px + var(--tw-ring-offset-width)) var(--tw-ring-color,currentcolor);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}@media (prefers-reduced-motion:reduce){.motion-reduce\:animate-none{animation:none}.motion-reduce\:transition-none{transition-property:none}}@media not all and (min-width:80rem){.max-xl\:block{display:block}.max-xl\:hidden{display:none}}@media not all and (min-width:64rem){.max-lg\:order-2{order:2}.max-lg\:order-3{order:3}.max-lg\:order-last{order:9999}.max-lg\:-my-3{margin-block:calc(var(--spacing) * -3)}.max-lg\:mb-4{margin-bottom:calc(var(--spacing) * 4)}.max-lg\:-ml-2{margin-left:calc(var(--spacing) * -2)}.max-lg\:block{display:block}.max-lg\:hidden{display:none}.max-lg\:size-6{width:calc(var(--spacing) * 6);height:calc(var(--spacing) * 6)}.max-lg\:size-11{width:calc(var(--spacing) * 11);height:calc(var(--spacing) * 11)}.max-lg\:h-dvh{height:100dvh}.max-lg\:max-h-none{max-height:none}.max-lg\:min-h-11{min-height:calc(var(--spacing) * 11)}.max-lg\:w-11{width:calc(var(--spacing) * 11)}.max-lg\:w-full{width:100%}.max-lg\:w-screen{width:100vw}.max-lg\:max-w-full{max-width:100%}.max-lg\:max-w-none{max-width:none}.max-lg\:min-w-24{min-width:calc(var(--spacing) * 24)}.max-lg\:basis-full{flex-basis:100%}.max-lg\:justify-start{justify-content:flex-start}.max-lg\:gap-2{gap:calc(var(--spacing) * 2)}:where(.max-lg\:space-y-1\.5>:not(:last-child)){--tw-space-y-reverse:0;margin-block-start:calc(calc(var(--spacing) * 1.5) * var(--tw-space-y-reverse));margin-block-end:calc(calc(var(--spacing) * 1.5) * calc(1 - var(--tw-space-y-reverse)))}.max-lg\:gap-x-2{column-gap:calc(var(--spacing) * 2)}.max-lg\:overflow-x-auto{overflow-x:auto}.max-lg\:rounded-none{border-radius:0}.max-lg\:p-0{padding:0}.max-lg\:px-2{padding-inline:calc(var(--spacing) * 2)}.max-lg\:px-4{padding-inline:calc(var(--spacing) * 4)}.max-lg\:py-2{padding-block:calc(var(--spacing) * 2)}.max-lg\:py-3{padding-block:calc(var(--spacing) * 3)}.max-lg\:py-3\.5{padding-block:calc(var(--spacing) * 3.5)}.max-lg\:py-4{padding-block:calc(var(--spacing) * 4)}.max-lg\:pt-2{padding-top:calc(var(--spacing) * 2)}.max-lg\:pt-3{padding-top:calc(var(--spacing) * 3)}.max-lg\:pt-4{padding-top:calc(var(--spacing) * 4)}.max-lg\:pl-14{padding-left:calc(var(--spacing) * 14)}.max-lg\:text-sm{font-size:var(--text-sm);line-height:var(--tw-leading,var(--text-sm--line-height))}.max-lg\:text-xl{font-size:var(--text-xl);line-height:var(--tw-leading,var(--text-xl--line-height))}.max-lg\:ring-0{--tw-ring-shadow:var(--tw-ring-inset,) 0 0 0 calc(0px + var(--tw-ring-offset-width)) var(--tw-ring-color,currentcolor);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}.max-lg\:\[contain\:none\]{contain:none}.max-lg\:has-\[div\]\:block:has(:is(div)){display:block}}@media not all and (min-width:40rem){.max-sm\:px-2{padding-inline:calc(var(--spacing) * 2)}}@media (min-width:40rem){.sm\:w-72{width:calc(var(--spacing) * 72)}.sm\:max-w-72{max-width:calc(var(--spacing) * 72)}.sm\:grid-cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}}@media (min-width:64rem){.lg\:sr-only{clip-path:inset(50%);white-space:nowrap;border-width:0;width:1px;height:1px;margin:-1px;padding:0;position:absolute;overflow:hidden}.lg\:ml-auto{margin-left:auto}.lg\:hidden{display:none}.lg\:w-9{width:calc(var(--spacing) * 9)}.lg\:w-20{width:calc(var(--spacing) * 20)}.lg\:max-w-\[24ch\]{max-width:24ch}.lg\:max-w-\[28ch\]{max-width:28ch}.lg\:min-w-\[24ch\]{min-width:24ch}.lg\:truncate{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.lg\:text-left{text-align:left}.lg\:text-right{text-align:right}.lg\:\[direction\:rtl\]{direction:rtl}}.\[\&_kbd\]\:rounded kbd{border-radius:.25rem}.\[\&_kbd\]\:px-1\.5 kbd{padding-inline:calc(var(--spacing) * 1.5)}.\[\&_kbd\]\:font-mono kbd{font-family:var(--font-mono)}.\[\&_kbd\]\:text-xs kbd{font-size:var(--text-xs);line-height:var(--tw-leading,var(--text-xs--line-height))}.\[\&_kbd\]\:text-fg-strong kbd{color:var(--color-fg-strong)}.\[\&_kbd\]\:ring-1 kbd{--tw-ring-shadow:var(--tw-ring-inset,) 0 0 0 calc(1px + var(--tw-ring-offset-width)) var(--tw-ring-color,currentcolor);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}.\[\&_kbd\]\:ring-line-strong kbd{--tw-ring-color:var(--color-line-strong)}.\[\&\:\:-webkit-details-marker\]\:hidden::-webkit-details-marker{display:none}}@media (prefers-color-scheme:light){:root{--color-canvas:oklch(98.6% .003 255);--color-raised:#fff;--color-hover:oklch(96% .006 255);--color-line:oklch(91.5% .008 255);--color-line-strong:oklch(85% .012 255);--color-dim:oklch(64% .018 255);--color-muted:oklch(47% .02 255);--color-fg-soft:oklch(38% .018 255);--color-fg:oklch(28% .016 255);--color-fg-strong:oklch(17% .012 255);--color-ok:oklch(62% .17 148);--color-ok-fg:oklch(47% .13 148);--color-ok-soft:oklch(40% .11 148);--color-warn:oklch(65% .135 68);--color-warn-fg:oklch(52% .105 70);--color-warn-soft:oklch(45% .09 65);--color-warn-strong:oklch(38% .09 60);--color-bad:oklch(60% .22 25);--color-bad-fg:oklch(50% .2 27);--color-bad-soft:oklch(43% .17 27);--color-danger:oklch(50% .2 27);--color-danger-hover:oklch(44% .18 27);--color-pause:oklch(58% .22 330);--color-pause-fg:oklch(48% .2 330);--color-accent:oklch(55% .09 210);--color-accent-fg:oklch(47% .08 215);--color-accent-soft:oklch(40% .07 215);--color-svc-1:oklch(50% .13 50);--color-svc-2:oklch(50% .14 355);--color-svc-3:oklch(48% .12 250);--color-svc-4:oklch(47% .18 295)}}:root{scrollbar-color:var(--color-line-strong) transparent;caret-color:var(--color-accent)}@property --tw-translate-x{syntax:"*";inherits:false;initial-value:0}@property --tw-translate-y{syntax:"*";inherits:false;initial-value:0}@property --tw-translate-z{syntax:"*";inherits:false;initial-value:0}@property --tw-space-y-reverse{syntax:"*";inherits:false;initial-value:0}@property --tw-divide-x-reverse{syntax:"*";inherits:false;initial-value:0}@property --tw-border-style{syntax:"*";inherits:false;initial-value:solid}@property --tw-divide-y-reverse{syntax:"*";inherits:false;initial-value:0}@property --tw-leading{syntax:"*";inherits:false}@property --tw-font-weight{syntax:"*";inherits:false}@property --tw-tracking{syntax:"*";inherits:false}@property --tw-ordinal{syntax:"*";inherits:false}@property --tw-slashed-zero{syntax:"*";inherits:false}@property --tw-numeric-figure{syntax:"*";inherits:false}@property --tw-numeric-spacing{syntax:"*";inherits:false}@property --tw-numeric-fraction{syntax:"*";inherits:false}@property --tw-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-shadow-color{syntax:"*";inherits:false}@property --tw-shadow-alpha{syntax:"<percentage>";inherits:false;initial-value:100%}@property --tw-inset-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-inset-shadow-color{syntax:"*";inherits:false}@property --tw-inset-shadow-alpha{syntax:"<percentage>";inherits:false;initial-value:100%}@property --tw-ring-color{syntax:"*";inherits:false}@property --tw-ring-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-inset-ring-color{syntax:"*";inherits:false}@property --tw-inset-ring-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-ring-inset{syntax:"*";inherits:false}@property --tw-ring-offset-width{syntax:"<length>";inherits:false;initial-value:0}@property --tw-ring-offset-color{syntax:"*";inherits:false;initial-value:#fff}@property --tw-ring-offset-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-blur{syntax:"*";inherits:false}@property --tw-brightness{syntax:"*";inherits:false}@property --tw-contrast{syntax:"*";inherits:false}@property --tw-grayscale{syntax:"*";inherits:false}@property --tw-hue-rotate{syntax:"*";inherits:false}@property --tw-invert{syntax:"*";inherits:false}@property --tw-opacity{syntax:"*";inherits:false}@property --tw-saturate{syntax:"*";inherits:false}@property --tw-sepia{syntax:"*";inherits:false}@property --tw-drop-shadow{syntax:"*";inherits:false}@property --tw-drop-shadow-color{syntax:"*";inherits:false}@property --tw-drop-shadow-alpha{syntax:"<percentage>";inherits:false;initial-value:100%}@property --tw-drop-shadow-size{syntax:"*";inherits:false}@property --tw-content{syntax:"*";inherits:false;initial-value:""}@property --tw-outline-style{syntax:"*";inherits:false;initial-value:solid}@keyframes pulse{50%{opacity:.5}}"""
+@layer properties{@supports (((-webkit-hyphens:none)) and (not (margin-trim:inline))) or ((-moz-orient:inline) and (not (color:rgb(from red r g b)))){*,:before,:after,::backdrop{--tw-translate-x:0;--tw-translate-y:0;--tw-translate-z:0;--tw-space-y-reverse:0;--tw-divide-x-reverse:0;--tw-border-style:solid;--tw-divide-y-reverse:0;--tw-leading:initial;--tw-font-weight:initial;--tw-tracking:initial;--tw-ordinal:initial;--tw-slashed-zero:initial;--tw-numeric-figure:initial;--tw-numeric-spacing:initial;--tw-numeric-fraction:initial;--tw-shadow:0 0 #0000;--tw-shadow-color:initial;--tw-shadow-alpha:100%;--tw-inset-shadow:0 0 #0000;--tw-inset-shadow-color:initial;--tw-inset-shadow-alpha:100%;--tw-ring-color:initial;--tw-ring-shadow:0 0 #0000;--tw-inset-ring-color:initial;--tw-inset-ring-shadow:0 0 #0000;--tw-ring-inset:initial;--tw-ring-offset-width:0px;--tw-ring-offset-color:#fff;--tw-ring-offset-shadow:0 0 #0000;--tw-blur:initial;--tw-brightness:initial;--tw-contrast:initial;--tw-grayscale:initial;--tw-hue-rotate:initial;--tw-invert:initial;--tw-opacity:initial;--tw-saturate:initial;--tw-sepia:initial;--tw-drop-shadow:initial;--tw-drop-shadow-color:initial;--tw-drop-shadow-alpha:100%;--tw-drop-shadow-size:initial;--tw-content:"";--tw-outline-style:solid}}}@layer theme{:root,:host{--font-sans:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";--font-mono:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;--color-black:#000;--color-white:#fff;--spacing:.25rem;--container-7xl:80rem;--text-xs:.75rem;--text-xs--line-height:calc(1 / .75);--text-sm:.875rem;--text-sm--line-height:calc(1.25 / .875);--text-lg:1.125rem;--text-lg--line-height:calc(1.75 / 1.125);--text-xl:1.25rem;--text-xl--line-height:calc(1.75 / 1.25);--text-2xl:1.5rem;--text-2xl--line-height:calc(2 / 1.5);--font-weight-normal:400;--font-weight-medium:500;--font-weight-semibold:600;--tracking-tight:-.025em;--leading-relaxed:1.625;--radius-sm:.25rem;--radius-lg:.5rem;--animate-pulse:pulse 2s cubic-bezier(.4, 0, .6, 1) infinite;--default-transition-duration:.15s;--default-transition-timing-function:cubic-bezier(.4, 0, .2, 1);--default-font-family:var(--font-sans);--default-mono-font-family:var(--font-mono);--color-canvas:oklch(16% .012 255);--color-raised:oklch(20.5% .014 255);--color-hover:oklch(26% .016 255);--color-line:oklch(27% .014 255);--color-line-strong:oklch(37% .018 255);--color-dim:oklch(58% .02 255);--color-muted:oklch(72% .02 255);--color-fg-soft:oklch(86% .012 255);--color-fg:oklch(92% .008 255);--color-fg-strong:oklch(97% .004 255);--color-ok:oklch(78% .17 148);--color-ok-fg:oklch(85% .14 148);--color-ok-soft:oklch(91% .08 148);--color-warn:oklch(84% .16 92);--color-warn-fg:oklch(88% .14 95);--color-warn-soft:oklch(92.5% .1 97);--color-warn-strong:oklch(96% .05 97);--color-bad:oklch(69% .19 25);--color-bad-fg:oklch(79% .11 22);--color-bad-soft:oklch(88% .05 20);--color-danger:oklch(52% .2 27);--color-danger-hover:oklch(46% .18 27);--color-pause:oklch(72% .17 330);--color-pause-fg:oklch(82% .11 330);--color-accent:oklch(80% .12 200);--color-accent-fg:oklch(86% .09 200);--color-accent-soft:oklch(92% .05 200);--color-svc-1:oklch(82% .11 55);--color-svc-2:oklch(82% .09 355);--color-svc-3:oklch(78% .11 250);--color-svc-4:oklch(78% .11 295);--text-data:.8125rem;--text-data--line-height:1.25rem}}@layer base{*,:after,:before,::backdrop{box-sizing:border-box;border:0 solid;margin:0;padding:0}::file-selector-button{box-sizing:border-box;border:0 solid;margin:0;padding:0}html,:host{-webkit-text-size-adjust:100%;tab-size:4;line-height:1.5;font-family:var(--default-font-family,-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji");font-feature-settings:var(--default-font-feature-settings,normal);font-variation-settings:var(--default-font-variation-settings,normal);-webkit-tap-highlight-color:transparent}hr{height:0;color:inherit;border-top-width:1px}abbr:where([title]){-webkit-text-decoration:underline dotted;text-decoration:underline dotted}h1,h2,h3,h4,h5,h6{font-size:inherit;font-weight:inherit}a{color:inherit;-webkit-text-decoration:inherit;-webkit-text-decoration:inherit;-webkit-text-decoration:inherit;text-decoration:inherit}b,strong{font-weight:bolder}code,kbd,samp,pre{font-family:var(--default-mono-font-family,ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);font-feature-settings:var(--default-mono-font-feature-settings,normal);font-variation-settings:var(--default-mono-font-variation-settings,normal);font-size:1em}small{font-size:80%}sub,sup{vertical-align:baseline;font-size:75%;line-height:0;position:relative}sub{bottom:-.25em}sup{top:-.5em}table{text-indent:0;border-color:inherit;border-collapse:collapse}:-moz-focusring:where(:not(iframe)){outline:auto}progress{vertical-align:baseline}summary{display:list-item}ol,ul,menu{list-style:none}img,svg,video,canvas,audio,iframe,embed,object{vertical-align:middle;display:block}img,video{max-width:100%;height:auto}button,input,select,optgroup,textarea{font:inherit;font-feature-settings:inherit;font-variation-settings:inherit;letter-spacing:inherit;color:inherit;opacity:1;background-color:#0000;border-radius:0}::file-selector-button{font:inherit;font-feature-settings:inherit;font-variation-settings:inherit;letter-spacing:inherit;color:inherit;opacity:1;background-color:#0000;border-radius:0}:where(select:is([multiple],[size])) optgroup{font-weight:bolder}:where(select:is([multiple],[size])) optgroup option{padding-inline-start:20px}::file-selector-button{margin-inline-end:4px}::placeholder{opacity:1}@supports (not ((-webkit-appearance:-apple-pay-button))) or (contain-intrinsic-size:1px){::placeholder{color:currentColor}@supports (color:color-mix(in lab, red, red)){::placeholder{color:color-mix(in oklab, currentcolor 50%, transparent)}}}textarea{resize:vertical}::-webkit-search-decoration{-webkit-appearance:none}::-webkit-date-and-time-value{min-height:1lh;text-align:inherit}::-webkit-datetime-edit{display:inline-flex}::-webkit-datetime-edit-fields-wrapper{padding:0}::-webkit-datetime-edit{padding-block:0}::-webkit-datetime-edit-year-field{padding-block:0}::-webkit-datetime-edit-month-field{padding-block:0}::-webkit-datetime-edit-day-field{padding-block:0}::-webkit-datetime-edit-hour-field{padding-block:0}::-webkit-datetime-edit-minute-field{padding-block:0}::-webkit-datetime-edit-second-field{padding-block:0}::-webkit-datetime-edit-millisecond-field{padding-block:0}::-webkit-datetime-edit-meridiem-field{padding-block:0}::-webkit-calendar-picker-indicator{line-height:1}:-moz-ui-invalid{box-shadow:none}button,input:where([type=button],[type=reset],[type=submit]){appearance:button}::file-selector-button{appearance:button}::-webkit-inner-spin-button{height:auto}::-webkit-outer-spin-button{height:auto}[hidden]:where(:not([hidden=until-found])){display:none!important}}@layer components;@layer utilities{.visible{visibility:visible}.sr-only{clip-path:inset(50%);white-space:nowrap;border-width:0;width:1px;height:1px;margin:-1px;padding:0;position:absolute;overflow:hidden}.fixed{position:fixed}.sticky{position:sticky}.top-0{top:0}.bottom-4{bottom:calc(var(--spacing) * 4)}.bottom-\[calc\(1rem\+var\(--dock\,0px\)\)\]{bottom:calc(1rem + var(--dock,0px))}.left-1\/2{left:50%}.z-30{z-index:30}.z-40{z-index:40}.container{width:100%}@media (min-width:40rem){.container{max-width:40rem}}@media (min-width:48rem){.container{max-width:48rem}}@media (min-width:64rem){.container{max-width:64rem}}@media (min-width:80rem){.container{max-width:80rem}}@media (min-width:96rem){.container{max-width:96rem}}.m-auto{margin:auto}.mx-4{margin-inline:calc(var(--spacing) * 4)}.mx-auto{margin-inline:auto}.my-1{margin-block:var(--spacing)}.-mt-0\.5{margin-top:calc(var(--spacing) * -.5)}.mt-0\.5{margin-top:calc(var(--spacing) * .5)}.mt-1{margin-top:var(--spacing)}.mt-1\.5{margin-top:calc(var(--spacing) * 1.5)}.mt-2{margin-top:calc(var(--spacing) * 2)}.mr-0\.5{margin-right:calc(var(--spacing) * .5)}.mr-1\.5{margin-right:calc(var(--spacing) * 1.5)}.mr-auto{margin-right:auto}.-mb-px{margin-bottom:-1px}.mb-1{margin-bottom:var(--spacing)}.mb-3{margin-bottom:calc(var(--spacing) * 3)}.mb-4{margin-bottom:calc(var(--spacing) * 4)}.mb-6{margin-bottom:calc(var(--spacing) * 6)}.ml-1{margin-left:var(--spacing)}.ml-1\.5{margin-left:calc(var(--spacing) * 1.5)}.ml-3{margin-left:calc(var(--spacing) * 3)}.ml-auto{margin-left:auto}.block{display:block}.flex{display:flex}.grid{display:grid}.hidden{display:none}.inline{display:inline}.inline-block{display:inline-block}.inline-flex{display:inline-flex}.table{display:table}.size-1\.5{width:calc(var(--spacing) * 1.5);height:calc(var(--spacing) * 1.5)}.size-2{width:calc(var(--spacing) * 2);height:calc(var(--spacing) * 2)}.size-3{width:calc(var(--spacing) * 3);height:calc(var(--spacing) * 3)}.size-4{width:calc(var(--spacing) * 4);height:calc(var(--spacing) * 4)}.size-8{width:calc(var(--spacing) * 8);height:calc(var(--spacing) * 8)}.h-1\.5{height:calc(var(--spacing) * 1.5)}.h-3{height:calc(var(--spacing) * 3)}.h-\[65vh\]{height:65vh}.h-\[min\(56rem\,92dvh\)\]{height:min(56rem,92dvh)}.h-full{height:100%}.max-h-40{max-height:calc(var(--spacing) * 40)}.max-h-48{max-height:calc(var(--spacing) * 48)}.max-h-\[65vh\]{max-height:65vh}.min-h-0{min-height:0}.min-h-11{min-height:calc(var(--spacing) * 11)}.min-h-40{min-height:calc(var(--spacing) * 40)}.min-h-screen{min-height:100vh}.w-1\.5{width:calc(var(--spacing) * 1.5)}.w-11{width:calc(var(--spacing) * 11)}.w-\[min\(26rem\,calc\(100vw-2rem\)\)\]{width:min(26rem,100vw - 2rem)}.w-\[min\(640px\,95vw\)\]{width:min(640px,95vw)}.w-\[min\(1100px\,95vw\)\]{width:min(1100px,95vw)}.w-fit{width:fit-content}.w-full{width:100%}.w-max{width:max-content}.max-w-7xl{max-width:var(--container-7xl)}.max-w-80{max-width:calc(var(--spacing) * 80)}.max-w-\[70ch\]{max-width:70ch}.max-w-\[80ch\]{max-width:80ch}.max-w-\[min\(28rem\,calc\(100vw-2rem\)\)\]{max-width:min(28rem,100vw - 2rem)}.max-w-\[min\(48rem\,calc\(100vw-2rem\)\)\]{max-width:min(48rem,100vw - 2rem)}.max-w-\[min\(64rem\,calc\(100vw-2rem\)\)\]{max-width:min(64rem,100vw - 2rem)}.min-w-0{min-width:0}.min-w-48{min-width:calc(var(--spacing) * 48)}.flex-1{flex:1}.shrink-0{flex-shrink:0}.basis-56{flex-basis:calc(var(--spacing) * 56)}.basis-full{flex-basis:100%}.-translate-x-1\/2{--tw-translate-x:calc(calc(1 / 2 * 100%) * -1);translate:var(--tw-translate-x) var(--tw-translate-y)}.animate-pulse{animation:var(--animate-pulse)}.cursor-not-allowed{cursor:not-allowed}.cursor-pointer{cursor:pointer}.resize{resize:both}.\[scrollbar-width\:none\]{scrollbar-width:none}.list-none{list-style-type:none}.grid-cols-\[auto_1fr\]{grid-template-columns:auto 1fr}.flex-col{flex-direction:column}.flex-wrap{flex-wrap:wrap}.place-items-center{place-items:center}.items-center{align-items:center}.items-start{align-items:flex-start}.justify-between{justify-content:space-between}.justify-end{justify-content:flex-end}.gap-0\.5{gap:calc(var(--spacing) * .5)}.gap-1{gap:var(--spacing)}.gap-1\.5{gap:calc(var(--spacing) * 1.5)}.gap-2{gap:calc(var(--spacing) * 2)}.gap-3{gap:calc(var(--spacing) * 3)}.gap-4{gap:calc(var(--spacing) * 4)}:where(.space-y-0\.5>:not(:last-child)){--tw-space-y-reverse:0;margin-block-start:calc(calc(var(--spacing) * .5) * var(--tw-space-y-reverse));margin-block-end:calc(calc(var(--spacing) * .5) * calc(1 - var(--tw-space-y-reverse)))}:where(.space-y-2>:not(:last-child)){--tw-space-y-reverse:0;margin-block-start:calc(calc(var(--spacing) * 2) * var(--tw-space-y-reverse));margin-block-end:calc(calc(var(--spacing) * 2) * calc(1 - var(--tw-space-y-reverse)))}:where(.space-y-4>:not(:last-child)){--tw-space-y-reverse:0;margin-block-start:calc(calc(var(--spacing) * 4) * var(--tw-space-y-reverse));margin-block-end:calc(calc(var(--spacing) * 4) * calc(1 - var(--tw-space-y-reverse)))}.gap-x-1\.5{column-gap:calc(var(--spacing) * 1.5)}.gap-x-3{column-gap:calc(var(--spacing) * 3)}.gap-x-4{column-gap:calc(var(--spacing) * 4)}.gap-y-1{row-gap:var(--spacing)}.gap-y-1\.5{row-gap:calc(var(--spacing) * 1.5)}.gap-y-2{row-gap:calc(var(--spacing) * 2)}.gap-y-3{row-gap:calc(var(--spacing) * 3)}:where(.divide-x>:not(:last-child)){--tw-divide-x-reverse:0;border-inline-style:var(--tw-border-style);border-inline-start-width:calc(1px * var(--tw-divide-x-reverse));border-inline-end-width:calc(1px * calc(1 - var(--tw-divide-x-reverse)))}:where(.divide-y>:not(:last-child)){--tw-divide-y-reverse:0;border-bottom-style:var(--tw-border-style);border-top-style:var(--tw-border-style);border-top-width:calc(1px * var(--tw-divide-y-reverse));border-bottom-width:calc(1px * calc(1 - var(--tw-divide-y-reverse)))}:where(.divide-line>:not(:last-child)){border-color:var(--color-line)}:where(.divide-line\/70>:not(:last-child)){border-color:#22272db3}@supports (color:color-mix(in lab, red, red)){:where(.divide-line\/70>:not(:last-child)){border-color:color-mix(in oklab, var(--color-line) 70%, transparent)}}.truncate{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.overflow-auto{overflow:auto}.overflow-hidden{overflow:hidden}.overflow-x-auto{overflow-x:auto}.rounded{border-radius:.25rem}.rounded-\[1px\]{border-radius:1px}.rounded-full{border-radius:3.40282e38px}.rounded-lg{border-radius:var(--radius-lg)}.rounded-none{border-radius:0}.rounded-sm{border-radius:var(--radius-sm)}.border-t{border-top-style:var(--tw-border-style);border-top-width:1px}.border-b{border-bottom-style:var(--tw-border-style);border-bottom-width:1px}.border-b-2{border-bottom-style:var(--tw-border-style);border-bottom-width:2px}.border-accent\/50{border-color:#43d5dc80}@supports (color:color-mix(in lab, red, red)){.border-accent\/50{border-color:color-mix(in oklab, var(--color-accent) 50%, transparent)}}.border-line{border-color:var(--color-line)}.border-line-strong{border-color:var(--color-line-strong)}.border-line\/70{border-color:#22272db3}@supports (color:color-mix(in lab, red, red)){.border-line\/70{border-color:color-mix(in oklab, var(--color-line) 70%, transparent)}}.border-transparent{border-color:#0000}.border-warn\/40{border-color:#f0c63066}@supports (color:color-mix(in lab, red, red)){.border-warn\/40{border-color:color-mix(in oklab, var(--color-warn) 40%, transparent)}}.bg-accent{background-color:var(--color-accent)}.bg-accent\/10{background-color:#43d5dc1a}@supports (color:color-mix(in lab, red, red)){.bg-accent\/10{background-color:color-mix(in oklab, var(--color-accent) 10%, transparent)}}.bg-accent\/15{background-color:#43d5dc26}@supports (color:color-mix(in lab, red, red)){.bg-accent\/15{background-color:color-mix(in oklab, var(--color-accent) 15%, transparent)}}.bg-accent\/30{background-color:#43d5dc4d}@supports (color:color-mix(in lab, red, red)){.bg-accent\/30{background-color:color-mix(in oklab, var(--color-accent) 30%, transparent)}}.bg-bad{background-color:var(--color-bad)}.bg-bad\/10{background-color:#fb605c1a}@supports (color:color-mix(in lab, red, red)){.bg-bad\/10{background-color:color-mix(in oklab, var(--color-bad) 10%, transparent)}}.bg-black{background-color:var(--color-black)}.bg-canvas{background-color:var(--color-canvas)}.bg-danger{background-color:var(--color-danger)}.bg-dim{background-color:var(--color-dim)}.bg-fg{background-color:var(--color-fg)}.bg-line-strong{background-color:var(--color-line-strong)}.bg-ok{background-color:var(--color-ok)}.bg-ok\/40{background-color:#5ed47666}@supports (color:color-mix(in lab, red, red)){.bg-ok\/40{background-color:color-mix(in oklab, var(--color-ok) 40%, transparent)}}.bg-pause{background-color:var(--color-pause)}.bg-raised{background-color:var(--color-raised)}.bg-raised\/40{background-color:#13181e66}@supports (color:color-mix(in lab, red, red)){.bg-raised\/40{background-color:color-mix(in oklab, var(--color-raised) 40%, transparent)}}.bg-warn{background-color:var(--color-warn)}.bg-warn\/10{background-color:#f0c6301a}@supports (color:color-mix(in lab, red, red)){.bg-warn\/10{background-color:color-mix(in oklab, var(--color-warn) 10%, transparent)}}.bg-warn\/15{background-color:#f0c63026}@supports (color:color-mix(in lab, red, red)){.bg-warn\/15{background-color:color-mix(in oklab, var(--color-warn) 15%, transparent)}}.stroke-accent{stroke:var(--color-accent)}.p-0{padding:0}.p-1{padding:var(--spacing)}.p-2{padding:calc(var(--spacing) * 2)}.p-4{padding:calc(var(--spacing) * 4)}.px-1{padding-inline:var(--spacing)}.px-1\.5{padding-inline:calc(var(--spacing) * 1.5)}.px-2{padding-inline:calc(var(--spacing) * 2)}.px-2\.5{padding-inline:calc(var(--spacing) * 2.5)}.px-3{padding-inline:calc(var(--spacing) * 3)}.px-4{padding-inline:calc(var(--spacing) * 4)}.py-0\.5{padding-block:calc(var(--spacing) * .5)}.py-1{padding-block:var(--spacing)}.py-1\.5{padding-block:calc(var(--spacing) * 1.5)}.py-2{padding-block:calc(var(--spacing) * 2)}.py-2\.5{padding-block:calc(var(--spacing) * 2.5)}.py-3{padding-block:calc(var(--spacing) * 3)}.py-4{padding-block:calc(var(--spacing) * 4)}.py-16{padding-block:calc(var(--spacing) * 16)}.pt-3{padding-top:calc(var(--spacing) * 3)}.pt-4{padding-top:calc(var(--spacing) * 4)}.pt-5{padding-top:calc(var(--spacing) * 5)}.pt-6{padding-top:calc(var(--spacing) * 6)}.pr-3{padding-right:calc(var(--spacing) * 3)}.pr-4{padding-right:calc(var(--spacing) * 4)}.pr-6{padding-right:calc(var(--spacing) * 6)}.pb-2{padding-bottom:calc(var(--spacing) * 2)}.pb-2\.5{padding-bottom:calc(var(--spacing) * 2.5)}.pb-3{padding-bottom:calc(var(--spacing) * 3)}.pb-\[calc\(2rem\+var\(--dock\,0px\)\)\]{padding-bottom:calc(2rem + var(--dock,0px))}.pl-4{padding-left:calc(var(--spacing) * 4)}.text-center{text-align:center}.text-left{text-align:left}.align-middle{vertical-align:middle}.align-top{vertical-align:top}.font-mono{font-family:var(--font-mono)}.font-sans{font-family:var(--font-sans)}.text-2xl{font-size:var(--text-2xl);line-height:var(--tw-leading,var(--text-2xl--line-height))}.text-data{font-size:var(--text-data);line-height:var(--tw-leading,var(--text-data--line-height))}.text-lg{font-size:var(--text-lg);line-height:var(--tw-leading,var(--text-lg--line-height))}.text-sm{font-size:var(--text-sm);line-height:var(--tw-leading,var(--text-sm--line-height))}.text-xs{font-size:var(--text-xs);line-height:var(--tw-leading,var(--text-xs--line-height))}.text-\[0px\]{font-size:0}.text-\[11px\]{font-size:11px}.leading-relaxed{--tw-leading:var(--leading-relaxed);line-height:var(--leading-relaxed)}.font-medium{--tw-font-weight:var(--font-weight-medium);font-weight:var(--font-weight-medium)}.font-normal{--tw-font-weight:var(--font-weight-normal);font-weight:var(--font-weight-normal)}.font-semibold{--tw-font-weight:var(--font-weight-semibold);font-weight:var(--font-weight-semibold)}.tracking-tight{--tw-tracking:var(--tracking-tight);letter-spacing:var(--tracking-tight)}.text-balance{text-wrap:balance}.\[overflow-wrap\:anywhere\]{overflow-wrap:anywhere}.whitespace-nowrap{white-space:nowrap}.whitespace-pre-wrap{white-space:pre-wrap}.text-accent-fg{color:var(--color-accent-fg)}.text-bad-fg{color:var(--color-bad-fg)}.text-bad-soft{color:var(--color-bad-soft)}.text-bad-soft\/80{color:#f7cbcacc}@supports (color:color-mix(in lab, red, red)){.text-bad-soft\/80{color:color-mix(in oklab, var(--color-bad-soft) 80%, transparent)}}.text-dim{color:var(--color-dim)}.text-fg{color:var(--color-fg)}.text-fg-soft{color:var(--color-fg-soft)}.text-fg-strong{color:var(--color-fg-strong)}.text-muted{color:var(--color-muted)}.text-ok-fg{color:var(--color-ok-fg)}.text-ok-soft{color:var(--color-ok-soft)}.text-pause-fg{color:var(--color-pause-fg)}.text-svc-1{color:var(--color-svc-1)}.text-svc-2{color:var(--color-svc-2)}.text-svc-3{color:var(--color-svc-3)}.text-svc-4{color:var(--color-svc-4)}.text-warn-fg{color:var(--color-warn-fg)}.text-warn-soft{color:var(--color-warn-soft)}.text-warn-strong{color:var(--color-warn-strong)}.text-white{color:var(--color-white)}.normal-case{text-transform:none}.uppercase{text-transform:uppercase}.tabular-nums{--tw-numeric-spacing:tabular-nums;font-variant-numeric:var(--tw-ordinal,) var(--tw-slashed-zero,) var(--tw-numeric-figure,) var(--tw-numeric-spacing,) var(--tw-numeric-fraction,)}.underline{text-decoration-line:underline}.underline-offset-4{text-underline-offset:4px}.antialiased{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}.accent-accent{accent-color:var(--color-accent)}.accent-danger{accent-color:var(--color-danger)}.opacity-40{opacity:.4}.opacity-70{opacity:.7}.shadow-lg{--tw-shadow:0 10px 15px -3px var(--tw-shadow-color,#0000001a), 0 4px 6px -4px var(--tw-shadow-color,#0000001a);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}.ring-1{--tw-ring-shadow:var(--tw-ring-inset,) 0 0 0 calc(1px + var(--tw-ring-offset-width)) var(--tw-ring-color,currentcolor);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}.shadow-black\/30{--tw-shadow-color:#0000004d}@supports (color:color-mix(in lab, red, red)){.shadow-black\/30{--tw-shadow-color:color-mix(in oklab, color-mix(in oklab, var(--color-black) 30%, transparent) var(--tw-shadow-alpha), transparent)}}.shadow-black\/40{--tw-shadow-color:#0006}@supports (color:color-mix(in lab, red, red)){.shadow-black\/40{--tw-shadow-color:color-mix(in oklab, color-mix(in oklab, var(--color-black) 40%, transparent) var(--tw-shadow-alpha), transparent)}}.ring-accent\/40{--tw-ring-color:#43d5dc66}@supports (color:color-mix(in lab, red, red)){.ring-accent\/40{--tw-ring-color:color-mix(in oklab, var(--color-accent) 40%, transparent)}}.ring-bad\/40{--tw-ring-color:#fb605c66}@supports (color:color-mix(in lab, red, red)){.ring-bad\/40{--tw-ring-color:color-mix(in oklab, var(--color-bad) 40%, transparent)}}.ring-bad\/50{--tw-ring-color:#fb605c80}@supports (color:color-mix(in lab, red, red)){.ring-bad\/50{--tw-ring-color:color-mix(in oklab, var(--color-bad) 50%, transparent)}}.ring-current{--tw-ring-color:currentcolor}.ring-danger{--tw-ring-color:var(--color-danger)}.ring-dim{--tw-ring-color:var(--color-dim)}.ring-line{--tw-ring-color:var(--color-line)}.ring-line-strong{--tw-ring-color:var(--color-line-strong)}.ring-line-strong\/80{--tw-ring-color:#394049cc}@supports (color:color-mix(in lab, red, red)){.ring-line-strong\/80{--tw-ring-color:color-mix(in oklab, var(--color-line-strong) 80%, transparent)}}.ring-ok\/50{--tw-ring-color:#5ed47680}@supports (color:color-mix(in lab, red, red)){.ring-ok\/50{--tw-ring-color:color-mix(in oklab, var(--color-ok) 50%, transparent)}}.ring-warn\/30{--tw-ring-color:#f0c6304d}@supports (color:color-mix(in lab, red, red)){.ring-warn\/30{--tw-ring-color:color-mix(in oklab, var(--color-warn) 30%, transparent)}}.ring-warn\/60{--tw-ring-color:#f0c63099}@supports (color:color-mix(in lab, red, red)){.ring-warn\/60{--tw-ring-color:color-mix(in oklab, var(--color-warn) 60%, transparent)}}.filter{filter:var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,)}.transition{transition-property:color,background-color,border-color,outline-color,text-decoration-color,fill,stroke,--tw-gradient-from,--tw-gradient-via,--tw-gradient-to,opacity,box-shadow,transform,translate,scale,rotate,filter,-webkit-backdrop-filter,backdrop-filter,display,content-visibility,overlay,pointer-events;transition-timing-function:var(--tw-ease,var(--default-transition-timing-function));transition-duration:var(--tw-duration,var(--default-transition-duration))}.transition-opacity{transition-property:opacity;transition-timing-function:var(--tw-ease,var(--default-transition-timing-function));transition-duration:var(--tw-duration,var(--default-transition-duration))}.\[contain\:inline-size\]{contain:inline-size}.group-has-checked\:block:is(:where(.group):has(:checked) *){display:block}.group-aria-pressed\:inline-block:is(:where(.group)[aria-pressed=true] *){display:inline-block}.selection\:bg-accent\/30 ::selection{background-color:#43d5dc4d}@supports (color:color-mix(in lab, red, red)){.selection\:bg-accent\/30 ::selection{background-color:color-mix(in oklab, var(--color-accent) 30%, transparent)}}.selection\:bg-accent\/30::selection{background-color:#43d5dc4d}@supports (color:color-mix(in lab, red, red)){.selection\:bg-accent\/30::selection{background-color:color-mix(in oklab, var(--color-accent) 30%, transparent)}}.placeholder\:font-sans::placeholder{font-family:var(--font-sans)}.placeholder\:text-muted::placeholder{color:var(--color-muted)}.backdrop\:bg-black\/40::backdrop{background-color:#0006}@supports (color:color-mix(in lab, red, red)){.backdrop\:bg-black\/40::backdrop{background-color:color-mix(in oklab, var(--color-black) 40%, transparent)}}.backdrop\:bg-black\/70::backdrop{background-color:#000000b3}@supports (color:color-mix(in lab, red, red)){.backdrop\:bg-black\/70::backdrop{background-color:color-mix(in oklab, var(--color-black) 70%, transparent)}}.before\:text-xs:before{content:var(--tw-content);font-size:var(--text-xs);line-height:var(--tw-leading,var(--text-xs--line-height))}.before\:content-\[attr\(data-mark\)\]:before{--tw-content:attr(data-mark);content:var(--tw-content)}.before\:content-\[attr\(data-t\)\]:before{--tw-content:attr(data-t);content:var(--tw-content)}.open\:flex:is([open],:popover-open,:open){display:flex}.empty\:hidden:empty{display:none}.empty\:before\:font-sans:empty:before{content:var(--tw-content);font-family:var(--font-sans)}.empty\:before\:text-muted:empty:before{content:var(--tw-content);color:var(--color-muted)}.empty\:before\:content-\[attr\(data-empty\)\]:empty:before{--tw-content:attr(data-empty);content:var(--tw-content)}@media (hover:hover){.hover\:bg-accent\/10:hover{background-color:#43d5dc1a}@supports (color:color-mix(in lab, red, red)){.hover\:bg-accent\/10:hover{background-color:color-mix(in oklab, var(--color-accent) 10%, transparent)}}.hover\:bg-accent\/20:hover{background-color:#43d5dc33}@supports (color:color-mix(in lab, red, red)){.hover\:bg-accent\/20:hover{background-color:color-mix(in oklab, var(--color-accent) 20%, transparent)}}.hover\:bg-accent\/25:hover{background-color:#43d5dc40}@supports (color:color-mix(in lab, red, red)){.hover\:bg-accent\/25:hover{background-color:color-mix(in oklab, var(--color-accent) 25%, transparent)}}.hover\:bg-bad\/10:hover{background-color:#fb605c1a}@supports (color:color-mix(in lab, red, red)){.hover\:bg-bad\/10:hover{background-color:color-mix(in oklab, var(--color-bad) 10%, transparent)}}.hover\:bg-danger-hover:hover{background-color:var(--color-danger-hover)}.hover\:bg-hover:hover{background-color:var(--color-hover)}.hover\:bg-ok\/10:hover{background-color:#5ed4761a}@supports (color:color-mix(in lab, red, red)){.hover\:bg-ok\/10:hover{background-color:color-mix(in oklab, var(--color-ok) 10%, transparent)}}.hover\:bg-raised\/70:hover{background-color:#13181eb3}@supports (color:color-mix(in lab, red, red)){.hover\:bg-raised\/70:hover{background-color:color-mix(in oklab, var(--color-raised) 70%, transparent)}}.hover\:bg-transparent:hover{background-color:#0000}.hover\:text-accent-soft:hover{color:var(--color-accent-soft)}.hover\:text-fg:hover{color:var(--color-fg)}.hover\:text-fg-strong:hover{color:var(--color-fg-strong)}.hover\:underline:hover{text-decoration-line:underline}}.focus\:not-sr-only:focus{clip-path:none;white-space:normal;width:auto;height:auto;margin:0;padding:0;position:static;overflow:visible}.focus\:fixed:focus{position:fixed}.focus\:top-3:focus{top:calc(var(--spacing) * 3)}.focus\:left-3:focus{left:calc(var(--spacing) * 3)}.focus\:z-50:focus{z-index:50}.focus\:rounded:focus{border-radius:.25rem}.focus\:bg-fg-strong:focus{background-color:var(--color-fg-strong)}.focus\:px-3:focus{padding-inline:calc(var(--spacing) * 3)}.focus\:py-2:focus{padding-block:calc(var(--spacing) * 2)}.focus\:text-sm:focus{font-size:var(--text-sm);line-height:var(--tw-leading,var(--text-sm--line-height))}.focus\:text-canvas:focus{color:var(--color-canvas)}.focus\:ring-accent:focus{--tw-ring-color:var(--color-accent)}.focus\:outline-none:focus{--tw-outline-style:none;outline-style:none}.focus-visible\:outline-2:focus-visible{outline-style:var(--tw-outline-style);outline-width:2px}.focus-visible\:-outline-offset-2:focus-visible{outline-offset:calc(2px * -1)}.focus-visible\:outline-offset-2:focus-visible{outline-offset:2px}.focus-visible\:outline-accent:focus-visible{outline-color:var(--color-accent)}.disabled\:cursor-default:disabled{cursor:default}.aria-disabled\:cursor-wait[aria-disabled=true]{cursor:wait}.aria-disabled\:opacity-40[aria-disabled=true]{opacity:.4}.aria-disabled\:opacity-60[aria-disabled=true]{opacity:.6}.aria-invalid\:ring-bad[aria-invalid=true],.aria-invalid\:focus\:ring-bad[aria-invalid=true]:focus{--tw-ring-color:var(--color-bad)}.aria-pressed\:bg-accent\/15[aria-pressed=true]{background-color:#43d5dc26}@supports (color:color-mix(in lab, red, red)){.aria-pressed\:bg-accent\/15[aria-pressed=true]{background-color:color-mix(in oklab, var(--color-accent) 15%, transparent)}}.aria-pressed\:bg-fg-strong[aria-pressed=true]{background-color:var(--color-fg-strong)}.aria-pressed\:text-accent-soft[aria-pressed=true]{color:var(--color-accent-soft)}.aria-pressed\:text-canvas[aria-pressed=true]{color:var(--color-canvas)}.aria-pressed\:ring-accent\/40[aria-pressed=true]{--tw-ring-color:#43d5dc66}@supports (color:color-mix(in lab, red, red)){.aria-pressed\:ring-accent\/40[aria-pressed=true]{--tw-ring-color:color-mix(in oklab, var(--color-accent) 40%, transparent)}}.aria-selected\:border-accent[aria-selected=true]{border-color:var(--color-accent)}.aria-selected\:text-fg-strong[aria-selected=true]{color:var(--color-fg-strong)}.data-done\:min-h-0[data-done]{min-height:0}.data-done\:cursor-default[data-done]{cursor:default}.data-done\:px-0[data-done]{padding-inline:0}.data-done\:text-muted[data-done]{color:var(--color-muted)}.data-done\:opacity-100[data-done]{opacity:1}.data-done\:ring-0[data-done]{--tw-ring-shadow:var(--tw-ring-inset,) 0 0 0 calc(0px + var(--tw-ring-offset-width)) var(--tw-ring-color,currentcolor);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}@media (prefers-reduced-motion:reduce){.motion-reduce\:animate-none{animation:none}.motion-reduce\:transition-none{transition-property:none}}@media not all and (min-width:80rem){.max-xl\:block{display:block}.max-xl\:hidden{display:none}}@media not all and (min-width:64rem){.max-lg\:order-2{order:2}.max-lg\:order-3{order:3}.max-lg\:order-last{order:9999}.max-lg\:-my-3{margin-block:calc(var(--spacing) * -3)}.max-lg\:mb-4{margin-bottom:calc(var(--spacing) * 4)}.max-lg\:-ml-2{margin-left:calc(var(--spacing) * -2)}.max-lg\:block{display:block}.max-lg\:hidden{display:none}.max-lg\:size-6{width:calc(var(--spacing) * 6);height:calc(var(--spacing) * 6)}.max-lg\:size-11{width:calc(var(--spacing) * 11);height:calc(var(--spacing) * 11)}.max-lg\:h-dvh{height:100dvh}.max-lg\:max-h-none{max-height:none}.max-lg\:min-h-11{min-height:calc(var(--spacing) * 11)}.max-lg\:w-11{width:calc(var(--spacing) * 11)}.max-lg\:w-full{width:100%}.max-lg\:w-screen{width:100vw}.max-lg\:max-w-full{max-width:100%}.max-lg\:max-w-none{max-width:none}.max-lg\:min-w-24{min-width:calc(var(--spacing) * 24)}.max-lg\:basis-full{flex-basis:100%}.max-lg\:justify-start{justify-content:flex-start}.max-lg\:gap-2{gap:calc(var(--spacing) * 2)}:where(.max-lg\:space-y-1\.5>:not(:last-child)){--tw-space-y-reverse:0;margin-block-start:calc(calc(var(--spacing) * 1.5) * var(--tw-space-y-reverse));margin-block-end:calc(calc(var(--spacing) * 1.5) * calc(1 - var(--tw-space-y-reverse)))}.max-lg\:gap-x-2{column-gap:calc(var(--spacing) * 2)}.max-lg\:overflow-x-auto{overflow-x:auto}.max-lg\:rounded-none{border-radius:0}.max-lg\:p-0{padding:0}.max-lg\:px-2{padding-inline:calc(var(--spacing) * 2)}.max-lg\:px-4{padding-inline:calc(var(--spacing) * 4)}.max-lg\:py-2{padding-block:calc(var(--spacing) * 2)}.max-lg\:py-3{padding-block:calc(var(--spacing) * 3)}.max-lg\:py-3\.5{padding-block:calc(var(--spacing) * 3.5)}.max-lg\:py-4{padding-block:calc(var(--spacing) * 4)}.max-lg\:pt-2{padding-top:calc(var(--spacing) * 2)}.max-lg\:pt-3{padding-top:calc(var(--spacing) * 3)}.max-lg\:pt-4{padding-top:calc(var(--spacing) * 4)}.max-lg\:pl-14{padding-left:calc(var(--spacing) * 14)}.max-lg\:text-sm{font-size:var(--text-sm);line-height:var(--tw-leading,var(--text-sm--line-height))}.max-lg\:text-xl{font-size:var(--text-xl);line-height:var(--tw-leading,var(--text-xl--line-height))}.max-lg\:ring-0{--tw-ring-shadow:var(--tw-ring-inset,) 0 0 0 calc(0px + var(--tw-ring-offset-width)) var(--tw-ring-color,currentcolor);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}.max-lg\:\[contain\:none\]{contain:none}.max-lg\:has-\[div\]\:block:has(:is(div)){display:block}}@media not all and (min-width:40rem){.max-sm\:px-2{padding-inline:calc(var(--spacing) * 2)}}@media (min-width:40rem){.sm\:w-72{width:calc(var(--spacing) * 72)}.sm\:max-w-72{max-width:calc(var(--spacing) * 72)}.sm\:grid-cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}}@media (min-width:64rem){.lg\:sr-only{clip-path:inset(50%);white-space:nowrap;border-width:0;width:1px;height:1px;margin:-1px;padding:0;position:absolute;overflow:hidden}.lg\:ml-auto{margin-left:auto}.lg\:hidden{display:none}.lg\:w-9{width:calc(var(--spacing) * 9)}.lg\:w-20{width:calc(var(--spacing) * 20)}.lg\:max-w-\[24ch\]{max-width:24ch}.lg\:max-w-\[28ch\]{max-width:28ch}.lg\:min-w-\[24ch\]{min-width:24ch}.lg\:truncate{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.lg\:text-left{text-align:left}.lg\:text-right{text-align:right}.lg\:\[direction\:rtl\]{direction:rtl}}.\[\&_kbd\]\:rounded kbd{border-radius:.25rem}.\[\&_kbd\]\:px-1\.5 kbd{padding-inline:calc(var(--spacing) * 1.5)}.\[\&_kbd\]\:font-mono kbd{font-family:var(--font-mono)}.\[\&_kbd\]\:text-xs kbd{font-size:var(--text-xs);line-height:var(--tw-leading,var(--text-xs--line-height))}.\[\&_kbd\]\:text-fg-strong kbd{color:var(--color-fg-strong)}.\[\&_kbd\]\:ring-1 kbd{--tw-ring-shadow:var(--tw-ring-inset,) 0 0 0 calc(1px + var(--tw-ring-offset-width)) var(--tw-ring-color,currentcolor);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}.\[\&_kbd\]\:ring-line-strong kbd{--tw-ring-color:var(--color-line-strong)}.\[\&\:\:-webkit-details-marker\]\:hidden::-webkit-details-marker{display:none}}@media (prefers-color-scheme:light){:root{--color-canvas:oklch(98.6% .003 255);--color-raised:#fff;--color-hover:oklch(96% .006 255);--color-line:oklch(91.5% .008 255);--color-line-strong:oklch(85% .012 255);--color-dim:oklch(64% .018 255);--color-muted:oklch(47% .02 255);--color-fg-soft:oklch(38% .018 255);--color-fg:oklch(28% .016 255);--color-fg-strong:oklch(17% .012 255);--color-ok:oklch(62% .17 148);--color-ok-fg:oklch(47% .13 148);--color-ok-soft:oklch(40% .11 148);--color-warn:oklch(65% .135 68);--color-warn-fg:oklch(52% .105 70);--color-warn-soft:oklch(45% .09 65);--color-warn-strong:oklch(38% .09 60);--color-bad:oklch(60% .22 25);--color-bad-fg:oklch(50% .2 27);--color-bad-soft:oklch(43% .17 27);--color-danger:oklch(50% .2 27);--color-danger-hover:oklch(44% .18 27);--color-pause:oklch(58% .22 330);--color-pause-fg:oklch(48% .2 330);--color-accent:oklch(55% .09 210);--color-accent-fg:oklch(47% .08 215);--color-accent-soft:oklch(40% .07 215);--color-svc-1:oklch(50% .13 50);--color-svc-2:oklch(50% .14 355);--color-svc-3:oklch(48% .12 250);--color-svc-4:oklch(47% .18 295)}}:root{scrollbar-color:var(--color-line-strong) transparent;caret-color:var(--color-accent)}@property --tw-translate-x{syntax:"*";inherits:false;initial-value:0}@property --tw-translate-y{syntax:"*";inherits:false;initial-value:0}@property --tw-translate-z{syntax:"*";inherits:false;initial-value:0}@property --tw-space-y-reverse{syntax:"*";inherits:false;initial-value:0}@property --tw-divide-x-reverse{syntax:"*";inherits:false;initial-value:0}@property --tw-border-style{syntax:"*";inherits:false;initial-value:solid}@property --tw-divide-y-reverse{syntax:"*";inherits:false;initial-value:0}@property --tw-leading{syntax:"*";inherits:false}@property --tw-font-weight{syntax:"*";inherits:false}@property --tw-tracking{syntax:"*";inherits:false}@property --tw-ordinal{syntax:"*";inherits:false}@property --tw-slashed-zero{syntax:"*";inherits:false}@property --tw-numeric-figure{syntax:"*";inherits:false}@property --tw-numeric-spacing{syntax:"*";inherits:false}@property --tw-numeric-fraction{syntax:"*";inherits:false}@property --tw-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-shadow-color{syntax:"*";inherits:false}@property --tw-shadow-alpha{syntax:"<percentage>";inherits:false;initial-value:100%}@property --tw-inset-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-inset-shadow-color{syntax:"*";inherits:false}@property --tw-inset-shadow-alpha{syntax:"<percentage>";inherits:false;initial-value:100%}@property --tw-ring-color{syntax:"*";inherits:false}@property --tw-ring-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-inset-ring-color{syntax:"*";inherits:false}@property --tw-inset-ring-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-ring-inset{syntax:"*";inherits:false}@property --tw-ring-offset-width{syntax:"<length>";inherits:false;initial-value:0}@property --tw-ring-offset-color{syntax:"*";inherits:false;initial-value:#fff}@property --tw-ring-offset-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-blur{syntax:"*";inherits:false}@property --tw-brightness{syntax:"*";inherits:false}@property --tw-contrast{syntax:"*";inherits:false}@property --tw-grayscale{syntax:"*";inherits:false}@property --tw-hue-rotate{syntax:"*";inherits:false}@property --tw-invert{syntax:"*";inherits:false}@property --tw-opacity{syntax:"*";inherits:false}@property --tw-saturate{syntax:"*";inherits:false}@property --tw-sepia{syntax:"*";inherits:false}@property --tw-drop-shadow{syntax:"*";inherits:false}@property --tw-drop-shadow-color{syntax:"*";inherits:false}@property --tw-drop-shadow-alpha{syntax:"<percentage>";inherits:false;initial-value:100%}@property --tw-drop-shadow-size{syntax:"*";inherits:false}@property --tw-content{syntax:"*";inherits:false;initial-value:""}@property --tw-outline-style{syntax:"*";inherits:false;initial-value:solid}@keyframes pulse{50%{opacity:.5}}"""
 PAGE = r"""<!doctype html>
 <html lang="pt-BR" class="bg-canvas" data-cli="docker">
 <head>
@@ -1095,7 +1182,7 @@ PAGE = r"""<!doctype html>
           <dt><kbd>/</kbd></dt><dd>busca na lista de containers (nos logs, filtra as linhas)</dd>
           <dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>nas abas, troca de aba</dd>
           <dt><kbd>↑</kbd> <kbd>↓</kbd></dt><dd>anda entre os botões Logs</dd>
-          <dt><kbd>Enter</kbd></dt><dd>no botão Logs, abre os logs</dd>
+          <dt><kbd>Enter</kbd> <kbd>l</kbd></dt><dd>abre os logs do container da linha em foco</dd>
           <dt><kbd>r</kbd></dt><dd>reinicia o container da linha em foco (nos logs, o dos logs)</dd>
           <dt><kbd>x</kbd></dt><dd>marca ou desmarca a linha em foco</dd>
           <dt><kbd>a</kbd></dt><dd>marca ou desmarca todos os visíveis</dd>
@@ -1190,6 +1277,16 @@ PAGE = r"""<!doctype html>
     <details id="insp" ontoggle="this.open && loadInspect()" class="text-xs">
       <summary class="cursor-pointer w-fit py-1 max-lg:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent text-muted hover:text-fg">Configuração: restart, redes, mounts e env</summary>
       <div id="insp-body" class="mt-1">Carregando…</div>
+    </details>
+    <!-- o que aconteceu com o container (docker events das últimas 24 h) e o que roda nele agora (docker top): o "por quê"
+         de um loop de reinício ou de uma CPU alta, sem sair dos logs. Cada um só vai ao docker quando abre (app.ts) -->
+    <details id="hist" ontoggle="this.open && loadHistory()" class="text-xs">
+      <summary class="cursor-pointer w-fit py-1 max-lg:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent text-muted hover:text-fg">Histórico: quando subiu, caiu ou mudou de saúde</summary>
+      <div id="hist-body" class="mt-1">Carregando…</div>
+    </details>
+    <details id="procs" ontoggle="this.open && loadTop()" class="text-xs">
+      <summary class="cursor-pointer w-fit py-1 max-lg:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent text-muted hover:text-fg">Processos (docker top)</summary>
+      <div id="procs-body" class="mt-1 max-h-48 overflow-auto text-fg-soft">Carregando…</div>
     </details>
   </div>
   <!-- ferramentas dos logs, coladas na caixa: filtro (só na página; / foca o campo, como a busca da lista) e o que fazer com o texto -->
@@ -1354,9 +1451,12 @@ PAGE = r"""<!doctype html>
     "0 containers": "0 containers",
     ": só esta máquina acessa.": ": only this machine can reach them.",
     "; e mais {0}": "; and {0} more",
+    "A imagem não existe ou é privada: confira o nome e a tag (imagem privada pede docker login no terminal).": "The image doesn't exist or is private: check the name and tag (a private image needs docker login in the terminal).",
     "A imagem tem mais de uma tag: remova as tags pelo terminal, uma a uma.": "The image has more than one tag: remove the tags one by one in the terminal.",
     "A lista muda assim que o docker avisa (docker events)": "The list changes as soon as docker reports it (docker events)",
     "A porta {0} do host aparece duas vezes.": "Host port {0} appears twice.",
+    "A porta {0} do host já está em uso, por outro container ou outro programa: pare quem usa ou troque a porta.": "Host port {0} is already in use, by another container or program: stop whatever uses it or change the port.",
+    "A rede {0} não existe mais: recrie o container (no compose, compose up).": "Network {0} no longer exists: recreate the container (with compose, compose up).",
     "Abra o link com {0} que aparece no terminal onde você rodou {1}. O token muda a cada execução.": "Open the link with {0} shown in the terminal where you ran {1}. The token changes on every run.",
     "Abrir no navegador": "Open in the browser",
     "Abrir terminal": "Open terminal",
@@ -1423,7 +1523,9 @@ PAGE = r"""<!doctype html>
     "Desatualizado · dados de {0}": "Out of date · data from {0}",
     "Desde o começo": "From the start",
     "Desde que subiu": "Since it started",
+    "Desde {0}: {1}": "Since {0}: {1}",
     "Detalhes técnicos": "Technical details",
+    "Disco cheio onde o Docker guarda os dados: libere espaço na aba Imagens.": "The disk where Docker keeps its data is full: free up space in the Images tab.",
     "Disco: {0} lidos · {1} gravados": "Disk: {0} read · {1} written",
     "Docker GUI": "Docker GUI",
     "Docker fora do ar": "Docker is down",
@@ -1448,6 +1550,7 @@ PAGE = r"""<!doctype html>
     "Filtrar linhas…": "Filter lines…",
     "Filtrar por estado": "Filter by state",
     "Filtrar por nome, imagem ou projeto…": "Filter by name, image or project…",
+    "Histórico: quando subiu, caiu ou mudou de saúde": "History: when it started, crashed or changed health",
     Imagem: "Image",
     "Imagem inválida: use repo[:tag] ou repo@sha256:…, com o caminho em minúsculas.": "Invalid image: use repo[:tag] or repo@sha256:…, with the path in lowercase.",
     "Imagem:": "Image:",
@@ -1457,6 +1560,7 @@ PAGE = r"""<!doctype html>
     Iniciar: "Start",
     "Iniciar de novo": "Start again",
     "Iniciar tudo": "Start all",
+    "Já existe um container chamado {0}: escolha outro nome ou remova o antigo.": "A container named {0} already exists: pick another name or remove the old one.",
     "Libera até {0}{1}. {2}": "Frees up to {0}{1}. {2}",
     "Limpando {0}…": "Cleaning up {0}…",
     "Limpando…": "Cleaning up…",
@@ -1476,6 +1580,7 @@ PAGE = r"""<!doctype html>
     Memória: "Memory",
     "Memória: {0} ({1})": "Memory: {0} ({1})",
     "Morto · só dá para remover": "Dead · can only be removed",
+    "Nada nas últimas 24 h. O docker guarda só os eventos mais recentes.": "Nothing in the last 24 h. Docker only keeps the most recent events.",
     "Nada no log ainda. As linhas novas aparecem aqui assim que o container escrever.": "Nothing in the log yet. New lines show up here as soon as the container writes.",
     "Nada no log nesse período.": "Nothing in the log for this period.",
     "Nenhum container ainda. Crie um em “Novo container” ou com {0}.": "No containers yet. Create one with “New container” or with {0}.",
@@ -1484,12 +1589,14 @@ PAGE = r"""<!doctype html>
     "Nenhum container {0}agora.": "No containers {0}right now.",
     "Nenhum container {0}corresponde a “{1}”.": "No containers {0}match “{1}”.",
     "Nenhum probe rodou ainda.": "No probe has run yet.",
+    "Nenhum processo.": "No processes.",
     "Nenhum volume sem uso para apagar.": "No unused volume to delete.",
     "Nenhum volume.": "No volumes.",
     "Nenhuma imagem.": "No images.",
     "Nenhuma linha": "No lines",
     "Nenhuma ocorrência": "No matches",
     "Nenhuma rede.": "No networks.",
+    "No arquivo do compose, sem container: sobem pelo menu ⋯ do projeto": "In the compose file, without a container: start them from the project's ⋯ menu",
     "No daemon remoto {0}: ": "On the remote daemon {0}: ",
     "No máximo {0} portas.": "At most {0} ports.",
     "No máximo {0} variáveis.": "At most {0} variables.",
@@ -1511,12 +1618,17 @@ PAGE = r"""<!doctype html>
     "Não consegui ler o inspect: {0}": "Could not read the inspect: {0}",
     "Não consegui ler o uso de disco. O servidor do Docker GUI está rodando?": "Could not read the disk usage. Is the Docker GUI server running?",
     "Não consegui ler o uso de disco: {0}": "Could not read the disk usage: {0}",
+    "Não consegui ler os eventos.": "Couldn't read the events.",
+    "Não consegui ler os eventos: {0}": "Couldn't read the events: {0}",
     "Não consegui ler os logs: {0}": "Could not read the logs: {0}",
+    "Não consegui ler os processos.": "Couldn't read the processes.",
+    "Não consegui ler os processos: {0}": "Couldn't read the processes: {0}",
     "Não deu para criar {0}.": "Could not create {0}.",
     "Não deu para criar {0}. {1}": "Could not create {0}. {1}",
     "Não deu para limpar {0}: {1}": "Could not clean up {0}: {1}",
     "Não deu para remover {0} {1}. {2}": "Could not remove {0} {1}. {2}",
     "Não deu para {0} {1}. O erro ficou na linha.": "Could not {0} {1}. The error is on its row.",
+    "Não deu para {0} {1}. {2}": "Couldn't {0} {1}. {2}",
     "Nível das linhas": "Line level",
     "O daemon está rodando? Verifique com {0}.": "Is the daemon running? Check with {0}.",
     "O docker só remove container parado (sem -f)": "docker only removes stopped containers (without -f)",
@@ -1542,6 +1654,7 @@ PAGE = r"""<!doctype html>
     Período: "Period",
     Portas: "Ports",
     "Precisa de atenção · {0}": "Needs attention · {0}",
+    "Processos (docker top)": "Processes (docker top)",
     "Projeto compose · {0} de {1} rodando · todos os serviços": "Compose project · {0} of {1} running · all services",
     "Pronto: aviso quando um container entrar na faixa de atenção, mesmo com a aba em segundo plano.": "Done: you'll be notified when a container enters the attention band, even with the tab in the background.",
     "Publicar em todas as interfaces (": "Publish on all interfaces (",
@@ -1597,6 +1710,7 @@ PAGE = r"""<!doctype html>
     "Todos os serviços": "All services",
     "Totais desde que o container subiu": "Totals since the container started",
     "Tudo carregado": "All loaded",
+    "Uma porta do host já está em uso, por outro container ou outro programa: pare quem usa ou troque a porta.": "A host port is already in use, by another container or program: stop whatever uses it or change the port.",
     "Use nome:/caminho/no/container, ex.: dados:/var/lib/postgresql/data. Pasta do host (bind mount) não é aceita.": "Use name:/path/in/container, e.g. data:/var/lib/postgresql/data. Host folders (bind mounts) are not accepted.",
     "Vai apagar {0}: {1}{2}. Os dados deles se perdem.": "Will delete {0}: {1}{2}. Their data is lost.",
     "Vai remover {0}. {1}": "Will remove {0}. {1}",
@@ -1609,6 +1723,7 @@ PAGE = r"""<!doctype html>
     "a cada 2 s": "every 2 s",
     "a imagem": "the image",
     "a rede": "the network",
+    "abre os logs do container da linha em foco": "opens the logs of the container in the focused row",
     "always · sempre": "always · always",
     "anda entre os botões Logs": "moves between the Logs buttons",
     ano: "yr",
@@ -1617,11 +1732,13 @@ PAGE = r"""<!doctype html>
     "ao vivo": "live",
     "as imagens que nenhum container usa": "the images no container uses",
     "busca na lista de containers (nos logs, filtra as linhas)": "searches the container list (in the logs, filters the lines)",
+    "caiu {0}×": "crashed {0}×",
     "cancela uma confirmação, fecha menus e modais": "cancels a confirmation, closes menus and dialogs",
     "com problema": "with problems",
     "comando não encontrado": "command not found",
     "comando sem permissão de execução": "command not executable",
     "compose down do projeto {0}": "compose down of project {0}",
+    "compose up {0} do projeto {1}": "compose up {0} in project {1}",
     "container selecionado": "container selected",
     "containers selecionados": "containers selected",
     "criado sem nome, por um container": "created without a name, by a container",
@@ -1644,7 +1761,11 @@ PAGE = r"""<!doctype html>
     "falha do próprio docker run": "docker run itself failed",
     falharam: "failed",
     falhou: "failed",
+    "ficou sem memória (OOM)": "ran out of memory (OOM)",
+    "healthcheck começou a falhar": "healthcheck started failing",
     "healthcheck falhando, loop de reinício ou saída com erro": "failing healthcheck, restart loop or exit with an error",
+    "healthcheck voltou a passar": "healthcheck passing again",
+    "healthcheck: {0}": "healthcheck: {0}",
     "há {0}": "{0} ago",
     iniciado: "started",
     item: "item",
@@ -1666,7 +1787,6 @@ PAGE = r"""<!doctype html>
     "nenhum container": "no container",
     nenhuma: "none",
     "nenhuma tag aponta para ela": "no tag points to it",
-    "no botão Logs, abre os logs": "on a Logs button, opens the logs",
     "no · não reinicia": "no · never restarts",
     "não reinicia": "never restarts",
     "o cache de build": "the build cache",
@@ -1681,6 +1801,7 @@ PAGE = r"""<!doctype html>
     padrão: "default",
     parado: "stopped",
     parados: "stopped",
+    parou: "stopped",
     pausado: "paused",
     pausados: "paused",
     "portaDoHost:portaDoContainer, separadas por vírgula ou espaço. Ficam em {0} do daemon remoto {1}: só aquela máquina acessa, não esta.": "hostPort:containerPort, separated by commas or spaces. Bound to {0} of the remote daemon {1}: only that machine can reach them, not this one.",
@@ -1694,17 +1815,21 @@ PAGE = r"""<!doctype html>
     "remoção em lote": "bulk removal",
     retomado: "resumed",
     "rodando bem": "running fine",
+    "saiu com código {0}": "exited with code {0}",
     "se sair com erro": "if it exits with an error",
     selecionado: "selected",
     selecionados: "selected",
     sem: "wk",
     "sem acesso ao Docker": "no access to Docker",
     "sem conexão": "no connection",
+    "sem container: {0}": "no container: {0}",
     "sem tag": "untagged",
     "sem tag {0}": "untagged {0}",
     "sem token": "no token",
     sempre: "always",
     "sempre, menos se você parar": "always, unless you stop it",
+    subiu: "started",
+    "subiu {0}×": "started {0}×",
     "são ignoradas. Os valores ficam visíveis no": "are ignored. The values are visible in",
     "todas as linhas": "all lines",
     "unless-stopped · sempre, menos se você parar": "unless-stopped · always, unless you stop it",
@@ -1713,6 +1838,7 @@ PAGE = r"""<!doctype html>
     "volume sem uso": "unused volume",
     "volumes anônimos sem uso": "unused anonymous volumes",
     "volumes sem uso": "unused volumes",
+    "{0} OOM": "{0} OOM",
     "{0} aparece duas vezes.": "{0} appears twice.",
     "{0} com problema": "{0} with problems",
     "{0} containers precisam de atenção": "{0} containers need attention",
@@ -1913,6 +2039,46 @@ PAGE = r"""<!doctype html>
     if (/in use|being used|active endpoints|associated containers/i.test(msg)) return t`Em uso: remova o container que usa (ou tire ele da rede) antes.`;
     return "";
   }
+  function actionHint(msg) {
+    const port = msg.match(/:(\d+)(?: failed: port is already allocated|: bind: address already in use)/)?.[1];
+    if (port) return t`A porta ${port} do host já está em uso, por outro container ou outro programa: pare quem usa ou troque a porta.`;
+    if (/port is already allocated|address already in use/.test(msg)) return t`Uma porta do host já está em uso, por outro container ou outro programa: pare quem usa ou troque a porta.`;
+    const name = msg.match(/container name "?\/?([^"\s]+)"? is already in use/i)?.[1];
+    if (name) return t`Já existe um container chamado ${name}: escolha outro nome ou remova o antigo.`;
+    if (/pull access denied|manifest unknown|repository does not exist|requested access to the resource is denied|No such image/i.test(msg))
+      return t`A imagem não existe ou é privada: confira o nome e a tag (imagem privada pede docker login no terminal).`;
+    const net = msg.match(/network (\S+) not found/)?.[1];
+    if (net) return t`A rede ${net} não existe mais: recrie o container (no compose, compose up).`;
+    if (/no space left on device/i.test(msg)) return t`Disco cheio onde o Docker guarda os dados: libere espaço na aba Imagens.`;
+    return "";
+  }
+  function eventText(e) {
+    if (e.a === "start") return [t`subiu`, "ok"];
+    if (e.a === "die") return e.code ? [t`saiu com código ${e.code}` + (EXIT[e.code] ? ` · ${EXIT[e.code]}` : ""), "bad"] : [t`parou`, "off"];
+    if (e.a === "oom") return [t`ficou sem memória (OOM)`, "bad"];
+    if (e.a === "pause") return [t`pausado`, "pause"];
+    if (e.a === "unpause") return [t`retomado`, "ok"];
+    return e.health === "unhealthy" ? [t`healthcheck começou a falhar`, "warn"] : e.health === "healthy" ? [t`healthcheck voltou a passar`, "ok"] : [t`healthcheck: ${e.health || "?"}`, "check"];
+  }
+  function healthChanges(evs) {
+    let last = "";
+    return evs.filter((e) => {
+      if (e.a !== "health_status") return true;
+      const changed = e.health !== last;
+      last = e.health;
+      return changed;
+    });
+  }
+  function historySummary(evs) {
+    const n = (f) => evs.filter(f).length;
+    const up = n((e) => e.a === "start"), fell2 = n((e) => e.a === "die" && !!e.code), oom = n((e) => e.a === "oom");
+    return [up && t`subiu ${up}×`, fell2 && t`caiu ${fell2}×`, oom && t`${oom} OOM`].filter(Boolean).join(" · ");
+  }
+  function topTable(text) {
+    const [head, ...lines] = text.split("\n").filter((l) => l.trim()).map((l) => l.trim().split(/\s{2,}/));
+    if (!head) return [];
+    return [head, ...lines.map((c) => [...c.slice(0, head.length - 1), c.slice(head.length - 1).join("  ")])];
+  }
   var RESTART = ["no", "on-failure", "unless-stopped", "always"];
   var HOST = "[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?";
   var PATH = "[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*";
@@ -1980,9 +2146,13 @@ PAGE = r"""<!doctype html>
     ].filter(Boolean).join(", ") + ".";
   }
   var LEVEL = [
-    ["bad", /\b(FATAL|PANIC|CRIT(ICAL)?|ERROR|ERR|EMERG)\b|\b(Error|Exception|Traceback)\b:/, /\blevel["=: ]+"?(fatal|panic|crit|err)|\[(error|crit|alert|emerg)\]/i],
-    ["warn", /\bWARN(ING)?\b|\bWarning:/, /\blevel["=: ]+"?warn|\[warn\]/i],
-    ["dim", /\b(DEBUG|TRACE)\b/, /\blevel["=: ]+"?(debug|trace)|\[debug\]/i]
+    [
+      "bad",
+      /\b(FATAL|PANIC|CRIT(ICAL)?|ERROR|ERR|EMERG)\b|\b(Error|Exception|Traceback)\b:/,
+      /\b(level|lvl|severity)["=: ]+"?(fatal|panic|crit|err|alert|emerg)|"level":\s*[56]0\b|\[(error|crit|alert|emerg)\]/i
+    ],
+    ["warn", /\bWARN(ING)?\b|\bWarning:/, /\b(level|lvl|severity)["=: ]+"?warn|"level":\s*40\b|\[warn\]/i],
+    ["dim", /\b(DEBUG|TRACE)\b/, /\b(level|lvl|severity)["=: ]+"?(debug|trace)|"level":\s*[12]0\b|\[debug\]/i]
   ];
   var logLevel = (line) => LEVEL.find(([, word, mark2]) => word.test(line) || mark2.test(line))?.[0] ?? "";
   function reclaimShare(d) {
@@ -11435,14 +11605,23 @@ ${h2.join(`
   var LABEL = { start: t`Iniciar`, stop: t`Parar`, restart: t`Reiniciar`, pause: t`Pausar`, unpause: t`Retomar`, logs: t`Logs`, remove: t`Remover` };
   var VERB = { start: t`Iniciando…`, stop: t`Parando…`, restart: t`Reiniciando…`, pause: t`Pausando…`, unpause: t`Retomando…`, remove: t`Removendo…` };
   var DONE = { start: t`iniciado`, stop: t`parado`, restart: t`reiniciado`, pause: t`pausado`, unpause: t`retomado`, remove: t`removido` };
-  var COMPOSE_VERB = { up: t`Subindo…`, rebuild: t`Reconstruindo…`, down: t`Derrubando…`, pull: t`Baixando…`, restart: t`Reiniciando…`, build: t`Reconstruindo…` };
+  var COMPOSE_VERB = {
+    up: t`Subindo…`,
+    rebuild: t`Reconstruindo…`,
+    down: t`Derrubando…`,
+    pull: t`Baixando…`,
+    restart: t`Reiniciando…`,
+    build: t`Reconstruindo…`,
+    svcup: t`Subindo…`
+  };
   var COMPOSE_CMD = {
     up: "compose up",
     rebuild: "compose up --build",
     down: "compose down",
     pull: "compose pull",
     restart: "compose restart",
-    build: "compose up --build --no-deps"
+    build: "compose up --build --no-deps",
+    svcup: "compose up"
   };
   var PRIMARY = { running: "stop", restarting: "stop", paused: "unpause", exited: "start", created: "start" };
   var SECONDARY = { running: "restart", paused: "stop" };
@@ -11818,7 +11997,8 @@ ${h2.join(`
       errors.delete(c.ID);
       return "";
     }
-    return `<details data-keep="err" class="mt-1 text-xs text-bad-fg"><summary class="cursor-pointer w-fit py-1 max-lg:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent">${t`Falhou ao ${e.what.toLowerCase()} · ver erro`}</summary>
+    const hint = actionHint(e.msg);
+    return (hint ? `<p class="mt-1 [contain:inline-size] text-xs text-bad-fg">${esc(hint)}</p>` : "") + `<details data-keep="err" class="mt-1 text-xs text-bad-fg"><summary class="cursor-pointer w-fit py-1 max-lg:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent">${t`Falhou ao ${e.what.toLowerCase()} · ver erro`}</summary>
     <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-bad-soft">${esc(e.msg)}</pre></details>`;
   }
   var health = {};
@@ -11968,9 +12148,14 @@ ${h2.join(`
     };
     const cbtn = (a, text, cls = MENU_ITEM + " text-fg") => `<button data-id="stack-${ek}" data-a="m-${a}" data-p="${ek}" ${off} aria-label="${t`${text.replace("…", "")} do projeto ${ek}`}"
       onclick="menuPick(this); composeAct('${a}', this.dataset.p)" class="${cls}">${composing.get(k) === a ? COMPOSE_VERB[a] : text}</button>`;
+    const missing = dir ? missingSvcs(k, dir, all) : [];
+    const upSvc = missing.map((s15) => `<button data-id="stack-${ek}" data-a="m-svcup-${esc(s15)}" data-p="${ek}" data-s="${esc(s15)}" ${off}
+      aria-label="${t`compose up ${esc(s15)} do projeto ${ek}`}" onclick="menuPick(this); composeAct('svcup', this.dataset.p, this.dataset.s)"
+      class="${MENU_ITEM} text-fg">compose up ${esc(s15)}</button>`).join("");
     const groups = [
       STACK.filter(([a]) => a !== prim).map(([a, text]) => sbtn(a, text, MENU_ITEM + " text-fg")).join(""),
       dir ? cbtn("up", "compose up") + cbtn("rebuild", "compose up --build") + cbtn("pull", "compose pull") : "",
+      upSvc,
       dir ? cbtn("down", "compose down…", MENU_ITEM + " text-bad-fg") : ""
     ].filter(Boolean);
     const verb = composing.get(k);
@@ -11980,6 +12165,7 @@ ${h2.join(`
       <span class="font-mono text-data font-semibold ${k ? "text-fg-strong" : "text-muted"}">${label}</span>${strip}
       ${k ? `<span class="font-mono text-xs ${verb ? "text-fg-strong" : "text-muted"}">compose · ${verb ? COMPOSE_VERB[verb] : t`${on2} de ${all.length} rodando`}</span>` : ""}
       ${k && inBand ? `<span class="text-xs text-bad-fg">${t`${inBand} na faixa de atenção, acima`}</span>` : ""}
+      ${missing.length ? `<span class="text-xs text-muted" title="${t`No arquivo do compose, sem container: sobem pelo menu ⋯ do projeto`}">${t`sem container: ${`<span class="font-mono">${esc(missing.join(", "))}</span>`}`}</span>` : ""}
       <span class="lg:ml-auto max-lg:w-full flex flex-wrap items-center gap-1.5 max-lg:gap-2">${sbtn(
       prim,
       prim === "start" ? t`Iniciar tudo` : t`Parar tudo`,
@@ -12093,7 +12279,8 @@ ${h2.join(`
     const done = run(a, c);
     $2("#shown").textContent = `${VERB[a]} ${c.Names}`;
     if (!await done) {
-      toast(t`Não deu para ${LABEL[a].toLowerCase()} ${c.Names}. O erro ficou na linha.`);
+      const hint = actionHint(errors.get(id)?.msg ?? "");
+      toast(hint ? t`Não deu para ${LABEL[a].toLowerCase()} ${c.Names}. ${hint}` : t`Não deu para ${LABEL[a].toLowerCase()} ${c.Names}. O erro ficou na linha.`);
       return load();
     }
     if (!UP.includes(a)) {
@@ -12251,11 +12438,33 @@ ${h2.join(`
     }
     composing.delete(p);
     ids.forEach((id) => busy.delete(id));
+    svcs.delete(p);
     render();
     await load();
     const now = svc ? mine() : [];
     if (ok && now.length) return confirmUp(now);
     if (a === "down") $2("#q").focus();
+  }
+  var svcs = /* @__PURE__ */ new Map();
+  async function loadSvcs(p, dir, key) {
+    svcs.set(p, { key, list: null });
+    let list = [];
+    try {
+      const r = await api(`/api/compose/services?${new URLSearchParams({ project: p, dir })}`);
+      if (r.ok) list = await r.json();
+    } catch {
+    }
+    if (svcs.get(p)?.key !== key) return;
+    svcs.set(p, { key, list });
+    render();
+  }
+  function missingSvcs(p, dir, all) {
+    const have = [...new Set(all.map(service))].sort(), key = have.join(","), got = svcs.get(p);
+    if (got?.key !== key) {
+      loadSvcs(p, dir, key);
+      return [];
+    }
+    return (got.list ?? []).filter((s15) => !have.includes(s15)).sort();
   }
   var downNote = (p) => t`Remove ${names(data.filter((c) => project(c) === p).sort((a, b2) => +isProblem(b2) - +isProblem(a)), 10)} e as redes do projeto. Os volumes ficam; para subir de novo, use compose up no terminal.`;
   function serviceAct(a, id) {
@@ -12308,6 +12517,10 @@ ${h2.join(`
     const curId = el2.closest?.("tr[data-row]")?.dataset.key?.slice(2);
     if ((e.key === "x" || e.key === "X") && !typing && curId) return toggleSel(curId);
     if ((e.key === "r" || e.key === "R") && !typing && curId && data.find((c) => c.ID === curId)?.State === "running") return act("restart", curId);
+    if ((e.key === "l" || e.key === "L") && !typing && curId) {
+      e.preventDefault();
+      return logs(curId);
+    }
     if ((e.key === "a" || e.key === "A") && !typing && visible.length) return selectAll(!visible.every((id) => sel.has(id)));
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
     if (typing && !(el2 === $2("#q") && e.key === "ArrowDown")) return;
@@ -12332,6 +12545,7 @@ ${h2.join(`
       return;
     }
     const b2 = busy.get(c.ID), tn2 = TONE[b2 ? "busy" : tone(c)], st2 = status(c);
+    $2("#procs").hidden = c.State !== "running";
     const h2 = hasHealth(c) && health[c.ID + c.Status];
     if (hasHealth(c) && !h2) loadHealth(c.ID);
     const s15 = c.State === "running" && !b2 ? stats[sid(c.ID)] : void 0, u = s15 && usage(s15), hs2 = series.get(sid(c.ID)) ?? [];
@@ -12538,7 +12752,7 @@ ${h2.join(`
     $2("#lb").textContent = t`Carregando…`;
     $2("#lmeta").textContent = hist().replace(/^./, (c) => c.toUpperCase());
     $2("#dlg-msg").innerHTML = "";
-    $2("#insp").hidden = !!logProject;
+    $2("#insp").hidden = $2("#hist").hidden = $2("#procs").hidden = !!logProject;
     renderHits();
     renderMore();
     $2("#dlg").showModal();
@@ -12669,6 +12883,50 @@ ${h2.join(`
     $2("#insp-body").innerHTML = html;
     if (refocus2) $2("#insp-env")?.focus();
   }
+  function historyHtml(raw) {
+    const evs = healthChanges(raw), today = (/* @__PURE__ */ new Date()).toDateString();
+    if (!evs.length) return `<p class="text-muted">${t`Nada nas últimas 24 h. O docker guarda só os eventos mais recentes.`}</p>`;
+    const when = (s15) => {
+      const d = new Date(s15 * 1e3);
+      return d.toLocaleString(LOCALE, { ...d.toDateString() === today ? {} : { day: "2-digit", month: "2-digit" }, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    };
+    const sum = historySummary(evs);
+    return `${sum ? `<p class="mb-1 text-fg-soft">${t`Desde ${when(evs[0].t)}: ${esc(sum)}`}</p>` : ""}<ol class="max-h-40 overflow-auto font-mono space-y-0.5">${[...evs].reverse().map((e) => {
+      const [txt, tn2] = eventText(e);
+      return `<li><span class="text-muted">${when(e.t)}</span> <span class="${TONE[tn2][1]}">${esc(txt)}</span></li>`;
+    }).join("")}</ol>`;
+  }
+  async function loadHistory() {
+    const id = logId;
+    let html;
+    try {
+      const r = await api(`/api/history/${id}`), j2 = await r.json();
+      html = r.ok ? historyHtml(j2) : esc(t`Não consegui ler os eventos: ${j2}`);
+    } catch {
+      html = t`Não consegui ler os eventos.`;
+    }
+    if (id !== logId || !$2("#hist").open) return;
+    $2("#hist-body").innerHTML = html;
+  }
+  function topHtml(text) {
+    const [head, ...rows] = topTable(text);
+    if (!head) return `<p class="text-muted">${t`Nenhum processo.`}</p>`;
+    const cell = (tag, v2, i) => `<${tag} class="pr-3 py-0.5 align-top text-left font-normal${i === head.length - 1 ? " [overflow-wrap:anywhere]" : " whitespace-nowrap"}">${esc(v2)}</${tag}>`;
+    return `<table class="font-mono"><thead class="text-muted"><tr>${head.map((h2, i) => cell("th", h2, i)).join("")}</tr></thead>
+    <tbody>${rows.map((r) => `<tr>${r.map((v2, i) => cell("td", v2, i)).join("")}</tr>`).join("")}</tbody></table>`;
+  }
+  async function loadTop() {
+    const id = logId;
+    let html;
+    try {
+      const r = await api(`/api/top/${id}`), j2 = await r.json();
+      html = r.ok ? topHtml(j2) : esc(t`Não consegui ler os processos: ${j2}`);
+    } catch {
+      html = t`Não consegui ler os processos.`;
+    }
+    if (id !== logId || !$2("#procs").open) return;
+    $2("#procs-body").innerHTML = html;
+  }
   function downloadLogs() {
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([$2("#lb").textContent ?? ""], { type: "text/plain" }));
@@ -12678,8 +12936,10 @@ ${h2.join(`
   }
   function afterClose() {
     toggleFollow(false);
-    $2("#insp").removeAttribute("open");
-    $2("#insp-body").textContent = t`Carregando…`;
+    for (const k of ["insp", "hist", "procs"]) {
+      $2("#" + k).removeAttribute("open");
+      $2(`#${k}-body`).textContent = t`Carregando…`;
+    }
     document.querySelector(logProject ? `[data-id="${CSS.escape(`stack-${logProject.project}`)}"][data-a="plogs"]` : `[data-id="${logId}"][data-a="logs"]`)?.focus();
   }
   var xtermCss = document.createElement("style");
@@ -12789,10 +13049,10 @@ ${h2.join(`
     const shown = $2("#create").open;
     if (!ok) {
       if (shown) {
-        $2("#create-msg").innerHTML = `<p class="font-medium">${t`Não deu para criar ${esc(label)}.`}</p>
+        $2("#create-msg").innerHTML = `<p class="font-medium">${t`Não deu para criar ${esc(label)}.`}</p>${actionHint(msg) ? `<p class="mt-1">${esc(actionHint(msg))}</p>` : ""}
         <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-xs">${esc(msg || t`Erro sem mensagem.`)}</pre>`;
         go2.focus();
-      } else toast(t`Não deu para criar ${label}. ${msg.trim().split("\n").at(-1) || t`Erro sem mensagem.`}`);
+      } else toast(t`Não deu para criar ${label}. ${actionHint(msg) || msg.trim().split("\n").at(-1) || t`Erro sem mensagem.`}`);
       return load();
     }
     $2("#create-form").reset();
@@ -12905,7 +13165,7 @@ ${h2.join(`
   }
   var OBJ_COLS = {
     images: [t`Imagem`, "ID", t`Tamanho`, t`Criada`, t`Em uso por`],
-    volumes: [t`Volume`, "Driver", t`Em uso por`],
+    volumes: [t`Volume`, "Driver", t`Tamanho`, t`Em uso por`],
     networks: [t`Rede`, "Driver", t`Escopo`, t`Em uso por`]
   };
   function objItem(k, o2) {
@@ -12919,7 +13179,7 @@ ${h2.join(`
     } else if (k === "volumes") {
       const v2 = o2;
       if (anon(v2.Name)) title = `<span title="${esc(v2.Name)}">${title}…</span>${tag(t`anônimo`, t`criado sem nome, por um container`)}`;
-      cells = [esc(v2.Driver)];
+      cells = [esc(v2.Driver), esc(v2.Size || "—")];
     } else {
       const n = o2;
       if (n.Builtin) title += tag(t`padrão`, t`vem com o daemon e não pode ser removida`);
@@ -12993,8 +13253,10 @@ ${h2.join(`
     filterBy,
     followClick,
     loadHealth,
+    loadHistory,
     loadInspect,
     loadMore,
+    loadTop,
     logPick,
     menuPick,
     openCreate,

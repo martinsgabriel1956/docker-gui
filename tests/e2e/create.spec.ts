@@ -96,6 +96,8 @@ test('erro do docker fica no modal, com o formulário preenchido', async ({ page
   const msg = page.locator('#create-msg');
   await expect(msg).toContainText('Não deu para criar nao-existe.');
   await expect(msg).toContainText('pull access denied for nao-existe');
+  // antes do erro do docker, o que fazer
+  await expect(msg).toContainText('A imagem não existe ou é privada: confira o nome e a tag');
   await expect(dialog(page)).toBeVisible();
   await expect(dialog(page).getByLabel('Imagem')).toHaveValue('nao-existe');
   await expect(go(page)).toBeFocused();
