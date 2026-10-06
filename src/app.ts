@@ -1,8 +1,8 @@
 import {
-  type Bucket, type Container, type ContainerState, type DiskUsage, type Image, type Network, type Port, type RunErrors,
-  type RunField, type Sample, type Stats, type Tone, type Volume, HISTORY, age, anonVolume, bucket, bulkSummary, bytes, esc,
-  fmtBytes, hasHealth, io, isProblem, logFilter, logLevel, newProblems, percent, ports, project, prunedVolumes, pushSample,
-  reclaimShare, rmHint, runSpec, service, shortImage, sparkPoints, status, tone, trend, usage, workingDir,
+  type Bucket, type Container, type ContainerState, type DiskUsage, type Facts, type Image, type LogLevel, type Network, type Port,
+  type RunErrors, type RunField, type Sample, type Stats, type Tone, type Volume, HISTORY, age, anonVolume, bucket, bulkSummary,
+  bytes, continues, errHint, esc, fmtBytes, hasHealth, io, isProblem, logFilter, logLevel, newProblems, percent, ports, project,
+  prunedVolumes, pushSample, reclaimShare, runSpec, service, shortImage, sparkPoints, status, tone, trend, usage, workingDir,
 } from './format';
 import {LOCALE, t, translatePage} from './i18n';
 import {Terminal} from '@xterm/xterm';
@@ -377,8 +377,10 @@ function errHtml(c: Container) {
   const e = errors.get(c.ID);
   if (!e) return '';
   if (e.state !== c.State) { errors.delete(c.ID); return ''; }
+  const hint = errHint(e.msg);  // a causa traduzida fica à vista; o erro do docker, no "ver erro"
   return `<details data-keep="err" class="mt-1 text-xs text-bad-fg"><summary class="cursor-pointer w-fit py-1 max-lg:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent">${t`Falhou ao ${e.what.toLowerCase()} · ver erro`}</summary>
-    <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-bad-soft">${esc(e.msg)}</pre></details>`;
+    <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-bad-soft">${esc(e.msg)}</pre></details>${
+    hint ? `<p class="[contain:inline-size] font-sans text-xs text-bad-soft">${esc(hint)}</p>` : ''}`;
 }
 
 const health: Record<string, string> = {};  // ID+Status -> texto do último probe (o cache vence quando o Status muda)
@@ -401,22 +403,25 @@ async function loadHealth(id: string) {
 const tails: Record<string, string> = {};
 const tailKey = (c: Container) => c.ID + c.State + (c.Status.match(/\((\d+)\)/)?.[1] ?? '');
 const fell = (c: Container) => isProblem(c) && c.State !== 'running';
+// junto com a linha, o inspect de quem caiu: separa o 137 em falta de memória ou SIGKILL e diz quantas vezes reiniciou
+const facts: Record<string, Facts> = {};
 async function loadTail(c: Container) {
   const k = tailKey(c);
   if (k in tails) return;
   tails[k] = '';
-  try {
-    const r = await api(`/api/logs/${c.ID}?tail=5`), txt: string = await r.json();
-    // stdout e stderr chegam um depois do outro: o timestamp ISO no começo de cada linha devolve a ordem
-    tails[k] = r.ok ? txt.split('\n').filter(l => l.trim()).sort().at(-1)?.replace(/^\d{4}-\d\d-\d\dT\S+\s/, '') ?? '' : '';
-  } catch { return; }  // sem a linha: o status traduzido já diz o essencial
-  if (tails[k]) render();
+  // sem resposta: o status traduzido já diz o essencial
+  const get = (path: string) => api(path).then(r => r.ok ? r.json() : null).catch(() => null);
+  const [txt, info]: [string | null, Facts | null] = await Promise.all([get(`/api/logs/${c.ID}?tail=5`), get(`/api/inspect/${c.ID}`)]);
+  // stdout e stderr chegam um depois do outro: o timestamp ISO no começo de cada linha devolve a ordem
+  tails[k] = txt?.split('\n').filter(l => l.trim()).sort().at(-1)?.replace(/^\d{4}-\d\d-\d\dT\S+\s/, '') ?? '';
+  if (info) facts[k] = {OOMKilled: info.OOMKilled, RestartCount: info.RestartCount};
+  if (tails[k] || info) render();
 }
 
 const rowCache = new Map<string, {sig: string; html: string}>();
 function row(c: Container, withProject = false) {
   if (fell(c)) loadTail(c);
-  const sig = JSON.stringify([c, withProject, tails[tailKey(c)], busy.get(c.ID), arming?.id === c.ID, errors.get(c.ID), health[c.ID + c.Status], stats[sid(c.ID)],
+  const sig = JSON.stringify([c, withProject, tails[tailKey(c)], facts[tailKey(c)], busy.get(c.ID), arming?.id === c.ID, errors.get(c.ID), health[c.ID + c.Status], stats[sid(c.ID)],
                               series.get(sid(c.ID))?.at(-1)?.t, composing.has(project(c)), TOUCH, sel.has(c.ID)]);
   const hit = rowCache.get(c.ID);
   if (hit?.sig === sig) return hit.html;
@@ -436,7 +441,7 @@ const cancelBtn = (id: string, what: string) => `<button data-id="${id}" data-a=
 const armNote = (text: string, cls = 'w-full [contain:inline-size] lg:text-right text-balance') => `<p aria-hidden="true" class="${cls} text-xs text-bad-soft">${
   REMOTE ? `<span class="font-semibold text-warn-fg">${esc(CTX)}</span> · ` : ''}${text} ${TOUCH ? t`Cancela sozinho em 8 s.` : t`Esc cancela.`}</p>`;
 function rowHtml(c: Container, withProject: boolean) {
-  const b = busy.get(c.ID), tn = TONE[b ? 'busy' : tone(c)], st = status(c), pp = ports(c.Ports), p = project(c), bt = b && busyText(c, b);
+  const b = busy.get(c.ID), tn = TONE[b ? 'busy' : tone(c)], st = status(c, facts[tailKey(c)]), pp = ports(c.Ports), p = project(c), bt = b && busyText(c, b);
   const armed = arming?.id === c.ID, prim = PRIMARY[c.State], sec = SECONDARY[c.State];
   const u = c.State === 'running' && !b && stats[sid(c.ID)] ? usage(stats[sid(c.ID)]) : null, h = series.get(sid(c.ID)) ?? [];
   const slot = (w = 'lg:w-20') => `<span aria-hidden="true" class="${w} shrink-0 max-lg:hidden"></span>`;
@@ -553,7 +558,7 @@ function groupHead(k: string, label: string) {
     `<span title="${esc(c.Names)}: ${esc(status(c)[0])}" class="h-3 w-1.5 rounded-[1px] ${TONE[busy.has(c.ID) ? 'busy' : tone(c)][0]}"></span>`).join('')}</span>` : '';
   return `<tr data-key="g:${ek}" role="row" class="max-lg:block"><th role="columnheader" colspan="5" scope="colgroup" class="max-lg:block px-4 pt-3 pb-2.5 text-left font-normal border-t border-line-strong bg-raised">
     <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
-      <span class="font-mono text-data font-semibold ${k ? 'text-fg-strong' : 'text-muted'}">${label}</span>${strip}
+      <span class="font-mono text-group font-semibold ${k ? 'text-fg-strong' : 'text-muted'}">${label}</span>${strip}
       ${k ? `<span class="font-mono text-xs ${verb ? 'text-fg-strong' : 'text-muted'}">compose · ${verb ? COMPOSE_VERB[verb] : t`${on} de ${all.length} rodando`}</span>` : ''}
       ${k && inBand ? `<span class="text-xs text-bad-fg">${t`${inBand} na faixa de atenção, acima`}</span>` : ''}
       <span class="lg:ml-auto max-lg:w-full flex flex-wrap items-center gap-1.5 max-lg:gap-2">${sbtn(prim, prim === 'start' ? t`Iniciar tudo` : t`Parar tudo`,
@@ -684,7 +689,10 @@ async function act(a: RowAction, id: string) {
   const near = (trs[i + 1] || trs[i - 1])?.dataset.key?.slice(2), since = new Date().toISOString();
   const done = run(a, c);
   $('#shown').textContent = `${VERB[a]} ${c.Names}`;
-  if (!(await done)) { toast(t`Não deu para ${LABEL[a].toLowerCase()} ${c.Names}. O erro ficou na linha.`); return load(); }
+  if (!(await done)) {
+    toast(t`Não deu para ${LABEL[a].toLowerCase()} ${c.Names}. ${errHint(errors.get(id)?.msg ?? '') || t`O erro ficou na linha.`}`);
+    return load();
+  }
   if (!UP.includes(a)) {
     // pausado parece "ligado" na lista; o desfazer evita esquecer o container congelado
     // e o Parar oferece Iniciar de novo, como no lote e no projeto (pausado que parou fica de fora: iniciar não devolve a pausa)
@@ -846,6 +854,7 @@ async function composeAct(a: ComposeAction, p: string, svc = '') {
   if (a === 'down' && !confirmed(`stack-${p}`, p, 'down', downNote(p))) return;
   // por serviço, as linhas dele (todas as réplicas) ficam ocupadas e depois passam pelo confirmUp
   const mine = () => data.filter(c => project(c) === p && service(c) === svc).map(c => c.ID), ids = svc ? mine() : [];
+  const since = new Date().toISOString();
   const what = `${COMPOSE_CMD[a]}${svc ? ` ${svc}` : ''}`;
   let ok = false;
   composing.set(p, a); ids.forEach(id => busy.set(id, 'restart')); render();
@@ -857,12 +866,18 @@ async function composeAct(a: ComposeAction, p: string, svc = '') {
     ok = r.ok;
     // o compose escreve o progresso no stderr: no erro, a última linha é a que explica
     toast(r.ok ? ids.length ? t`${p}: ${what} concluído, conferindo se ficou de pé…` : t`${p}: ${what} concluído.`
-               : t`${p}: ${what} falhou. ${msg.trim().split('\n').at(-1) || t`Erro sem mensagem.`}`, r.ok);
+               : t`${p}: ${what} falhou. ${errHint(msg) || msg.trim().split('\n').at(-1) || t`Erro sem mensagem.`}`, r.ok);
   } catch { toast(t`${p}: sem resposta do servidor do Docker GUI.`); }
   composing.delete(p); ids.forEach(id => busy.delete(id)); render();
   await load();
   // o build recria o container quando a imagem mudou: o ID novo é o que tem que ficar de pé
   const now = svc ? mine() : [];
+  // com os logs do serviço abertos: seguem o container de agora (o build pode ter trocado o ID), ao vivo, com a marca
+  if (ok && now.length && $<HTMLDialogElement>('#dlg').open && logId && ids.includes(logId)) {
+    logId = now.includes(logId) ? logId : now[0];
+    mark = {at: since, label: t`${a === 'build' ? t`reconstruído` : DONE.restart} às ${new Date().toLocaleTimeString(LOCALE)}`};
+    toggleFollow(true);
+  }
   if (ok && now.length) return confirmUp(now);
   if (a === 'down') $('#q').focus();
 }
@@ -876,7 +891,7 @@ const downNote = (p: string) =>
 // container (o servidor confere o nome nos labels)
 function serviceAct(a: 'restart' | 'build', id: string) {
   const c = data.find(c => c.ID === id);
-  if (c) composeAct(a, project(c), service(c));
+  if (c && workingDir(c) && service(c)) composeAct(a, project(c), service(c));
 }
 
 // a linha ocupada diz o que está acontecendo: no build do serviço, "Reconstruindo…" (no busy fica o restart)
@@ -912,6 +927,7 @@ document.addEventListener('keydown', e => {
     if (e.key === '/' && !typing) { e.preventDefault(); $('#lf').focus(); }
     // r reinicia o container dos logs: o ciclo inteiro (reiniciar, ver o log novo) sem sair do modal
     if ((e.key === 'r' || e.key === 'R') && !typing && logId && data.find(c => c.ID === logId)?.State === 'running') act('restart', logId);
+    if ((e.key === 'b' || e.key === 'B') && !typing && logId) serviceAct('build', logId);
     return;
   }
   if (e.key === '/' && !typing) { e.preventDefault(); pickTab('containers'); return $('#q').focus(); }
@@ -923,6 +939,8 @@ document.addEventListener('keydown', e => {
   if ((e.key === 'x' || e.key === 'X') && !typing && curId) return toggleSel(curId);
   // r reinicia a linha em foco (com ↑↓ entre os Logs: muda o código, reinicia, olha os logs, sem mouse)
   if ((e.key === 'r' || e.key === 'R') && !typing && curId && data.find(c => c.ID === curId)?.State === 'running') return act('restart', curId);
+  // b reconstrói o serviço do compose da linha em foco: muda o código, b, olha os logs (sem compose, não faz nada)
+  if ((e.key === 'b' || e.key === 'B') && !typing && curId) return serviceAct('build', curId);
   if ((e.key === 'a' || e.key === 'A') && !typing && visible.length) return selectAll(!visible.every(id => sel.has(id)));
   // ↑↓ movem o foco para o Logs da linha de cima/baixo: é seguro (Enter não muda estado) e existe em toda linha
   if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
@@ -950,7 +968,7 @@ function renderDlg() {
     $('#dlg-acts').innerHTML = '';
     return;
   }
-  const b = busy.get(c.ID), tn = TONE[b ? 'busy' : tone(c)], st = status(c);
+  const b = busy.get(c.ID), tn = TONE[b ? 'busy' : tone(c)], st = status(c, facts[tailKey(c)]);
   const h = hasHealth(c) && health[c.ID + c.Status];
   if (hasHealth(c) && !h) loadHealth(c.ID);
   // uso de recursos com sparkline maior, e rede e disco, que não cabem na tabela
@@ -997,12 +1015,15 @@ let level = '', svcPick = '';
 const narrowed = () => !!(level || svcPick);
 // "api-1  | " -> "api" (as réplicas juntas); com container_name, o prefixo é o nome inteiro
 const svcOf = (prefix: string) => prefix.replace(/(-\d+)?\s.*$/s, '');
-function keep(line: string) {
-  if (!narrowed()) return true;
-  const pre = logProject ? line.match(SVC_PREFIX)?.[0] ?? '' : '';
-  if (svcPick && svcOf(pre) !== svcPick) return false;
-  const lv = logLevel(line.slice(pre.length));
-  return !level || lv === 'bad' || (level === 'warn' && lv === 'warn');
+const passes = (pre: string, lv: LogLevel) =>
+  (!svcPick || svcOf(pre) === svcPick) && (!level || lv === 'bad' || (level === 'warn' && lv === 'warn'));
+// nível de cada linha, na ordem em que chegam: a que continua um stack trace herda o da linha que o abriu (nos logs do
+// projeto, a de cima do mesmo container). Recomeça a cada pintura inteira e a cada conexão do ao vivo
+let prevLv = new Map<string, LogLevel>();
+function levelOf(pre: string, rest: string): LogLevel {
+  const lv = continues(rest.replace(TS, '')) ? prevLv.get(pre) ?? '' : logLevel(rest);
+  prevLv.set(pre, lv);
+  return lv;
 }
 // serviços que apareceram nos logs do projeto, para o seletor (do prefixo, não dos labels: com container_name ele muda)
 const svcSet = new Set<string>();
@@ -1061,9 +1082,9 @@ const TS = /^\d{4}-\d\d-\d\dT\S+\s/;  // o --timestamps do docker logs
 // a linha (com os trechos marcados, o prefixo do serviço colorido, o timestamp apagado e a cor do nível), ou null se o
 // filtro não casou (aí nem entra na caixa). ponytail: um trecho que casa atravessando o prefixo ou o timestamp não conta
 function hitNode(line: string, re: RegExp | null) {
-  if (!keep(line)) return null;
   const pre = logProject ? line.match(SVC_PREFIX)?.[0] ?? '' : '', span = document.createElement('span');
-  const rest = line.slice(pre.length), ts = rest.match(TS)?.[0] ?? '';
+  const rest = line.slice(pre.length), ts = rest.match(TS)?.[0] ?? '', level = levelOf(pre, rest);
+  if (!passes(pre, level)) return null;
   let n = 0;
   const part = (text: string, cls: string) => {
     const p = document.createElement('span');
@@ -1081,7 +1102,7 @@ function hitNode(line: string, re: RegExp | null) {
     el.dataset.t = at.toLocaleTimeString(LOCALE); el.title = ts.trim();
     part(ts.slice(ts.trimEnd().length), '');
   } else part(ts, 'text-muted');
-  const lv = LEVEL_TONE[logLevel(rest)];
+  const lv = LEVEL_TONE[level];
   if (lv) part(rest.slice(ts.length), lv); else n += markInto(span, rest.slice(ts.length), re);
   if (re && !n) return null;
   if (re) hits += n;
@@ -1090,6 +1111,8 @@ function hitNode(line: string, re: RegExp | null) {
 }
 // até o teto do ao vivo, um nó por linha (para as cores); acima disso, texto cru, que pesa menos
 const colored = () => buf.length <= 10000;
+// qual linha de buf tem nó na caixa (passou nos filtros): o teto do ao vivo tira do começo só o que está na tela
+let shown: boolean[] = [];
 
 // marca "reiniciado às 18:31" antes da primeira linha depois do reinício (pelo timestamp do docker). O texto vem do CSS
 // (data-mark): Copiar e Baixar levam só o log. marked = já foi posta nesta pintura (ou nesta conexão do ao vivo)
@@ -1118,15 +1141,15 @@ function renderHits() {
 // Ao vivo, um nó por linha (o teto tira do começo); parado, um texto só, que pesa menos com o log inteiro
 function paint() {
   const lb = $('#lb'), re = filterRe(), atEnd = lb.scrollHeight - lb.scrollTop - lb.clientHeight < 40;
-  hits = hitLines = 0; marked = false;
+  hits = hitLines = 0; marked = false; prevLv = new Map(); shown = buf.map(() => true);
   if (buf.length && (re || narrowed() || stream || colored())) {  // sem linhas, a caixa tem um aviso ("(sem logs)", erro): fica
     // num fragment, um a um: espalhar o log inteiro em argumentos (replaceChildren(...)) estoura a pilha
     const frag = document.createDocumentFragment();
-    for (const l of buf) {
+    buf.forEach((l, i) => {
       const m = markNode(l), n = re || narrowed() || colored() ? hitNode(l, re) : l;
       if (m) frag.append(m);
-      if (n) frag.append(n);
-    }
+      if (n) frag.append(n); else shown[i] = false;
+    });
     lb.replaceChildren(frag);
   } else if (buf.length) lb.textContent = buf.join('');
   renderHits();
@@ -1219,16 +1242,18 @@ function flushLogs() {
   buf.push(...add);
   seeSvcs(add);
   // anexar (em vez de trocar o texto) não apaga a seleção de quem está copiando
-  lb.append(...add.flatMap(l => [markNode(l), hitNode(l, re)]).filter(n => !!n));
-  // o teto vale para as linhas carregadas; na tela, com filtro, só as que casaram têm nó (a marca do reinício sai junto)
-  for (const l of buf.splice(0, Math.max(0, buf.length - Math.max(MAX_LINES, +TAILS[tailAt])))) {
-    const n = re ? (l.split(re).length - 1) / 2 : 1;
-    if (!n || !keep(l)) continue;
+  const nodes = add.map(l => [markNode(l), hitNode(l, re)]);
+  shown.push(...nodes.map(([, n]) => !!n));
+  lb.append(...nodes.flat().filter(n => !!n));
+  // o teto vale para as linhas carregadas; na tela, com filtro, só as que passaram têm nó (a marca do reinício sai junto)
+  const cut = Math.max(0, buf.length - Math.max(MAX_LINES, +TAILS[tailAt])), had = shown.splice(0, cut);
+  buf.splice(0, cut).forEach((l, i) => {
+    if (!had[i]) return;
     while ((lb.firstChild as HTMLElement | null)?.dataset?.mark) lb.firstChild!.remove();
     lb.firstChild!.remove();
-    if (re) hits -= n;
+    if (re) hits -= (l.split(re).length - 1) / 2;  // ponytail: conta também o que casar no prefixo ou no timestamp
     if (re || narrowed()) hitLines--;
-  }
+  });
   if (re || narrowed()) renderHits();
   if (atEnd) lb.scrollTop = lb.scrollHeight;
 }
@@ -1246,7 +1271,7 @@ function toggleFollow(on = !stream, why = '') {
     // cada conexão (inclusive a reconexão automática) recomeça do histórico pedido: limpa para não duplicar
     es.onopen = () => {
       streamOpen = true;
-      pending = []; buf = []; hits = hitLines = 0; marked = false; $('#lb').textContent = ''; renderHits();
+      pending = []; buf = []; shown = []; prevLv = new Map(); hits = hitLines = 0; marked = false; $('#lb').textContent = ''; renderHits();
       $('#lmeta').textContent = t`Ao vivo · ${hist()} e as novas`;
     };
     es.onmessage = e => { if (pending.push(JSON.parse(e.data)) === 1) setTimeout(flushLogs, 50); };
@@ -1426,10 +1451,11 @@ async function createContainer(e: SubmitEvent) {
     // o formulário fica como estava, para corrigir e tentar de novo. O docker escreve o progresso do pull no
     // stderr: no aviso fora do modal vai só a última linha, que é a que explica
     if (shown) {
-      $('#create-msg').innerHTML = `<p class="font-medium">${t`Não deu para criar ${esc(label)}.`}</p>
+      $('#create-msg').innerHTML = `<p class="font-medium">${t`Não deu para criar ${esc(label)}.`}</p>${
+        errHint(msg) ? `<p class="mt-1">${esc(errHint(msg))}</p>` : ''}
         <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-xs">${esc(msg || t`Erro sem mensagem.`)}</pre>`;
       go.focus();  // o Enter num campo desabilitado durante o envio deixaria o foco no <body>
-    } else toast(t`Não deu para criar ${label}. ${msg.trim().split('\n').at(-1) || t`Erro sem mensagem.`}`);
+    } else toast(t`Não deu para criar ${label}. ${errHint(msg) || msg.trim().split('\n').at(-1) || t`Erro sem mensagem.`}`);
     return load();  // run que falha no start (porta ocupada) deixa o container criado e parado
   }
   $<HTMLFormElement>('#create-form').reset(); markRunErrors({}); createLabel();
@@ -1563,7 +1589,7 @@ const OBJ_COLS: Record<ObjKind, string[]> = {images: [t`Imagem`, 'ID', t`Tamanho
   volumes: [t`Volume`, 'Driver', t`Em uso por`], networks: [t`Rede`, 'Driver', t`Escopo`, t`Em uso por`]};
 function objItem(k: ObjKind, o: Obj) {
   const r = objRef(k, o), id = `rm-${k}-${r}`, armed = arming?.id === id, what = `${OBJ[k][1]} ${objName(k, o)}`;
-  const err = objErr.get(id), hint = err && rmHint(err), tag = (t: string, title: string) =>
+  const err = objErr.get(id), hint = err && errHint(err), tag = (t: string, title: string) =>
     `<span title="${title}" class="ml-1.5 font-normal text-muted">(${t})</span>`;
   // cells: HTML já escapado, na ordem de OBJ_COLS (sem o título)
   let title = esc(objName(k, o)), cells: string[];
@@ -1632,7 +1658,7 @@ async function rmObj(k: ObjKind, r: string) {
     if (ok) toast(`${label} ${name} ${done}.`, true);
     else {
       objErr.set(id, msg || t`erro sem mensagem`);
-      toast(t`Não deu para remover ${one} ${name}. ${rmHint(msg) || t`O erro ficou na lista.`}`);
+      toast(t`Não deu para remover ${one} ${name}. ${errHint(msg) || t`O erro ficou na lista.`}`);
     }
   } catch { toast(t`Sem resposta do servidor do Docker GUI.`); }
   objBusy = '';

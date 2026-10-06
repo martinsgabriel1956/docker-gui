@@ -65,6 +65,11 @@ typography:
     fontSize: "0.75rem"
     fontWeight: 400
     lineHeight: 1.625
+  group:
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace"
+    fontSize: "1rem"
+    fontWeight: 600
+    lineHeight: "1.5rem"
   column-header:
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace"
     fontSize: "11px"
@@ -147,7 +152,7 @@ components:
   group-header:
     backgroundColor: "{colors.raised}"
     textColor: "{colors.fg-strong}"
-    typography: "{typography.data}"
+    typography: "{typography.group}"
     padding: "12px 16px 10px"
   attention-band:
     textColor: "{colors.bad-fg}"
@@ -220,7 +225,8 @@ Paleta de terminal ANSI reafinada: grafite frio de croma baixo (matiz 255) para 
 - **Headline** (600, 18px): título dos modais ("Logs · shop-api-1", "Novo container").
 - **Body** (400, 14px): botões do cabeçalho, campos, avisos, rótulos de formulário, rótulo das categorias do disco. As abas usam 14px em 500.
 - **Label** (500, 12px): botões de linha e das ferramentas dos logs (14px abaixo de 1024px).
-- **Data** (mono, 13px / 20px): nome do container e primeira coluna das tabelas de imagens, volumes e redes (600), linha de status, contagens por estado, nome do projeto compose, status no modal.
+- **Data** (mono, 13px / 20px): nome do container e primeira coluna das tabelas de imagens, volumes e redes (600), linha de status, contagens por estado, status no modal.
+- **Group** (mono, 600, 16px / 24px, token `--text-group`): o nome do projeto compose no cabeçalho do grupo. Um degrau acima dos nomes dos containers que ele agrupa: com o mesmo 13px, só o fundo separava o pai dos filhos.
 - **Data small** (mono, 12px, line-height 1.625 nos logs): imagem, portas, CPU/RAM, contexto do docker, linhas de log, metadados do disco, demais células das tabelas de objetos, contagem das abas.
 - **Column header** (mono, 500, 11px, uppercase): NOME IMAGEM STATUS PORTAS; IMAGEM ID TAMANHO CRIADA EM USO POR; VOLUME DRIVER EM USO POR; REDE DRIVER ESCOPO EM USO POR. A faixa de atenção usa o mesmo tratamento em 12px semibold.
 
@@ -293,7 +299,7 @@ Texto mono 12px como a coluna PORTS do `docker ps`, `host→container` com a set
 Primeiro grupo da tabela, quando há algo quebrado: cabeçalho "PRECISA DE ATENÇÃO · n" em mono 12px semibold uppercase bad-fg sobre chão `bad/10`, seguido da explicação em sans. As linhas abaixo dele mostram também o projeto de cada container.
 
 ### Faixa de estado do projeto (assinatura)
-No cabeçalho de cada grupo compose (fundo raised, separador line-strong acima): o nome do projeto em mono 13px semibold, depois um bloco por container, 6×12px, raio de 1px, 2px de vão, na cor do estado, ordenados por nome, como uma calha de processos. Em seguida "compose · 3 de 4 rodando" em mono muted e, se for o caso, "1 na faixa de atenção, acima" em bad-fg. Ação principal do projeto, Logs e "⋯" à direita.
+No cabeçalho de cada grupo compose (fundo raised, separador line-strong acima): o nome do projeto em mono 16px semibold (Group), depois um bloco por container, 6×12px, raio de 1px, 2px de vão, na cor do estado, ordenados por nome, como uma calha de processos. Em seguida "compose · 3 de 4 rodando" em mono muted e, se for o caso, "1 na faixa de atenção, acima" em bad-fg. Ação principal do projeto, Logs e "⋯" à direita.
 
 ### Logs
 Modal de altura fixa, `pre` mono 12px. Cada linha toma a cor do nível (ERROR bad-fg, WARN warn-fg, DEBUG muted; o resto fg-soft). O timestamp do docker continua no texto (Copiar e Baixar levam a linha inteira), mas aparece como HH:MM:SS local em muted, desenhado pelo CSS a partir de `data-t`; o UTC vai no title. Depois de um reinício, uma marca "— reiniciado às HH:MM:SS —" em sans 11px accent-fg sobre um traço `accent/50`, também desenhada pelo CSS (`data-mark`), para não entrar no texto copiado. Nos logs do projeto, o prefixo do serviço toma um tom svc-* (ver Colors). O filtro realça os trechos que casam com `accent/30` e texto fg-strong, não com o tom de aviso. Ao lado do campo, três `select` nativos no mesmo estilo (canvas, anel line-strong/80, 12px): nível (todos, avisos e erros, só erros), serviço (só nos logs do projeto) e período (`--since`). Log ao vivo vazio mostra uma frase em sans muted, desenhada pelo CSS (`data-empty`). Depois de reiniciar pelo modal, a linha de status ganha "· reiniciado às HH:MM:SS" em muted, porque a marca só aparece se o container escrever algo. Ao abrir, o foco vai para a caixa do log.
@@ -305,7 +311,7 @@ No topo das abas Imagens (containers parados, imagens e build cache, nessa ordem
 Imagens, volumes e redes no ritmo de colunas do CLI, dentro do mesmo contêiner de 8px de raio e `raised/40`, linhas separadas por `line/70`. Cabeçalho uppercase mono 11px muted; a primeira coluna é o nome em mono 13px semibold fg-strong; as demais células em mono 12px muted. A coluna "Em uso por" lista os nomes dos containers (fg-soft) ou diz "nenhum container". Qualificadores como "(anônimo)", "(padrão)" e "(dangling)" são texto muted ao lado do nome, nunca selo com borda. A ação da linha é "Remover…", na ponta direita; a rede padrão não tem. A contagem de cada lista aparece na aba, em mono 12px muted ("Imagens · 4").
 
 ### Navigation
-Abas (`role="tablist"`): Containers, Imagens, Volumes, Redes, na borda de baixo da faixa do cabeçalho. Sans 14px em 500, padding 8px 12px, texto muted; hover fg; a selecionada fica fg-strong com um sublinhado de 2px accent que encosta no traço da faixa. Imagens, Volumes e Redes levam a contagem em mono 12px muted. Setas, Home e End andam entre as abas; trocar de aba entra no histórico e desarma qualquer confirmação. Atalhos de teclado (`/`, ←→, ↑↓, `r`, `x`, `a`, `z`, `?`) aparecem num popover nativo com `kbd` mono de 4px de raio e anel line-strong.
+Abas (`role="tablist"`): Containers, Imagens, Volumes, Redes, na borda de baixo da faixa do cabeçalho. Sans 14px em 500, padding 8px 12px, texto muted; hover fg; a selecionada fica fg-strong com um sublinhado de 2px accent que encosta no traço da faixa. Imagens, Volumes e Redes levam a contagem em mono 12px muted. Setas, Home e End andam entre as abas; trocar de aba entra no histórico e desarma qualquer confirmação. Atalhos de teclado (`/`, ←→, ↑↓, `r`, `b`, `x`, `a`, `z`, `?`) aparecem num popover nativo com `kbd` mono de 4px de raio e anel line-strong.
 
 ## Do's and Don'ts
 
