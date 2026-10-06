@@ -411,3 +411,17 @@ test('período sem linhas diz isso', async ({ page, gui }) => {
   await page.getByLabel('Período').selectOption({ label: 'Desde que subiu' });
   await expect(page.locator('#lb')).toHaveText('Nada no log nesse período.');
 });
+
+test('"Só erros" mostra o stack trace inteiro, não só a primeira linha', async ({ page, gui }) => {
+  const trace = 'ERROR falhou ao salvar\n\tat com.acme.Repo.save(Repo.java:42)\n\tat com.acme.Api.post(Api.java:7)\nCaused by: java.io.IOException: disco\n\t... 3 more\n';
+  await gui.open({ containers: [ctr('web', { logs: `GET / 200\n${trace}GET /health 200\n    indentado mas sem erro antes\n` })] });
+  await page.getByRole('button', { name: 'Logs web' }).click();
+  await page.getByLabel('Nível das linhas').selectOption({ label: 'Só erros' });
+  await expect(page.locator('#lb')).toHaveText(trace);
+  await expect(page.locator('#lcount')).toHaveText('5 linhas');
+  // ao vivo, a continuação que chega depois também vai junto
+  await page.locator('#follow').click();
+  await expect(page.locator('#lmeta')).toContainText('e as novas');
+  gui.update(s => { s.containers[0].logs += 'Traceback (most recent call last):\n  File "app.py", line 3\nValueError: boom\nok de novo\n'; });
+  await expect(page.locator('#lb')).toHaveText(`${trace}Traceback (most recent call last):\n  File "app.py", line 3\nValueError: boom\n`);
+});

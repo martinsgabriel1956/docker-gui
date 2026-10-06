@@ -41,6 +41,9 @@
   /* tamanho dos dados (nomes, status, imagens, portas): o mono do sistema desenha maior que o sans */
   --text-data: 0.8125rem;
   --text-data--line-height: 1.25rem;
+  /* nome do projeto compose no cabeçalho do grupo: um degrau acima dos nomes dos containers que ele agrupa */
+  --text-group: 1rem;
+  --text-group--line-height: 1.5rem;
 }
 
 /* tema claro: mesmos tokens, outros valores */

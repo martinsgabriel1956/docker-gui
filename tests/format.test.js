@@ -81,6 +81,19 @@ test('status traduz o texto e explica o código de saída', () => {
   assert.deepEqual(f.status(c('dead', 'Dead')), ['Morto · só dá para remover']);
 });
 
+test('status com o inspect separa OOM de SIGKILL e conta os reinícios', () => {
+  const exited = c('exited', 'Exited (137) 2 minutes ago');
+  assert.deepEqual(f.status(exited, {OOMKilled: true, RestartCount: 0}), ['Saiu com código 137 há 2 min', 'sem memória (OOM)']);
+  assert.deepEqual(f.status(exited, {OOMKilled: false, RestartCount: 3}),
+                   ['Saiu com código 137 há 2 min', 'morto à força (SIGKILL), não por falta de memória · reiniciou 3 vezes']);
+  assert.deepEqual(f.status(c('exited', 'Exited (1) 1 minute ago'), {OOMKilled: false, RestartCount: 1}),
+                   ['Saiu com código 1 há 1 min', 'erro da aplicação · reiniciou 1 vez']);
+  assert.deepEqual(f.status(c('exited', 'Exited (2) 1 minute ago'), {OOMKilled: false, RestartCount: 0}), ['Saiu com código 2 há 1 min', undefined]);
+  // em loop, a contagem estaria velha: fica só a causa
+  assert.deepEqual(f.status(c('restarting', 'Restarting (137) 1 second ago'), {OOMKilled: true, RestartCount: 9}),
+                   ['Reiniciando em loop · saiu com código 137', 'sem memória (OOM)']);
+});
+
 test('restartCode e hasHealth', () => {
   assert.equal(f.restartCode(c('restarting', 'Restarting (139) 1 second ago')), 139);
   assert.equal(f.restartCode(c('running', 'Up 5 minutes')), 0);
@@ -268,7 +281,7 @@ test('age escreve a idade a partir do epoch', () => {
 });
 
 // mensagens reais do docker 29 e do podman
-test('rmHint explica por que a remoção falhou', () => {
+test('errHint explica por que a remoção falhou', () => {
   const inUse = 'Em uso: remova o container que usa (ou tire ele da rede) antes.';
   for (const msg of [
     'Error response from daemon: conflict: unable to delete fd7dc98638c8 (cannot be forced) - image is being used by running container e0a85417a665',
@@ -278,10 +291,38 @@ test('rmHint explica por que a remoção falhou', () => {
     'Error: image used by 3f1c2b9a8e7d: image is in use by a container: consider listing external containers and force-removing image',
     'Error: volume pgdata is being used by the following container(s): 3f1c2b9a8e7d: volume is being used',
     'Error: "loja_default" has associated containers with it. Use -f to forcibly delete containers and pods: network is being used',
-  ]) assert.equal(f.rmHint(msg), inUse, msg);
-  assert.match(f.rmHint('Error response from daemon: conflict: unable to delete 3e58ae0f7a49 (must be forced) - image is referenced in multiple repositories'), /mais de uma tag/);
-  assert.match(f.rmHint('Error response from daemon: conflict: unable to delete 3e58ae0f7a49 (cannot be forced) - image has dependent child images'), /construídas sobre esta/);
-  assert.equal(f.rmHint('Error response from daemon: get pgdata: no such volume'), '');
+  ]) assert.equal(f.errHint(msg), inUse, msg);
+  assert.match(f.errHint('Error response from daemon: conflict: unable to delete 3e58ae0f7a49 (must be forced) - image is referenced in multiple repositories'), /mais de uma tag/);
+  assert.match(f.errHint('Error response from daemon: conflict: unable to delete 3e58ae0f7a49 (cannot be forced) - image has dependent child images'), /construídas sobre esta/);
+  assert.equal(f.errHint('Error response from daemon: get pgdata: no such volume'), '');
+});
+
+// mensagens reais do docker run / start / compose up
+test('errHint explica por que subir falhou, antes do "in use" da remoção', () => {
+  const cases = [
+    ['Error response from daemon: driver failed programming external connectivity on endpoint web: Bind for 0.0.0.0:8080 failed: port is already allocated', /porta do host já está em uso/],
+    ['Error response from daemon: Ports are not available: exposing port TCP 0.0.0.0:5432 -> 0.0.0.0:0: listen tcp 0.0.0.0:5432: bind: address already in use', /porta do host já está em uso/],
+    ['docker: Error response from daemon: Conflict. The container name "/web" is already in use by container "e0a85417a665". You have to remove (or rename) that container to be able to reuse that name.', /Já existe um container com esse nome/],
+    ['docker: Error response from daemon: pull access denied for acme/nope, repository does not exist or may require \'docker login\'', /não existe no registry/],
+    ['Error response from daemon: manifest for nginx:9.9 not found: manifest unknown: manifest unknown', /não existe no registry/],
+    ['write /var/lib/docker/tmp/x: no space left on device', /Disco cheio/],
+    ['exec /usr/local/bin/app: exec format error', /outra arquitetura/],
+    ['OCI runtime create failed: runc create failed: unable to start container process: exec: "uvicorn": executable file not found in $PATH: unknown', /não existe dentro dela/],
+  ];
+  for (const [msg, re] of cases) assert.match(f.errHint(msg), re, msg);
+});
+
+test('continues reconhece a continuação de um stack trace', () => {
+  for (const l of ['\tat com.acme.Main.main(Main.java:3)', '    at foo (/app/x.js:1:1)', '  File "/app/x.py", line 3, in <module>',
+                   'Caused by: java.io.IOException: boom', '... 12 more']) assert.ok(f.continues(l), l);
+  for (const l of ['ERROR boom', 'GET / 200', '', '   ', 'Caused trouble']) assert.ok(!f.continues(l), l);
+});
+
+test('logLevel reconhece o começo de um stack trace', () => {
+  assert.equal(f.logLevel('Traceback (most recent call last):'), 'bad');
+  assert.equal(f.logLevel('ValueError: invalid literal'), 'bad');
+  assert.equal(f.logLevel('Exception in thread "main" java.lang.NullPointerException: x is null'), 'bad');
+  assert.equal(f.logLevel('ErrorBoundary rendered'), '');
 });
 
 test('logFilter busca o texto literal, sem diferenciar maiúsculas', () => {

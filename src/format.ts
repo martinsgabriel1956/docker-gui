@@ -80,19 +80,32 @@ export function dur(s: string): string {
   return `${m[1] ? '~' : ''}${n} ${u[+(n > 1)]}`;
 }
 
-// traduz o Status do docker; o original fica no title
-export function status(c: Container): StatusText {
+// o que o inspect acrescenta a uma queda (/api/inspect): se o kernel matou por falta de memória e quantas vezes o
+// docker já reiniciou o container
+export type Facts = {OOMKilled: boolean; RestartCount: number};
+
+// a dica de uma queda: a causa do código de saída e, com o inspect na mão, o 137 separado em memória ou SIGKILL e os
+// reinícios. undefined quando não há o que dizer
+function exitHint(code: number, f?: Facts): string | undefined {
+  const cause = code === 137 && f ? (f.OOMKilled ? t`sem memória (OOM)` : t`morto à força (SIGKILL), não por falta de memória`) : EXIT[code];
+  const again = !f?.RestartCount ? '' : f.RestartCount === 1 ? t`reiniciou 1 vez` : t`reiniciou ${f.RestartCount} vezes`;
+  return [cause, again].filter(Boolean).join(' · ') || undefined;
+}
+
+// traduz o Status do docker; o original fica no title. f: o inspect de quem caiu, quando já veio
+export function status(c: Container, f?: Facts): StatusText {
   const s = c.Status, d = dur(s.replace(/^(Up|Exited \(\d+\)|Restarting \(\d+\))\s*/, '').replace(/ \(.*\)$/, '').replace(/ ago$/, ''));
   const h = /\(unhealthy\)/.test(s) ? t` · healthcheck falhando` : /health: starting/.test(s) ? t` · verificando saúde`
           : /\(healthy\)/.test(s) ? t` · saudável` : '';
   if (c.State === 'running') return [t`Rodando há ${d}${h}`];
   if (c.State === 'paused') return [t`Pausado`];
   if (c.State === 'restarting') return restartCode(c)
-    ? [t`Reiniciando em loop · saiu com código ${restartCode(c)}`, EXIT[restartCode(c)]] : [t`Reiniciando…`];
+    // em loop, o RestartCount sobe a cada volta e o inspect é lido uma vez por queda: a contagem sairia velha
+    ? [t`Reiniciando em loop · saiu com código ${restartCode(c)}`, exitHint(restartCode(c), f && {...f, RestartCount: 0})] : [t`Reiniciando…`];
   if (c.State === 'created') return [t`Criado, nunca iniciado`];
   if (c.State === 'dead') return [t`Morto · só dá para remover`];
   const code = +(s.match(/^Exited \((\d+)\)/)?.[1] ?? 0);
-  return code ? [t`Saiu com código ${code} há ${d}`, EXIT[code]] : [t`Parado há ${d}`];
+  return code ? [t`Saiu com código ${code} há ${d}`, exitHint(code, f)] : [t`Parado há ${d}`];
 }
 
 // "0.0.0.0:5432->5432/tcp, [::]:5432->5432/tcp" -> [["5432","5432","tcp"]]
@@ -211,8 +224,15 @@ export function age(t: number, now = Date.now() / 1000): string {
     : d < 60 ? `${n(d / 7)} ${UNIT.week[1]}` : d < 730 ? `${n(d / 30)} ${UNIT.month[1]}` : `${n(d / 365)} ${UNIT.year[1]}`;
 }
 
-// erro do docker (ou do podman) ao remover imagem, volume ou rede -> explicação curta; '' quando não reconhece
-export function rmHint(msg: string): string {
+// erro do docker (ou do podman) ao iniciar, criar ou remover -> explicação curta; '' quando não reconhece. Os de subir
+// vêm antes: "address already in use" e "name ... is already in use" também casariam com o "in use" da remoção
+export function errHint(msg: string): string {
+  if (/port is already allocated|address already in use|ports are not available/i.test(msg)) return t`A porta do host já está em uso: pare o que usa ela ou troque a porta.`;
+  if (/container name .* is already in use/i.test(msg)) return t`Já existe um container com esse nome: escolha outro ou remova o antigo.`;
+  if (/pull access denied|repository does not exist|manifest unknown|manifest for \S+ not found/i.test(msg)) return t`A imagem não existe no registry, ou falta login: confira o nome, a tag e o docker login.`;
+  if (/no space left on device/i.test(msg)) return t`Disco cheio: libere espaço (aba Imagens, Limpar…).`;
+  if (/exec format error/i.test(msg)) return t`A imagem é de outra arquitetura (ex.: arm64 num host amd64).`;
+  if (/executable file not found|exec: .*no such file or directory/i.test(msg)) return t`O comando que a imagem roda não existe dentro dela.`;
   if (/referenced in multiple repositories/.test(msg)) return t`A imagem tem mais de uma tag: remova as tags pelo terminal, uma a uma.`;
   if (/dependent child images/.test(msg)) return t`Outras imagens foram construídas sobre esta.`;
   if (/in use|being used|active endpoints|associated containers/i.test(msg)) return t`Em uso: remova o container que usa (ou tire ele da rede) antes.`;
@@ -303,13 +323,17 @@ export function bulkSummary(done: string, ok: number, fails: [name: string, msg:
 
 // nível de uma linha de log, para a cor: 'bad' (erro), 'warn' (aviso), 'dim' (debug) ou '' (o resto). Vale a palavra
 // solta em maiúsculas (ERROR, WARN: "0 errors" não é nível), Error:/Warning: começando a mensagem, level=... ou
-// "level":"..." de log estruturado e o [error] do nginx. ponytail: heurística; "No Error: found" sai vermelho
+// "level":"..." de log estruturado, o [error] do nginx e o começo de um stack trace (ValueError:, java.io.IOException:,
+// Traceback do Python). ponytail: heurística; "No Error: found" sai vermelho
 export type LogLevel = 'bad' | 'warn' | 'dim' | '';
 const LEVEL: [Exclude<LogLevel, ''>, RegExp, RegExp][] = [
-  ['bad', /\b(FATAL|PANIC|CRIT(ICAL)?|ERROR|ERR|EMERG)\b|\b(Error|Exception|Traceback)\b:/, /\blevel["=: ]+"?(fatal|panic|crit|err)|\[(error|crit|alert|emerg)\]/i],
+  ['bad', /\b(FATAL|PANIC|CRIT(ICAL)?|ERROR|ERR|EMERG)\b|\b\w*(Error|Exception)\b:|\bTraceback \(most recent call last\)/, /\blevel["=: ]+"?(fatal|panic|crit|err)|\[(error|crit|alert|emerg)\]/i],
   ['warn', /\bWARN(ING)?\b|\bWarning:/, /\blevel["=: ]+"?warn|\[warn\]/i],
   ['dim', /\b(DEBUG|TRACE)\b/, /\blevel["=: ]+"?(debug|trace)|\[debug\]/i]];
 export const logLevel = (line: string): LogLevel => LEVEL.find(([, word, mark]) => word.test(line) || mark.test(line))?.[0] ?? '';
+// linha que continua a de cima num stack trace (indentada, "Caused by:", "... 3 more"): ela herda o nível da linha que
+// abriu o trace, para "Só erros" mostrar o trace inteiro. Recebe a linha sem o prefixo do serviço e sem o timestamp
+export const continues = (body: string): boolean => /^(\s+\S|Caused by:|\.\.\. \d+ more)/.test(body);
 
 // fatia liberável de uma categoria do docker system df (0 a 1), para a barra: o "(40%)" do Reclaimable, ou a
 // conta pelos tamanhos quando ele não vem (o build cache manda só "3.3GB"); null se não der para saber
