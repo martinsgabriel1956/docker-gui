@@ -204,6 +204,26 @@ test('Reiniciar fica à vista na linha, e r reinicia a linha em foco', async ({ 
   await expect(page.locator(`#st-${id('cron')}`)).toHaveText('Parado há 3 d');
 });
 
+test('l abre os logs da linha em foco, de qualquer botão dela', async ({ page, gui }) => {
+  await gui.open({ containers: [ctr('web', { logs: 'oi do web\n' }), stopped('cron', { logs: 'oi do cron\n' })] });
+  await row(page, 'cron').getByRole('checkbox').focus();  // a caixa da seleção não é digitação
+  await page.keyboard.press('l');
+  await expect(page.locator('#lt')).toHaveText('cron');
+  await expect(page.locator('#lb')).toHaveText('oi do cron\n');
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#dlg')).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Logs cron' })).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('l');
+  await expect(page.locator('#lt')).toHaveText('web');
+  await page.keyboard.press('Escape');
+  // na busca, l é letra
+  await page.locator('#q').fill('');
+  await page.locator('#q').press('l');
+  await expect(page.locator('#dlg')).toBeHidden();
+  await expect(page.locator('#q')).toHaveValue('l');
+});
+
 test('Parar tudo do projeto, com "Iniciar de novo" para desfazer', async ({ page, gui }) => {
   await gui.open({
     containers: [
@@ -235,4 +255,14 @@ test('Iniciar tudo só mexe nos parados do projeto', async ({ page, gui }) => {
   await page.getByRole('button', { name: 'Iniciar db do projeto shop', exact: true }).click();
   await expect(toast(page)).toHaveText('db está de pé.');
   expect(gui.container('outro')!.State).toBe('exited');
+});
+
+test('Iniciar que falha por porta ocupada diz a causa no aviso e na linha', async ({ page, gui }) => {
+  const err = 'Error response from daemon: driver failed programming external connectivity on endpoint web: Bind for 0.0.0.0:8080 failed: port is already allocated';
+  await gui.open({ containers: [stopped('web', { fail: { start: err } })] });
+  await page.getByRole('button', { name: 'Iniciar web' }).click();
+  const hint = 'A porta do host já está em uso: pare o que usa ela ou troque a porta.';
+  await expect(toast(page)).toHaveText(`Não deu para iniciar web. ${hint}`);
+  await expect(row(page, 'web')).toContainText(hint);  // à vista; o erro do docker fica no "ver erro"
+  await expect(row(page, 'web').locator('pre')).toHaveText(err);
 });

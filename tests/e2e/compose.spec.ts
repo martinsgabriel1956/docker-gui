@@ -30,6 +30,28 @@ test('cabeçalho do projeto mostra só a ação principal, Logs e o ⋯', async 
   await expect(head.getByRole('button').filter({ visible: true })).toHaveText(['Parar tudo (2)', 'Logs']);
 });
 
+test('serviço do arquivo sem container aparece no cabeçalho e sobe pelo menu', async ({ page, gui }) => {
+  await gui.open({ containers: containers(), compose_services: { shop: ['api', 'db', 'worker'] } });
+  const head = page.locator('#rows [data-key="g:shop"]');
+  await expect(head).toContainText('sem container: worker');
+  await projectMenu(page).click();
+  await page.getByRole('button', { name: 'compose up worker do projeto shop' }).click();
+  await expect(page.locator('#toast')).toHaveText('shop-worker-1 está de pé.');
+  expect(gui.read().compose_calls).toEqual([[...PREFIX, 'up', '-d', '--', 'worker']]);
+  await expect(head).not.toContainText('sem container');
+  await expect(page.locator('#rows')).toContainText('shop-worker-1');
+});
+
+test('serviço que nasce pelo terminal sai da lista dos sem container', async ({ page, gui }) => {
+  await gui.open({ containers: containers(), compose_services: { shop: ['api', 'db', 'worker'] } });
+  const head = page.locator('#rows [data-key="g:shop"]');
+  await expect(head).toContainText('sem container: worker');
+  // um compose up worker pelo terminal: o container novo muda os serviços do projeto, e a lista é relida
+  gui.update(s => { s.containers.push(ctr('shop-worker-1', { Labels: shop('worker') })); });
+  await expect(page.locator('#rows')).toContainText('shop-worker-1');
+  await expect(head).not.toContainText('sem container');
+});
+
 test('compose up sobe o projeto a partir dos labels', async ({ page, gui }) => {
   await gui.open({ containers: containers() });
   await projectMenu(page).click();
@@ -87,11 +109,12 @@ test('o compose down diz primeiro os containers da faixa de atenção', async ({
 test('compose que falha mostra a última linha do stderr', async ({ page, gui }) => {
   await gui.open({
     containers: containers(),
-    compose_fail: ' api Pulling\nError response from daemon: pull access denied for acme/api',
+    // um erro sem explicação conhecida (os conhecidos viram a causa traduzida: errHint)
+    compose_fail: ' api Pulling\nError response from daemon: Get "https://registry.acme/v2/": net/http: TLS handshake timeout',
   });
   await projectMenu(page).click();
   await page.getByRole('button', { name: 'compose pull do projeto shop', exact: true }).click();
-  await expect(page.locator('#toast')).toHaveText('shop: compose pull falhou. Error response from daemon: pull access denied for acme/api');
+  await expect(page.locator('#toast')).toHaveText('shop: compose pull falhou. Error response from daemon: Get "https://registry.acme/v2/": net/http: TLS handshake timeout');
   expect(gui.read().compose_calls).toEqual([[...PREFIX, 'pull']]);
 });
 
@@ -135,6 +158,25 @@ test('Reconstruir serviço que recria o container confere o container novo', asy
   await page.locator('summary[aria-label="Mais ações para api"]').click();
   await page.getByRole('button', { name: 'Reconstruir serviço api' }).click();
   await expect(page.locator('#toast')).toContainText('api subiu mas não ficou bem: Saiu com código 1');
+});
+
+test('b reconstrói o serviço da linha em foco; nos logs, o dos logs, que seguem o container novo', async ({ page, gui }) => {
+  await gui.open({ containers: [ctr('api', { Labels: shop('api'), logs: '2026-01-01T00:00:01Z velho\n' }), ctr('solto')] });
+  await page.getByRole('button', { name: 'Logs solto' }).focus();
+  await page.keyboard.press('b');  // sem compose: nada
+  await page.getByRole('button', { name: 'Logs api' }).focus();
+  await page.keyboard.press('b');
+  await expect(page.locator('#toast')).toHaveText('api está de pé.');
+  expect(gui.read().compose_calls).toEqual([[...PREFIX, 'up', '-d', '--build', '--no-deps', '--', 'api']]);
+
+  // nos logs: o build troca o container (outro ID); a caixa passa a seguir o novo, ao vivo
+  gui.update(s => { s.compose_recreate = { State: 'running', Status: 'Up Less than a second' }; });
+  await page.getByRole('button', { name: 'Logs api' }).click();
+  await expect(page.locator('#lb')).toContainText('velho');
+  await page.keyboard.press('b');
+  await expect(page.locator('#follow')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#dlg-status')).toContainText('reconstruído às');
+  await expect(page.locator('#dlg-status')).not.toContainText('não existe mais');
 });
 
 test('Reiniciar serviço que falha mostra a última linha do stderr', async ({ page, gui }) => {
