@@ -26,11 +26,13 @@ export type Container = {
   stats?: Stats | Stats[];  // lista: uma leitura por `docker stats`, a última se repete
   noscript?: boolean;
   started?: string;  // StartedAt do inspect (since=start dos logs)
+  events?: Record<string, unknown>[];  // linhas do `docker events` que o histórico devolve
+  top?: string;  // saída do `docker top`
 };
 export type DiskUsage = { Type: string; TotalCount: string; Active: string; Size: string; Reclaimable: string };
 // linhas reais do `docker image ls --no-trunc` (uma por tag), `volume ls` e `network ls --no-trunc`, em '{{json .}}'
 export type ImageRow = { ID: string; Repository: string; Tag: string; Size: string; CreatedAt: string };
-export type VolumeRow = { Name: string; Driver: string };
+export type VolumeRow = { Name: string; Driver: string; Size?: string };  // Size: o que o `system df -v` diz
 export type NetworkRow = { ID: string; Name: string; Driver: string; Scope: string };
 export type DockerState = {
   containers: Container[]; ps_error?: string; df?: DiskUsage[]; pruned?: string[];
@@ -38,6 +40,7 @@ export type DockerState = {
   run_calls?: string[][]; run_fail?: string; run_delay?: number; run_after?: { State: string; Status: string };
   images?: ImageRow[]; volumes?: VolumeRow[]; networks?: NetworkRow[]; removed?: string[];
   context?: { Name: string; Host: string };  // o que o `context inspect` responde (padrão: default em unix://)
+  compose_services?: Record<string, string[]>;  // o `compose config --services` de cada projeto
 };
 
 // ID estável por nome: o mesmo container tem o mesmo ID em todo teste
