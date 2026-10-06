@@ -1,4 +1,4 @@
-import { test, expect, ctr, id, row } from './fixtures';
+import { test, expect, ctr, id, row, compose } from './fixtures';
 
 const unhealthy = ctr('api', {
   Status: 'Up 10 minutes (unhealthy)',
@@ -341,4 +341,87 @@ test('o Ao vivo lembra a escolha para os próximos logs', async ({ page, gui }) 
   await page.getByRole('button', { name: 'Logs api' }).click();
   await expect(page.locator('#follow')).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('#lb')).toHaveText('linha a\n');
+});
+
+test('filtro de nível mostra só erros, ou avisos e erros, também no ao vivo', async ({ page, gui }) => {
+  await gui.open({ containers: [ctr('web', { logs: 'GET / 200\nWARN disco quase cheio\nERROR conexão recusada\nDEBUG tick\n' })] });
+  await page.getByRole('button', { name: 'Logs web' }).click();
+  const lb = page.locator('#lb'), level = page.getByLabel('Nível das linhas');
+  await expect(lb).toContainText('GET / 200');
+  await level.selectOption({ label: 'Só erros' });
+  await expect(lb).toHaveText('ERROR conexão recusada\n');
+  await expect(page.locator('#lcount')).toHaveText('1 linha');
+  await level.selectOption({ label: 'Avisos e erros' });
+  await expect(lb).toHaveText('WARN disco quase cheio\nERROR conexão recusada\n');
+  // junto com o texto: as duas coisas valem
+  await page.locator('#lf').fill('disco');
+  await expect(lb).toHaveText('WARN disco quase cheio\n');
+  await expect(page.locator('#lcount')).toHaveText('1 ocorrência em 1 linha');
+  await page.locator('#lf').fill('');
+
+  await page.locator('#follow').click();
+  await expect(page.locator('#lmeta')).toContainText('e as novas');
+  gui.update(s => { s.containers[0].logs += 'GET /x 200\nERROR timeout\n'; });
+  await expect(lb).toHaveText('WARN disco quase cheio\nERROR conexão recusada\nERROR timeout\n');
+  await expect(page.locator('#lcount')).toHaveText('3 linhas');
+
+  // reabrir começa com todos os níveis
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Logs web' }).click();
+  await expect(level).toHaveValue('');
+  await expect(lb).toContainText('GET / 200');
+});
+
+test('nos logs do projeto, o filtro de serviço mostra só aquele serviço', async ({ page, gui }) => {
+  const shop = (svc: string) => `${compose('shop', svc)},com.docker.compose.project.working_dir=/srv/shop,com.docker.compose.project.config_files=/srv/shop/compose.yml`;
+  await gui.open({ containers: [ctr('api', { Labels: shop('api'), logs: '2026-10-05T10:00:02Z api pronto\n' }),
+                                ctr('db', { Labels: shop('db'), logs: '2026-10-05T10:00:01Z db pronto\n' })] });
+  const svc = page.getByLabel('Serviço', { exact: true });
+  await page.getByRole('button', { name: 'Logs api' }).click();
+  await expect(svc).toBeHidden();  // um container só: não há o que escolher
+  await page.keyboard.press('Escape');
+
+  await page.getByRole('button', { name: 'Logs do projeto shop' }).click();
+  await expect(page.locator('#lb')).toContainText('api pronto');
+  await expect(svc.locator('option')).toHaveText(['Todos os serviços', 'api', 'db']);
+  await svc.selectOption('db');
+  await expect(page.locator('#lb')).toHaveText('db-1  | 2026-10-05T10:00:01Z db pronto\n');
+  // "desde que subiu" é de um container só
+  await expect(page.getByLabel('Período').locator('option[value="start"]')).toBeDisabled();
+});
+
+test('período: "desde que subiu" deixa de fora as execuções anteriores', async ({ page, gui }) => {
+  await gui.open({ containers: [ctr('web', { started: '2026-10-05T12:00:00Z',
+    logs: '2026-10-05T11:00:00Z execução antiga\n2026-10-05T12:00:01Z execução de agora\n' })] });
+  await page.getByRole('button', { name: 'Logs web' }).click();
+  const lb = page.locator('#lb');
+  await expect(lb).toContainText('execução antiga');
+  await page.getByLabel('Período').selectOption({ label: 'Desde que subiu' });
+  await expect(lb).toHaveText('2026-10-05T12:00:01Z execução de agora\n');
+  await expect(page.locator('#lmeta')).toContainText('Últimas 500 linhas desde que o container subiu');
+  // ao vivo, o período vai junto
+  await page.locator('#follow').click();
+  await expect(page.locator('#lmeta')).toHaveText('Ao vivo · últimas 500 linhas desde que o container subiu e as novas');
+  await expect(lb).toHaveText('2026-10-05T12:00:01Z execução de agora\n');
+});
+
+test('período sem linhas diz isso', async ({ page, gui }) => {
+  await gui.open({ containers: [ctr('web', { started: '2026-10-05T12:00:00Z', logs: '2026-10-05T11:00:00Z velha\n' })] });
+  await page.getByRole('button', { name: 'Logs web' }).click();
+  await page.getByLabel('Período').selectOption({ label: 'Desde que subiu' });
+  await expect(page.locator('#lb')).toHaveText('Nada no log nesse período.');
+});
+
+test('"Só erros" mostra o stack trace inteiro, não só a primeira linha', async ({ page, gui }) => {
+  const trace = 'ERROR falhou ao salvar\n\tat com.acme.Repo.save(Repo.java:42)\n\tat com.acme.Api.post(Api.java:7)\nCaused by: java.io.IOException: disco\n\t... 3 more\n';
+  await gui.open({ containers: [ctr('web', { logs: `GET / 200\n${trace}GET /health 200\n    indentado mas sem erro antes\n` })] });
+  await page.getByRole('button', { name: 'Logs web' }).click();
+  await page.getByLabel('Nível das linhas').selectOption({ label: 'Só erros' });
+  await expect(page.locator('#lb')).toHaveText(trace);
+  await expect(page.locator('#lcount')).toHaveText('5 linhas');
+  // ao vivo, a continuação que chega depois também vai junto
+  await page.locator('#follow').click();
+  await expect(page.locator('#lmeta')).toContainText('e as novas');
+  gui.update(s => { s.containers[0].logs += 'Traceback (most recent call last):\n  File "app.py", line 3\nValueError: boom\nok de novo\n'; });
+  await expect(page.locator('#lb')).toHaveText(`${trace}Traceback (most recent call last):\n  File "app.py", line 3\nValueError: boom\n`);
 });

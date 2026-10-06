@@ -3,7 +3,9 @@
 
 Cenários que o Docker de verdade não reproduz sob demanda (healthcheck falhando, loop de reinício,
 ação que falha ou demora) viram dados. Campos extras por container, fora do formato do `docker ps`:
-  logs    texto do `docker logs` (respeita o --tail); com -f, o que for acrescentado depois sai na hora
+  logs    texto do `docker logs` (respeita o --tail e o --since com data); com -f, o que for acrescentado depois sai
+          na hora
+  started o StartedAt do inspect (since=start dos logs); padrão 2026-01-01T00:00:00Z
   health  objeto do `inspect --format {{json .State.Health}}`
   inspect objeto do `inspect --format {{json .}}` (HostConfig, NetworkSettings, Mounts, Config...)
   fail    {ação: stderr}: a ação falha com essa mensagem
@@ -18,7 +20,8 @@ No topo do JSON, "ps_error" faz o `docker ps` (e o `docker events`) falhar (daem
 "Reclaimable" da categoria e diz que liberou o que estava lá. "compose_fail" faz todo
 `docker compose` falhar com esse stderr, e cada `docker compose` grava o argv em "compose_calls".
 `compose up` (com ou sem --build) deixa os containers do projeto rodando, `down` os remove, `pull` não
-muda nada, `restart <serviço>` deixa os containers do serviço rodando e `logs` junta os logs do projeto
+muda nada, `restart <serviço>` e `up --build --no-deps <serviço>` deixam os containers do serviço rodando (com
+"compose_recreate" ({State, Status}), o up --build troca cada container por um de outro ID, nesse estado) e `logs` junta os logs do projeto
 com o prefixo do serviço ("api-1  | "), como o compose; com --follow, acompanha como o `logs -f`.
 "images", "volumes" e "networks" são as linhas do `image ls`/`volume ls`/`network ls` (uma por tag, no caso
 das imagens). Quem usa cada uma sai do "inspect" dos containers (Image, Mounts, NetworkSettings.Networks): o rm
@@ -45,7 +48,7 @@ import time
 PS_FIELDS = ("Command", "CreatedAt", "ID", "Image", "Labels", "LocalVolumes", "Mounts", "Names",
              "Networks", "Ports", "RunningFor", "Size", "State", "Status")
 RUNNING = {"State": "running", "Status": "Up Less than a second"}
-PRUNE_TYPE = {"image": "Images", "volume": "Local Volumes", "builder": "Build Cache"}
+PRUNE_TYPE = {"container": "Containers", "image": "Images", "volume": "Local Volumes", "builder": "Build Cache"}
 AFTER = {"start": RUNNING, "restart": RUNNING, "unpause": RUNNING,
          "stop": {"State": "exited", "Status": "Exited (0) Less than a second ago"},
          "pause": {"State": "paused", "Status": "Up Less than a second (Paused)"}}
@@ -78,10 +81,15 @@ def save(f, state):
 
 
 def tail(logs, args):
-    """--tail N: só as últimas N linhas; sem ele, tudo (como o docker)."""
-    if "--tail" not in args:
-        return logs
-    return "".join(logs.splitlines(keepends=True)[-int(args[args.index("--tail") + 1]):])
+    """--since <data>: só as linhas com timestamp a partir dela (o relativo, "5m", não filtra aqui); --tail N: só as
+    últimas N linhas; sem eles, tudo (como o docker)."""
+    lines = logs.splitlines(keepends=True)
+    since = args[args.index("--since") + 1] if "--since" in args else ""
+    if since[:1].isdigit() and "T" in since:
+        lines = [line for line in lines if line[:len(since)] >= since]
+    if "--tail" in args:
+        lines = lines[-int(args[args.index("--tail") + 1]):]
+    return "".join(lines)
 
 
 def follow(path, pick, fmt=lambda c, text: text, args=()):
@@ -202,7 +210,7 @@ def compose(state, args):
         return state["compose_fail"]
     sub, rest = subcommand(args)
     mine = project(state, args)
-    if sub == "restart":
+    if "--" in rest:  # restart <serviço> e up --build --no-deps <serviço>: só os containers daquele serviço
         mine = [c for c in mine if labels(c).get("com.docker.compose.service") == rest[-1]]
         if not mine:
             return f"no such service: {rest[-1]}"
@@ -211,6 +219,9 @@ def compose(state, args):
             state["containers"].remove(c)
         elif sub in ("up", "restart"):
             c.update(RUNNING)
+            if "--build" in rest and state.get("compose_recreate"):  # imagem nova: o compose troca o container (outro ID)
+                c["ID"] = hashlib.sha256(c["ID"].encode()).hexdigest()[:12]
+                c.update(state["compose_recreate"])
         elif sub == "logs" and "--follow" not in rest:
             sys.stdout.write(prefixed(c, tail(c.get("logs", ""), rest)))
     return None
@@ -325,10 +336,12 @@ def main(args):
         elif cmd in ("image", "volume", "network") and args[1] != "prune":
             if objects(state, args):
                 save(f, state)
-        elif cmd == "container":  # container inspect <ids...>: um array, como o docker
+        elif cmd == "container" and args[1] == "inspect":  # container inspect <ids...>: um array, como o docker
             print(json.dumps([{"Name": "/" + c["Names"], **c.get("inspect", {})}
                               for c in state["containers"] if c["ID"] in args[2:]]))
-        elif cmd in PRUNE_TYPE:
+        elif cmd in PRUNE_TYPE and args[1] == "prune":
+            if cmd == "container":  # container prune: os parados saem da lista também
+                state["containers"] = [c for c in state["containers"] if c["State"] in ("running", "paused", "restarting")]
             row = next(r for r in state["df"] if r["Type"] == PRUNE_TYPE[cmd])
             freed, row["Reclaimable"] = row["Reclaimable"].split()[0], "0B"
             state.setdefault("pruned", []).append(" ".join(args))
@@ -339,7 +352,10 @@ def main(args):
             sys.stdout.write(tail(find(state, ref).get("logs", ""), args))
         elif cmd == "inspect":
             c = find(state, ref)
-            print(json.dumps(c.get("health") if ".State.Health" in args[-2] else c.get("inspect", {})))
+            if ".State.StartedAt" in args[-2]:  # since=start dos logs
+                print(json.dumps(c.get("started", "2026-01-01T00:00:00Z")))
+            else:
+                print(json.dumps(c.get("health") if ".State.Health" in args[-2] else c.get("inspect", {})))
         else:
             c = find(state, ref)
             if action in c.get("fail", {}):

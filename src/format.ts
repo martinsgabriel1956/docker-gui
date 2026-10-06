@@ -1,5 +1,6 @@
 // Funções puras que traduzem a saída do docker para a tela. Não tocam no DOM: o app.ts importa daqui,
 // e os testes (tests/format.test.mjs) carregam este arquivo direto no Node, que remove os tipos sozinho.
+import {LANG, t} from './i18n.ts';
 
 // estados do `docker ps`; "removing" é transitório e cai no "parado"
 export type ContainerState = 'created' | 'restarting' | 'running' | 'removing' | 'paused' | 'exited' | 'dead';
@@ -34,11 +35,13 @@ export type Port = [host: string, container: string, proto: string];
 export const esc = (s: unknown): string => String(s).replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
 
 export const EXIT: Record<number, string> = {
-  1: 'erro da aplicação', 125: 'falha do próprio docker run', 126: 'comando sem permissão de execução',
-  127: 'comando não encontrado', 137: 'morto à força ou sem memória (OOM)', 139: 'falha de segmentação',
-  143: 'encerrado por SIGTERM',
+  1: t`erro da aplicação`, 125: t`falha do próprio docker run`, 126: t`comando sem permissão de execução`,
+  127: t`comando não encontrado`, 137: t`morto à força ou sem memória (OOM)`, 139: t`falha de segmentação`,
+  143: t`encerrado por SIGTERM`,
 };
-const UNIT: Record<string, string> = {second: 's', minute: 'min', hour: 'h', day: 'd', week: 'sem', month: 'mês', year: 'ano'};
+// [singular, plural]
+const UNIT: Record<string, [string, string]> = {second: ['s', 's'], minute: ['min', 'min'], hour: ['h', 'h'], day: ['d', 'd'],
+  week: [t`sem`, t`sem`], month: [t`mês`, t`meses`], year: [t`ano`, t`anos`]};
 
 export const restartCode = (c: Container): number => +(c.Status.match(/^Restarting \((\d+)\)/)?.[1] ?? 0);
 
@@ -74,22 +77,35 @@ export function dur(s: string): string {
   const m = s.match(/(about )?(an?|\d+) (second|minute|hour|day|week|month|year)/i);
   if (!m) return s;
   const n = /^an?$/i.test(m[2]) ? 1 : +m[2], u = UNIT[m[3].toLowerCase()];
-  return `${m[1] ? '~' : ''}${n} ${n > 1 && u === 'mês' ? 'meses' : n > 1 && u === 'ano' ? 'anos' : u}`;
+  return `${m[1] ? '~' : ''}${n} ${u[+(n > 1)]}`;
 }
 
-// traduz o Status do docker; o original fica no title
-export function status(c: Container): StatusText {
-  const s = c.Status, t = dur(s.replace(/^(Up|Exited \(\d+\)|Restarting \(\d+\))\s*/, '').replace(/ \(.*\)$/, '').replace(/ ago$/, ''));
-  const h = /\(unhealthy\)/.test(s) ? ' · healthcheck falhando' : /health: starting/.test(s) ? ' · verificando saúde'
-          : /\(healthy\)/.test(s) ? ' · saudável' : '';
-  if (c.State === 'running') return [`Rodando há ${t}${h}`];
-  if (c.State === 'paused') return ['Pausado'];
+// o que o inspect acrescenta a uma queda (/api/inspect): se o kernel matou por falta de memória e quantas vezes o
+// docker já reiniciou o container
+export type Facts = {OOMKilled: boolean; RestartCount: number};
+
+// a dica de uma queda: a causa do código de saída e, com o inspect na mão, o 137 separado em memória ou SIGKILL e os
+// reinícios. undefined quando não há o que dizer
+function exitHint(code: number, f?: Facts): string | undefined {
+  const cause = code === 137 && f ? (f.OOMKilled ? t`sem memória (OOM)` : t`morto à força (SIGKILL), não por falta de memória`) : EXIT[code];
+  const again = !f?.RestartCount ? '' : f.RestartCount === 1 ? t`reiniciou 1 vez` : t`reiniciou ${f.RestartCount} vezes`;
+  return [cause, again].filter(Boolean).join(' · ') || undefined;
+}
+
+// traduz o Status do docker; o original fica no title. f: o inspect de quem caiu, quando já veio
+export function status(c: Container, f?: Facts): StatusText {
+  const s = c.Status, d = dur(s.replace(/^(Up|Exited \(\d+\)|Restarting \(\d+\))\s*/, '').replace(/ \(.*\)$/, '').replace(/ ago$/, ''));
+  const h = /\(unhealthy\)/.test(s) ? t` · healthcheck falhando` : /health: starting/.test(s) ? t` · verificando saúde`
+          : /\(healthy\)/.test(s) ? t` · saudável` : '';
+  if (c.State === 'running') return [t`Rodando há ${d}${h}`];
+  if (c.State === 'paused') return [t`Pausado`];
   if (c.State === 'restarting') return restartCode(c)
-    ? [`Reiniciando em loop · saiu com código ${restartCode(c)}`, EXIT[restartCode(c)]] : ['Reiniciando…'];
-  if (c.State === 'created') return ['Criado, nunca iniciado'];
-  if (c.State === 'dead') return ['Morto · só dá para remover'];
+    // em loop, o RestartCount sobe a cada volta e o inspect é lido uma vez por queda: a contagem sairia velha
+    ? [t`Reiniciando em loop · saiu com código ${restartCode(c)}`, exitHint(restartCode(c), f && {...f, RestartCount: 0})] : [t`Reiniciando…`];
+  if (c.State === 'created') return [t`Criado, nunca iniciado`];
+  if (c.State === 'dead') return [t`Morto · só dá para remover`];
   const code = +(s.match(/^Exited \((\d+)\)/)?.[1] ?? 0);
-  return code ? [`Saiu com código ${code} há ${t}`, EXIT[code]] : [`Parado há ${t}`];
+  return code ? [t`Saiu com código ${code} há ${d}`, exitHint(code, f)] : [t`Parado há ${d}`];
 }
 
 // "0.0.0.0:5432->5432/tcp, [::]:5432->5432/tcp" -> [["5432","5432","tcp"]]
@@ -123,7 +139,7 @@ export interface Stats {
 
 // [CPU, memória usada, title com o limite de memória e, quando vierem, rede e disco]
 export const usage = (s: Stats): [cpu: string, ram: string, title: string] =>
-  [`CPU ${s.CPUPerc}`, `RAM ${s.MemUsage.split(' / ')[0]}`, [`Memória: ${s.MemUsage} (${s.MemPerc})`, ...io(s)].join('\n')];
+  [`CPU ${s.CPUPerc}`, `RAM ${s.MemUsage.split(' / ')[0]}`, [t`Memória: ${s.MemUsage} (${s.MemPerc})`, ...io(s)].join('\n')];
 
 // "10.5MiB" -> 11010048, "1.2kB" -> 1200; null se não for um tamanho ("--"). O docker usa unidade binária na
 // memória e decimal na rede e no disco; o podman, decimal em tudo
@@ -154,7 +170,7 @@ export function pair(s?: string): [string, string] | null {
 // rede e disco em texto, uma linha cada (só as que vieram); são totais desde que o container subiu
 export function io(s: Stats): string[] {
   const net = pair(s.NetIO), blk = pair(s.BlockIO);
-  return [net && `Rede: ${net[0]} recebidos · ${net[1]} enviados`, blk && `Disco: ${blk[0]} lidos · ${blk[1]} gravados`]
+  return [net && t`Rede: ${net[0]} recebidos · ${net[1]} enviados`, blk && t`Disco: ${blk[0]} lidos · ${blk[1]} gravados`]
     .filter((x): x is string => !!x);
 }
 
@@ -181,7 +197,7 @@ export function sparkPoints(vs: number[], w: number, h: number, max = HISTORY, f
 // texto alternativo do sparkline: "CPU nos últimos 4 min: mín 0.1%, máx 2.3%, agora 0.5%"
 export function trend(label: string, vs: number[], span: number, fmt: (n: number) => string): string {
   const when = span < 60_000 ? `${Math.max(1, Math.round(span / 1000))} s` : `${Math.round(span / 60_000)} min`;
-  return `${label} nos últimos ${when}: mín ${fmt(Math.min(...vs))}, máx ${fmt(Math.max(...vs))}, agora ${fmt(vs.at(-1)!)}`;
+  return t`${label} nos últimos ${when}: mín ${fmt(Math.min(...vs))}, máx ${fmt(Math.max(...vs))}, agora ${fmt(vs.at(-1)!)}`;
 }
 
 // filtro do modal de logs: texto literal (nada de regex do usuário), sem diferenciar maiúsculas; '' = sem filtro.
@@ -205,14 +221,21 @@ export interface Network { ID: string; Name: string; Driver: string; Scope: stri
 export function age(t: number, now = Date.now() / 1000): string {
   const s = now - t, d = s / 86400, n = (x: number) => Math.floor(x);
   return s < 60 ? '<1 min' : s < 3600 ? `${n(s / 60)} min` : s < 172800 ? `${n(s / 3600)} h` : d < 14 ? `${n(d)} d`
-    : d < 60 ? `${n(d / 7)} sem` : d < 730 ? `${n(d / 30)} meses` : `${n(d / 365)} anos`;
+    : d < 60 ? `${n(d / 7)} ${UNIT.week[1]}` : d < 730 ? `${n(d / 30)} ${UNIT.month[1]}` : `${n(d / 365)} ${UNIT.year[1]}`;
 }
 
-// erro do docker (ou do podman) ao remover imagem, volume ou rede -> explicação curta; '' quando não reconhece
-export function rmHint(msg: string): string {
-  if (/referenced in multiple repositories/.test(msg)) return 'A imagem tem mais de uma tag: remova as tags pelo terminal, uma a uma.';
-  if (/dependent child images/.test(msg)) return 'Outras imagens foram construídas sobre esta.';
-  if (/in use|being used|active endpoints|associated containers/i.test(msg)) return 'Em uso: remova o container que usa (ou tire ele da rede) antes.';
+// erro do docker (ou do podman) ao iniciar, criar ou remover -> explicação curta; '' quando não reconhece. Os de subir
+// vêm antes: "address already in use" e "name ... is already in use" também casariam com o "in use" da remoção
+export function errHint(msg: string): string {
+  if (/port is already allocated|address already in use|ports are not available/i.test(msg)) return t`A porta do host já está em uso: pare o que usa ela ou troque a porta.`;
+  if (/container name .* is already in use/i.test(msg)) return t`Já existe um container com esse nome: escolha outro ou remova o antigo.`;
+  if (/pull access denied|repository does not exist|manifest unknown|manifest for \S+ not found/i.test(msg)) return t`A imagem não existe no registry, ou falta login: confira o nome, a tag e o docker login.`;
+  if (/no space left on device/i.test(msg)) return t`Disco cheio: libere espaço (aba Imagens, Limpar…).`;
+  if (/exec format error/i.test(msg)) return t`A imagem é de outra arquitetura (ex.: arm64 num host amd64).`;
+  if (/executable file not found|exec: .*no such file or directory/i.test(msg)) return t`O comando que a imagem roda não existe dentro dela.`;
+  if (/referenced in multiple repositories/.test(msg)) return t`A imagem tem mais de uma tag: remova as tags pelo terminal, uma a uma.`;
+  if (/dependent child images/.test(msg)) return t`Outras imagens foram construídas sobre esta.`;
+  if (/in use|being used|active endpoints|associated containers/i.test(msg)) return t`Em uso: remova o container que usa (ou tire ele da rede) antes.`;
   return '';
 }
 
@@ -249,63 +272,68 @@ export const splitEnv = (s: string): string[] => s.split(/\r?\n/).filter(l => l.
 export function runSpec(f: RunForm): {spec: RunSpec; errors: RunErrors} {
   const errors: RunErrors = {}, image = f.image.trim(), name = f.name.trim(), volume = f.volume.trim();
   const ports = splitPorts(f.ports), env = splitEnv(f.env);
-  if (!image) errors.image = 'Informe a imagem, ex.: nginx:1.27 ou ghcr.io/acme/api:1.4.';
-  else if (image.length > 512 || !IMAGE_RE.test(image)) errors.image = 'Imagem inválida: use repo[:tag] ou repo@sha256:…, com o caminho em minúsculas.';
-  if (name && !NAME_RE.test(name)) errors.name = 'Nome inválido: 2 a 128 caracteres entre letras, números, _ . e -, começando por letra ou número.';
+  if (!image) errors.image = t`Informe a imagem, ex.: nginx:1.27 ou ghcr.io/acme/api:1.4.`;
+  else if (image.length > 512 || !IMAGE_RE.test(image)) errors.image = t`Imagem inválida: use repo[:tag] ou repo@sha256:…, com o caminho em minúsculas.`;
+  if (name && !NAME_RE.test(name)) errors.name = t`Nome inválido: 2 a 128 caracteres entre letras, números, _ . e -, começando por letra ou número.`;
 
   const seen = new Set<string>();
   for (const p of ports) {
     const m = p.match(PORT_RE);
     if (!m || [m[1], m[2]].some(n => +n < 1 || +n > 65535)) {
-      errors.ports = `“${p.slice(0, 40)}” não é uma porta válida: use portaDoHost:portaDoContainer, ex.: 8080:80 ou 5353:53/udp.`;
+      errors.ports = t`“${p.slice(0, 40)}” não é uma porta válida: use portaDoHost:portaDoContainer, ex.: 8080:80 ou 5353:53/udp.`;
       break;
     }
     const key = `${+m[1]}/${m[3] || 'tcp'}`;
-    if (seen.has(key)) { errors.ports = `A porta ${key} do host aparece duas vezes.`; break; }
+    if (seen.has(key)) { errors.ports = t`A porta ${key} do host aparece duas vezes.`; break; }
     seen.add(key);
   }
-  if (!errors.ports && ports.length > MAX_ITEMS) errors.ports = `No máximo ${MAX_ITEMS} portas.`;
+  if (!errors.ports && ports.length > MAX_ITEMS) errors.ports = t`No máximo ${MAX_ITEMS} portas.`;
 
   const keys = new Set<string>();
   for (const e of env) {
     // sem "=", o docker copiaria a variável do ambiente do servidor: o servidor também recusa
     const i = e.indexOf('='), k = e.slice(0, i), v = e.slice(i + 1);
     if (i < 0 || !ENV_RE.test(k)) {
-      errors.env = `“${e.slice(0, 40)}” não é CHAVE=valor: a chave tem letras, números e _, e não começa com número.`;
+      errors.env = t`“${e.slice(0, 40)}” não é CHAVE=valor: a chave tem letras, números e _, e não começa com número.`;
       break;
     }
-    if (v.includes('\0') || v.length > MAX_ENV_VALUE) { errors.env = `O valor de ${k} tem o caractere NUL ou passa de ${MAX_ENV_VALUE} caracteres.`; break; }
-    if (keys.has(k)) { errors.env = `${k} aparece duas vezes.`; break; }
+    if (v.includes('\0') || v.length > MAX_ENV_VALUE) { errors.env = t`O valor de ${k} tem o caractere NUL ou passa de ${MAX_ENV_VALUE} caracteres.`; break; }
+    if (keys.has(k)) { errors.env = t`${k} aparece duas vezes.`; break; }
     keys.add(k);
   }
-  if (!errors.env && env.length > MAX_ITEMS) errors.env = `No máximo ${MAX_ITEMS} variáveis.`;
+  if (!errors.env && env.length > MAX_ITEMS) errors.env = t`No máximo ${MAX_ITEMS} variáveis.`;
 
   const restart = RESTART.find(r => r === f.restart);
-  if (!restart) errors.restart = 'Escolha uma das opções da lista.';
+  if (!restart) errors.restart = t`Escolha uma das opções da lista.`;
   const path = volume.length <= 1024 ? volume.match(VOLUME_RE)?.[1] : undefined;
   if (volume && (!path || path.split('/').some(s => s === '.' || s === '..')))
-    errors.volume = 'Use nome:/caminho/no/container, ex.: dados:/var/lib/postgresql/data. Pasta do host (bind mount) não é aceita.';
+    errors.volume = t`Use nome:/caminho/no/container, ex.: dados:/var/lib/postgresql/data. Pasta do host (bind mount) não é aceita.`;
   return {spec: {image, name, ports, all_interfaces: f.all_interfaces, env, restart: restart || 'no', volume}, errors};
 }
 
 // resumo de uma ação em lote para o aviso: "3 parados, 1 falhou: web: permission denied."
-// done é o particípio no singular (DONE do app.ts); só as 2 primeiras falhas vão por extenso, o resto fica nas linhas
+// done é o particípio no singular (DONE do app.ts; em inglês, o plural é igual); só as 2 primeiras falhas vão por
+// extenso, o resto fica nas linhas
 export function bulkSummary(done: string, ok: number, fails: [name: string, msg: string][]): string {
-  const why = (m: string) => m.trim().split('\n')[0].replace(/\.$/, '') || 'erro sem mensagem';
+  const why = (m: string) => m.trim().split('\n')[0].replace(/\.$/, '') || t`erro sem mensagem`;
   const f = fails.length, list = fails.slice(0, 2).map(([n, m]) => `${n}: ${why(m)}`).join('; ');
-  return [ok && `${ok} ${ok === 1 ? done : done + 's'}`,
-          f && `${f} ${f === 1 ? 'falhou' : 'falharam'}: ${list}${f > 2 ? `; e mais ${f - 2}` : ''}`].filter(Boolean).join(', ') + '.';
+  return [ok && `${ok} ${ok === 1 || LANG === 'en' ? done : done + 's'}`,
+          f && `${f} ${f === 1 ? t`falhou` : t`falharam`}: ${list}${f > 2 ? t`; e mais ${f - 2}` : ''}`].filter(Boolean).join(', ') + '.';
 }
 
 // nível de uma linha de log, para a cor: 'bad' (erro), 'warn' (aviso), 'dim' (debug) ou '' (o resto). Vale a palavra
 // solta em maiúsculas (ERROR, WARN: "0 errors" não é nível), Error:/Warning: começando a mensagem, level=... ou
-// "level":"..." de log estruturado e o [error] do nginx. ponytail: heurística; "No Error: found" sai vermelho
+// "level":"..." de log estruturado, o [error] do nginx e o começo de um stack trace (ValueError:, java.io.IOException:,
+// Traceback do Python). ponytail: heurística; "No Error: found" sai vermelho
 export type LogLevel = 'bad' | 'warn' | 'dim' | '';
 const LEVEL: [Exclude<LogLevel, ''>, RegExp, RegExp][] = [
-  ['bad', /\b(FATAL|PANIC|CRIT(ICAL)?|ERROR|ERR|EMERG)\b|\b(Error|Exception|Traceback)\b:/, /\blevel["=: ]+"?(fatal|panic|crit|err)|\[(error|crit|alert|emerg)\]/i],
+  ['bad', /\b(FATAL|PANIC|CRIT(ICAL)?|ERROR|ERR|EMERG)\b|\b\w*(Error|Exception)\b:|\bTraceback \(most recent call last\)/, /\blevel["=: ]+"?(fatal|panic|crit|err)|\[(error|crit|alert|emerg)\]/i],
   ['warn', /\bWARN(ING)?\b|\bWarning:/, /\blevel["=: ]+"?warn|\[warn\]/i],
   ['dim', /\b(DEBUG|TRACE)\b/, /\blevel["=: ]+"?(debug|trace)|\[debug\]/i]];
 export const logLevel = (line: string): LogLevel => LEVEL.find(([, word, mark]) => word.test(line) || mark.test(line))?.[0] ?? '';
+// linha que continua a de cima num stack trace (indentada, "Caused by:", "... 3 more"): ela herda o nível da linha que
+// abriu o trace, para "Só erros" mostrar o trace inteiro. Recebe a linha sem o prefixo do serviço e sem o timestamp
+export const continues = (body: string): boolean => /^(\s+\S|Caused by:|\.\.\. \d+ more)/.test(body);
 
 // fatia liberável de uma categoria do docker system df (0 a 1), para a barra: o "(40%)" do Reclaimable, ou a
 // conta pelos tamanhos quando ele não vem (o build cache manda só "3.3GB"); null se não der para saber

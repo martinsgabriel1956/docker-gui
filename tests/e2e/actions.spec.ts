@@ -236,3 +236,13 @@ test('Iniciar tudo só mexe nos parados do projeto', async ({ page, gui }) => {
   await expect(toast(page)).toHaveText('db está de pé.');
   expect(gui.container('outro')!.State).toBe('exited');
 });
+
+test('Iniciar que falha por porta ocupada diz a causa no aviso e na linha', async ({ page, gui }) => {
+  const err = 'Error response from daemon: driver failed programming external connectivity on endpoint web: Bind for 0.0.0.0:8080 failed: port is already allocated';
+  await gui.open({ containers: [stopped('web', { fail: { start: err } })] });
+  await page.getByRole('button', { name: 'Iniciar web' }).click();
+  const hint = 'A porta do host já está em uso: pare o que usa ela ou troque a porta.';
+  await expect(toast(page)).toHaveText(`Não deu para iniciar web. ${hint}`);
+  await expect(row(page, 'web')).toContainText(hint);  // à vista; o erro do docker fica no "ver erro"
+  await expect(row(page, 'web').locator('pre')).toHaveText(err);
+});

@@ -278,9 +278,41 @@ class LogsAndHealthTest(ServerTest):
                      "500;rm", "all%00", "500&tail=all"):
             status, _ = self.request("GET", f"/api/logs/{HEX_ID}?tail={tail}")
             self.assertIn(status, (400, 404), tail)
-        for query in ("tail=500&x=1", "x=1", "tail=500&tail=all", "t=1&tail=500"):
+        self.assertEqual(self.request("GET", f"/api/logs/{HEX_ID}?tail=500&tail=all"), (400, "tail inválido"))
+        for query in ("tail=500&x=1", "x=1", "t=1&tail=500", "since=5m&until=1m"):
             status, _ = self.request("GET", f"/api/logs/{HEX_ID}?{query}")
-            self.assertEqual(status, 404, query)  # só ?tail=... e nada mais
+            self.assertEqual(status, 404, query)  # só ?tail= e ?since=, e nada mais
+        self.docker.assert_not_called()
+
+    def test_logs_since_from_whitelist(self):
+        for since in ("5m", "15m", "1h", "24h"):
+            self.docker.reset_mock()
+            self.assertEqual(self.request("GET", f"/api/logs/{HEX_ID}?tail=2000&since={since}")[0], 200, since)
+            self.docker.assert_called_once_with("logs", "--timestamps", "--tail", "2000", "--since", since, HEX_ID,
+                                                timeout=docker_gui.READ_TIMEOUT)
+
+    def test_logs_since_start_reads_started_at(self):
+        # docker: texto; podman: data com fuso. Os dois saem RFC 3339 no {{json}}
+        for started in ("2026-10-06T12:00:01.123456789Z", "2026-10-06T09:00:01.5-03:00"):
+            self.docker.reset_mock()
+            self.docker.side_effect = [ok(json.dumps(started) + "\n"), ok("oi\n")]
+            self.assertEqual(self.request("GET", f"/api/logs/{HEX_ID}?since=start"), (200, "oi\n"), started)
+            self.assertEqual(self.docker.call_args_list, [
+                mock.call("inspect", "--format", "{{json .State.StartedAt}}", HEX_ID),
+                mock.call("logs", "--timestamps", "--tail", "500", "--since", started, HEX_ID, timeout=docker_gui.READ_TIMEOUT)])
+
+    def test_logs_since_start_without_a_date_is_500(self):
+        for out in (fail("No such container\n"), ok('"--help"\n'), ok('{"x": 1}\n'), ok("não é json\n")):
+            self.docker.reset_mock()
+            self.docker.side_effect = [out]
+            status, _ = self.request("GET", f"/api/logs/{HEX_ID}?since=start")
+            self.assertEqual(status, 500, out)
+            self.assertEqual(self.docker.call_count, 1)  # o logs não roda
+
+    def test_logs_since_outside_whitelist_never_reaches_docker(self):
+        for since in ("", "5", "10m", "1d", "--help", "5m;rm", "2026-01-01T00:00:00Z", "START", "start&since=5m"):
+            status, body = self.request("GET", f"/api/logs/{HEX_ID}?since={since}")
+            self.assertEqual((status, body), (400, "since inválido"), since)
         self.docker.assert_not_called()
 
     def test_logs_error(self):
@@ -377,6 +409,15 @@ class LogsStreamTest(StreamTest):
         self.assertEqual((status, body), (200, 'data: "api-1  | oi\\n"\n\nevent: end\ndata:\n\n'))
         with open(os.path.join(self.dir, "args")) as f:
             self.assertEqual(f.read().split(), [*ComposeTest.BASE, "logs", "--no-color", "--timestamps", "--tail", "500", "--follow"])
+
+    def test_since_goes_to_the_stream(self):
+        self.fake_docker("echo oi")
+        self.assertEqual(self.request("GET", self.path() + "&since=15m")[0], 200)
+        with open(os.path.join(self.dir, "args")) as f:
+            self.assertEqual(f.read().split(), ["logs", "-f", "--timestamps", "--tail", "500", "--since", "15m", HEX_ID])
+        os.remove(os.path.join(self.dir, "args"))
+        self.assertEqual(self.request("GET", self.path() + "&since=1d"), (400, "since inválido"))
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "args")))
 
     def test_compose_project_stream_tail(self):
         self.docker.return_value = ok(ComposeTest.PS)
@@ -522,7 +563,8 @@ class InspectTest(ServerTest):
         "NetworkSettings": {"Networks": {"app_default": {"IPAddress": "172.18.0.2"}, "host": {"IPAddress": ""}}},
         "Mounts": [{"Type": "volume", "Name": "pgdata", "Source": "/var/lib/docker/volumes/pgdata/_data",
                     "Destination": "/var/lib/postgresql/data", "RW": True, "Driver": "local"}],
-        "Config": {"Env": ["POSTGRES_PASSWORD=s3cr3t=x", "EMPTY=", "BARE"]}}
+        "Config": {"Env": ["POSTGRES_PASSWORD=s3cr3t=x", "EMPTY=", "BARE"]},
+        "State": {"OOMKilled": True, "ExitCode": 137}, "RestartCount": 4}
 
     def test_env_masked_by_default(self):
         self.docker.return_value = ok(json.dumps(self.INFO) + "\n")
@@ -533,7 +575,8 @@ class InspectTest(ServerTest):
             "Networks": {"app_default": "172.18.0.2", "host": ""},
             "Mounts": [{"Type": "volume", "Name": "pgdata", "Source": "/var/lib/docker/volumes/pgdata/_data",
                         "Destination": "/var/lib/postgresql/data", "RW": True}],
-            "Env": [["POSTGRES_PASSWORD", None], ["EMPTY", None], ["BARE", None]]})
+            "Env": [["POSTGRES_PASSWORD", None], ["EMPTY", None], ["BARE", None]],
+            "OOMKilled": True, "RestartCount": 4})
         self.docker.assert_called_once_with("inspect", "--format", "{{json .}}", HEX_ID)
 
     def test_env_revealed_on_request(self):
@@ -544,8 +587,10 @@ class InspectTest(ServerTest):
     def test_minimal_inspect(self):
         # container sem restart policy, rede, mount nem env (ou campos null, como o docker às vezes manda)
         for info in ({}, {"HostConfig": {"RestartPolicy": {"Name": "", "MaximumRetryCount": 0}},
-                          "NetworkSettings": {"Networks": None}, "Mounts": None, "Config": {"Env": None}}):
-            self.assertEqual(docker_gui.summary(info), {"Restart": "no", "Networks": {}, "Mounts": [], "Env": []})
+                          "NetworkSettings": {"Networks": None}, "Mounts": None, "Config": {"Env": None},
+                          "State": None, "RestartCount": None}):
+            self.assertEqual(docker_gui.summary(info), {"Restart": "no", "Networks": {}, "Mounts": [], "Env": [],
+                                                        "OOMKilled": False, "RestartCount": 0})
 
     def test_inspect_error(self):
         self.docker.return_value = fail("Error: No such object: 0123456789ab\n")
@@ -607,12 +652,20 @@ class ComposeTest(ServerTest):
                 *self.BASE, *args, timeout=docker_gui.COMPOSE_TIMEOUT)])
 
     def test_restart_one_service(self):
-        self.assertEqual(docker_gui.COMPOSE_SERVICE, {"restart": ["restart"]})
+        self.assertEqual(docker_gui.COMPOSE_SERVICE, {"restart": ["restart"], "build": ["up", "-d", "--build", "--no-deps"]})
         self.docker.side_effect = [ok(self.PS), ok(stderr="Container shop-db-1  Started\n")]
         self.assertEqual(self.request("POST", "/api/compose/restart", body={**self.SHOP, "service": "db"}),
                          (200, "Container shop-db-1  Started"))
         self.assertEqual(self.docker.call_args_list, [self.ps_call(), mock.call(
             *self.BASE, "restart", "--", "db", timeout=docker_gui.COMPOSE_TIMEOUT)])
+
+    def test_build_one_service(self):
+        # reconstrói e recria só o api: --no-deps deixa o db como está
+        self.docker.side_effect = [ok(self.PS), ok(stderr="Container shop-api-1  Started\n")]
+        self.assertEqual(self.request("POST", "/api/compose/build", body={**self.SHOP, "service": "api"}),
+                         (200, "Container shop-api-1  Started"))
+        self.assertEqual(self.docker.call_args_list, [self.ps_call(), mock.call(
+            *self.BASE, "up", "-d", "--build", "--no-deps", "--", "api", timeout=docker_gui.COMPOSE_TIMEOUT)])
 
     def test_restart_service_must_be_from_the_project(self):
         # web existe, mas é do blog; o resto não é serviço de ninguém (nem vira flag do compose)
@@ -627,8 +680,9 @@ class ComposeTest(ServerTest):
     def test_restart_without_valid_service_is_400_without_docker(self):
         for body in (self.SHOP, {**self.SHOP, "service": ""}, {**self.SHOP, "service": 1},
                      {**self.SHOP, "service": ["db"]}, {**self.SHOP, "service": None}, {"service": "db"}):
-            status, _ = self.request("POST", "/api/compose/restart", body=body)
-            self.assertEqual(status, 400, body)
+            for action in docker_gui.COMPOSE_SERVICE:  # o build sem serviço não vira o rebuild do projeto inteiro
+                status, _ = self.request("POST", f"/api/compose/{action}", body=body)
+                self.assertEqual(status, 400, (action, body))
         self.docker.assert_not_called()
 
     def test_restart_unknown_pair_is_404(self):
@@ -665,6 +719,17 @@ class ComposeTest(ServerTest):
             timeout = docker_gui.ACTION_TIMEOUT if tail == "all" else docker_gui.READ_TIMEOUT
             self.assertEqual(self.docker.call_args_list, [self.ps_call(), mock.call(
                 *self.BASE, "logs", "--no-color", "--timestamps", *args, timeout=timeout)], tail)
+
+    def test_project_logs_since(self):
+        self.docker.side_effect = [ok(self.PS), ok("")]
+        self.assertEqual(self.request("GET", self.logs_path(**self.SHOP, since="1h"))[0], 200)
+        self.assertEqual(self.docker.call_args_list, [self.ps_call(), mock.call(
+            *self.BASE, "logs", "--no-color", "--timestamps", "--tail", "500", "--since", "1h", timeout=docker_gui.READ_TIMEOUT)])
+        self.docker.reset_mock()
+        # "start" é de um container só: no projeto, cada um subiu numa hora
+        for since in ("start", "", "--help"):
+            self.assertEqual(self.request("GET", self.logs_path(**self.SHOP, since=since)), (400, "since inválido"), since)
+        self.docker.assert_not_called()
 
     def test_project_logs_tail_outside_whitelist_is_400_without_docker(self):
         for tail in ("", "1", "-1", "ALL", "--help", "500 --help", "500;rm", ["500", "all"]):
@@ -720,7 +785,7 @@ class ComposeTest(ServerTest):
         self.docker.assert_not_called()
 
     def test_unknown_action(self):
-        for action in ("start", "rm", "UP", "exec", "build", "logs"):
+        for action in ("start", "rm", "UP", "exec", "Build", "logs"):
             status, _ = self.request("POST", f"/api/compose/{action}", body=self.SHOP)
             self.assertEqual(status, 404, action)
         self.docker.assert_not_called()
@@ -887,8 +952,8 @@ class DiskTest(ServerTest):
         self.assertEqual(self.request("GET", "/api/df"), (500, "Cannot connect to the Docker daemon"))
 
     def test_each_prune_runs_expected_command(self):
-        expected = {"images": ["image", "prune", "-a", "-f"], "volumes": ["volume", "prune", "-f"],
-                    "buildcache": ["builder", "prune", "-a", "-f"]}
+        expected = {"containers": ["container", "prune", "-f"], "images": ["image", "prune", "-a", "-f"],
+                    "volumes": ["volume", "prune", "-f"], "buildcache": ["builder", "prune", "-a", "-f"]}
         self.assertEqual(docker_gui.PRUNE, expected)  # mudou a allowlist? reveja o teste e o aviso na página
         self.docker.return_value = ok("Deleted Images:\nx\n\nTotal reclaimed space: 1.2GB\n")
         for kind, args in expected.items():
@@ -903,7 +968,7 @@ class DiskTest(ServerTest):
                          (500, "Error response from daemon: a prune operation is already running"))
 
     def test_unknown_prune_kind(self):
-        for kind in ("system", "containers", "all", "Images", "images/x", HEX_ID):
+        for kind in ("system", "container", "all", "Images", "images/x", HEX_ID):
             status, _ = self.request("POST", f"/api/prune/{kind}")
             self.assertEqual(status, 404, kind)
         self.docker.assert_not_called()
@@ -1533,7 +1598,7 @@ class PipeTerminalTest(TerminalTest):
         # seta para cima (sem TTY não faz nada), "a" apagado com Backspace
         sock.sendall(client_frame(b"echo $((6*7))\x1b[Aa\x7f\r"))
         out, notes = self.until(f, b"42\r\n")
-        self.assertEqual(notes, [docker_gui.NO_TTY])  # a página mostra o aviso
+        self.assertEqual(notes, [docker_gui.tr("Conectado, mas sem TTY: a imagem não tem o script, que o terminal usa no Windows. Comandos simples funcionam; vim, less, Tab e Ctrl+C não. Feche pelo ×.")])  # a página mostra o aviso
         self.assertIn(b"echo $((6*7))a\b \b\r\n", out)  # eco feito pelo servidor
         sock.sendall(client_frame(b'{"cols": 100, "rows": 30}', 1))  # sem TTY, nada a redimensionar
         sock.sendall(client_frame(b"exit\r"))
@@ -1623,15 +1688,20 @@ class MainTest(unittest.TestCase):
 
     def test_cli_from_env_and_context_flag(self):
         # patch com o próprio valor: o main() troca os globais e o mock os devolve no fim
+        # o LANG também: o main() o tira do locale, e o do CI (C.UTF-8) deixaria o resto da suíte em inglês
         with mock.patch.object(docker_gui, "CLI", docker_gui.CLI), mock.patch.object(docker_gui, "PAGE", docker_gui.PAGE), \
+                mock.patch.object(docker_gui, "LANG", docker_gui.LANG), \
                 mock.patch.dict(os.environ, {"DOCKER_GUI_CLI": "podman"}), \
-                mock.patch.object(sys, "argv", ["docker_gui.py", "--context", "a b"]), \
+                mock.patch.object(sys, "argv", ["docker_gui.py", "--context", "a b", "--lang", "en"]), \
                 mock.patch.object(docker_gui, "serve", side_effect=SystemExit):
             self.assertRaises(SystemExit, docker_gui.main)  # para antes de abrir porta e navegador
             self.assertEqual(docker_gui.CLI, ["podman", "--context", "a b"])
             # o "Copiar docker exec" da página usa o mesmo comando, com aspas de shell e escapado no HTML
             self.assertIn('data-cli="podman --context &#x27;a b&#x27;"', docker_gui.PAGE)
             self.assertIn('data-where="podman · a b" data-host=""', docker_gui.PAGE)
+            self.assertEqual(docker_gui.LANG, "en")  # o --lang vence o locale
+            self.assertIn('data-lang="en"', docker_gui.PAGE)
+        self.assertEqual(docker_gui.LANG, "pt")
 
     def test_where_asks_docker_for_the_current_context(self):
         ok = lambda out: subprocess.CompletedProcess([], 0, out, "")
