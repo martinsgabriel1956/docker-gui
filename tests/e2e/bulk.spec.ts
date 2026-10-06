@@ -126,9 +126,9 @@ test('Remover em lote em 2 passos, com quantos vão ser apagados', async ({ page
   await expect(remove).toHaveText('Remover… (2)');  // web está rodando: não entra
 
   await remove.click();
-  await expect(confirm).toHaveText('Apagar 2 containers');
-  await expect(bar(page)).toContainText('Apagar cron e velho de vez? Os volumes ficam. Esc cancela.');
-  await expect(page.locator('#shown')).toContainText('Clique em Apagar para apagar cron e velho de vez.');
+  await expect(confirm).toHaveText('Remover 2 containers');
+  await expect(bar(page)).toContainText('Remover cron e velho de vez? Os volumes ficam. Esc cancela.');
+  await expect(page.locator('#shown')).toContainText('Clique em Remover para apagar cron e velho de vez.');
   await page.keyboard.press('Escape');
   await expect(confirm).toBeHidden();
   await remove.click();

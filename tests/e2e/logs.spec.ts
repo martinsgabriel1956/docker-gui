@@ -316,6 +316,8 @@ test('reiniciar nos logs (r ou o botão) liga o ao vivo e marca onde o log novo 
   expect(await mark.evaluate(m => m.nextSibling?.textContent)).toBe(after);
   // a marca vem do CSS: Copiar e Baixar levam só o log
   await expect(page.locator('#lb')).toHaveText(before + after);
+  // o status também diz quando foi: a marca no log depende de o container escrever algo novo
+  await expect(page.locator('#dlg-status')).toContainText(/reiniciado às \d\d:\d\d:\d\d/);
 });
 
 test('erro e aviso ganham cor, e o timestamp fica apagado', async ({ page, gui }) => {
