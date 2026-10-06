@@ -102,7 +102,7 @@ test.describe('remover em 2 passos', () => {
     await page.getByRole('button', { name: 'Remover…' }).click();
     const confirm = page.getByRole('button', { name: 'Confirmar remoção de cron' });
     await expect(confirm).toBeVisible();
-    await expect(row(page, 'cron')).toContainText('Apagar cron de vez? Os volumes ficam. Esc cancela.');
+    await expect(row(page, 'cron')).toContainText('Remover cron de vez? Os volumes ficam. Esc cancela.');
 
     await page.keyboard.press('Escape');
     await expect(confirm).toBeHidden();
@@ -139,9 +139,7 @@ test.describe('remover em 2 passos', () => {
     await expect(page.getByRole('button', { name: 'Cancelar remoção de cron' })).toBeFocused();
     await page.clock.runFor(15_000);
     await expect(confirm).toBeVisible();
-    await page.keyboard.press('Shift+Tab');  // o Confirmar está a um Tab
-    await expect(page.getByRole('button', { name: 'Logs cron' })).toBeFocused();
-    await page.keyboard.press('Shift+Tab');
+    await page.keyboard.press('Shift+Tab');  // o Confirmar está a um Tab, na linha própria da confirmação
     await expect(confirm).toBeFocused();
     await page.clock.runFor(15_000);
     await expect(confirm).toBeVisible();
@@ -169,12 +167,25 @@ test.describe('remover em 2 passos', () => {
     });
   });
 
+  test('com a remoção armada, a principal fica inerte: clicar nela por hábito só cancela', async ({ page, gui }) => {
+    await gui.open({ containers: [stopped('cron')] });
+    await menu(page, 'cron').click();
+    await page.getByRole('button', { name: 'Remover…' }).click();
+    const start = page.getByRole('button', { name: 'Iniciar cron' });
+    await expect(start).toHaveAttribute('aria-disabled', 'true');
+    await start.click({ force: true });  // o clique por hábito, que o aria-disabled não impede
+    await expect(page.getByRole('button', { name: 'Confirmar remoção de cron' })).toBeHidden();
+    expect(gui.container('cron')!.State).toBe('exited');  // não iniciou nem removeu
+  });
+
   test('container rodando não tem Remover no menu', async ({ page, gui }) => {
     await gui.open({ containers: [ctr('web')] });
     await menu(page, 'web').click();
     await expect(page.getByRole('button', { name: 'Pausar' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Reiniciar', exact: true })).toHaveCount(0);  // fica à vista na linha
     await expect(page.getByRole('button', { name: 'Remover…' })).toHaveCount(0);
+    // no lugar, o porquê, desabilitado: o docker só remove container parado
+    await expect(page.getByRole('button', { name: 'Remover (indisponível: pare o container antes)' })).toHaveAttribute('aria-disabled', 'true');
   });
 });
 
@@ -221,7 +232,7 @@ test('Iniciar tudo só mexe nos parados do projeto', async ({ page, gui }) => {
       stopped('outro', { Labels: compose('blog', 'web') }),
     ],
   });
-  await page.getByRole('button', { name: 'Iniciar tudo do projeto shop (1)', exact: true }).click();
+  await page.getByRole('button', { name: 'Iniciar db do projeto shop', exact: true }).click();
   await expect(toast(page)).toHaveText('db está de pé.');
   expect(gui.container('outro')!.State).toBe('exited');
 });

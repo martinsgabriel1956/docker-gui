@@ -16,7 +16,7 @@ test('Configuração mostra o inspect resumido com o env mascarado', async ({ pa
   await page.locator('#insp summary').click();
   const body = page.locator('#insp-body');
   await expect(body.locator('dd')).toHaveText([
-    'unless-stopped',
+    'unless-stopped · sempre, menos se você parar',
     'app_default · 172.18.0.2',
     'volume pgdata → /var/lib/postgresql/databind /home/eu/init.sql → /docker-entrypoint-initdb.d/init.sql (somente leitura)',
     /^POSTGRES_PASSWORD=••••••\(oculto\)PGDATA=••••••\(oculto\)Revelar valores$/,
@@ -45,6 +45,6 @@ test('container sem mounts, redes nem env', async ({ page, gui }) => {
   await gui.open({ containers: [ctr('web')] });
   await page.getByRole('button', { name: 'Logs web' }).click();
   await page.locator('#insp summary').click();
-  await expect(page.locator('#insp-body dd')).toHaveText(['no', 'nenhuma', 'nenhum', 'nenhuma']);
+  await expect(page.locator('#insp-body dd')).toHaveText(['no · não reinicia', 'nenhuma', 'nenhum', 'nenhuma']);
   await expect(page.getByRole('button', { name: 'Revelar valores' })).toHaveCount(0);
 });

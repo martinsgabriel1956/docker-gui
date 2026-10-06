@@ -95,7 +95,7 @@ const OBJECTS = (): DockerState => ({
   ],
 });
 const item = (page: import('@playwright/test').Page, k: string, text: string) =>
-  page.locator(`#obj-${k}-list li`).filter({ hasText: text });
+  page.locator(`#obj-${k}-list tbody tr`).filter({ hasText: text });
 
 test('imagens, volumes e redes só vão ao docker quando a aba abre', async ({ page, gui }) => {
   const asked: string[] = [];
@@ -106,21 +106,22 @@ test('imagens, volumes e redes só vão ao docker quando a aba abre', async ({ p
 
   await openTab(page, 'images');
   await expect(page.locator('#tab-images')).toHaveText('Imagens · 4');
-  await expect(item(page, 'images', 'postgres:16'))
-    .toContainText(`${sha('postgres').slice(0, 12)} · 412MB · criada há 2 sem · em uso por db`);
-  await expect(item(page, 'images', 'nginx:latest')).toContainText('em uso por web');  // parado também conta
-  await expect(item(page, 'images', 'app:latest, app:1.0')).toContainText('sem uso');  // duas tags, uma imagem
+  // colunas como o docker images: IMAGEM, ID, TAMANHO, CRIADA, EM USO POR
+  await expect(item(page, 'images', 'postgres:16').locator('td'))
+    .toHaveText([`ID: ${sha('postgres').slice(0, 12)}`, 'Tamanho: 412MB', 'Criada: há 2 sem', 'Em uso por: db', 'Remover…']);
+  await expect(item(page, 'images', 'nginx:latest')).toContainText('Em uso por: web');  // parado também conta
+  await expect(item(page, 'images', 'app:latest, app:1.0')).toContainText('Em uso por: nenhum container');  // duas tags, uma imagem
   await expect(item(page, 'images', 'sem tag')).toContainText('dangling');
-  await expect(item(page, 'images', 'sem tag')).toContainText(`${sha('old').slice(0, 12)} · 12MB`);
+  await expect(item(page, 'images', 'sem tag')).toContainText(`ID: ${sha('old').slice(0, 12)}Tamanho: 12MB`);
   expect(asked.filter(p => /volumes|networks/.test(p))).toEqual([]);
 
   await openTab(page, 'volumes');
-  await expect(item(page, 'volumes', 'pgdata')).toContainText('local · em uso por db');
-  await expect(item(page, 'volumes', 'cache')).toContainText('sem uso');
+  await expect(item(page, 'volumes', 'pgdata')).toContainText('Driver: localEm uso por: db');
+  await expect(item(page, 'volumes', 'cache')).toContainText('Em uso por: nenhum container');
   await expect(item(page, 'volumes', 'anônimo')).toContainText(ANON.slice(0, 12));
 
   await openTab(page, 'networks');
-  await expect(item(page, 'networks', 'loja_default')).toContainText('bridge · local · em uso por db');
+  await expect(item(page, 'networks', 'loja_default')).toContainText('Driver: bridgeEscopo: localEm uso por: db');
   await expect(item(page, 'networks', 'padrão')).toContainText(['bridge', 'host', 'none']);
   for (const builtin of ['bridge', 'host', 'none'])
     await expect(page.getByRole('button', { name: `Remover a rede ${builtin}` })).toHaveCount(0);
@@ -133,7 +134,7 @@ test('remover um volume usa a confirmação em 2 passos', async ({ page, gui }) 
   await page.getByRole('button', { name: 'Remover o volume cache' }).click();
   const confirm = page.getByRole('button', { name: 'Confirmar remoção de o volume cache' });
   await expect(page.getByRole('button', { name: 'Cancelar remoção de o volume cache' })).toBeFocused();
-  await expect(item(page, 'volumes', 'cache')).toContainText('Apagar o volume cache? Os dados dele se perdem. Esc cancela.');
+  await expect(item(page, 'volumes', 'cache')).toContainText('Remover o volume cache? Os dados dele se perdem. Esc cancela.');
 
   await page.keyboard.press('Escape');
   await expect(confirm).toBeHidden();
@@ -190,7 +191,7 @@ test('remover uma rede criada; as padrão não têm botão', async ({ page, gui 
   await gui.open(OBJECTS());
   await openTab(page, 'networks');
   await page.getByRole('button', { name: 'Remover a rede velha' }).click();
-  await expect(item(page, 'networks', 'velha')).toContainText('Apagar a rede velha? Esc cancela.');
+  await expect(item(page, 'networks', 'velha')).toContainText('Remover a rede velha? Esc cancela.');
   await page.waitForTimeout(700);
   await page.getByRole('button', { name: 'Confirmar remoção de a rede velha' }).click();
   await expect(page.locator('#toast')).toHaveText('Rede velha removida.');
@@ -226,4 +227,19 @@ test('a aba fica na URL, o voltar do navegador volta de aba e as setas andam ent
   await page.keyboard.press('/');
   await expect(page.locator('#q')).toBeFocused();
   await expect(page.locator('#panel-containers')).toBeVisible();
+});
+
+test('limpar volumes diz quais saem: no Docker, só os anônimos sem uso', async ({ page, gui }) => {
+  await gui.open(OBJECTS());
+  await openTab(page, 'volumes');
+  await page.getByRole('button', { name: 'Limpar volumes' }).click();
+  await expect(page.locator('#df-volumes')).toContainText(`Vai apagar 1 volume anônimo sem uso: ${ANON.slice(0, 12)}…. Os dados deles se perdem. Os nomeados ficam.`);
+});
+
+test('cada categoria do disco tem a barra do que a limpeza libera', async ({ page, gui }) => {
+  await gui.open({ ...OBJECTS(), df: DF });
+  await openTab(page, 'images');
+  // 1.2GB (29%) das imagens; o build cache não traz a porcentagem e sai pela conta (tudo)
+  await expect(page.locator('#df-images span[style]').first()).toHaveAttribute('style', 'width:29%');
+  await expect(page.locator('#df-images span[style]').last()).toHaveAttribute('style', 'width:100%');
 });

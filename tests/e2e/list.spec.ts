@@ -22,7 +22,7 @@ test('problemas vão para a faixa de atenção e o resto fica agrupado por proje
   ]);
   const head = page.locator('#rows tr[data-key="g:shop"]');
   await expect(head).toContainText('compose · 2 de 3 rodando');
-  await expect(head).toContainText('1 na faixa de atenção ↑');
+  await expect(head).toContainText('1 na faixa de atenção, acima');
   await expect(page.locator('#rows tr[data-key="g:"]')).toContainText('Sem projeto compose');
 });
 
@@ -51,8 +51,8 @@ test('o cabeçalho diz em qual daemon a página age, em âmbar quando é remoto'
   await expect(page.locator('#toast')).toContainText('producao · web parado.');
   await page.locator('summary[aria-label="Mais ações para web"]').click();
   await page.getByRole('button', { name: 'Remover…' }).click();
-  await expect(row(page, 'web')).toContainText('producao · Apagar web de vez?');
-  await expect(page.locator('#shown')).toContainText('No daemon remoto producao: Clique em Confirmar para apagar web de vez.');
+  await expect(row(page, 'web')).toContainText('producao · Remover web de vez?');
+  await expect(page.locator('#shown')).toContainText('No daemon remoto producao: Clique em Remover para apagar web de vez.');
 });
 
 test('quem caiu mostra a última linha do log na faixa de atenção', async ({ page, gui }) => {

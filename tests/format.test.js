@@ -236,13 +236,15 @@ test('pushSample recomeça a série depois de um buraco (aba escondida, servidor
   assert.deepEqual(f.pushSample(buf, {t: 60_000, cpu: 3, mem: 3}), [{t: 60_000, cpu: 3, mem: 3}]);
 });
 
-test('sparkPoints alinha à direita numa janela fixa e escala de 0 ao máximo', () => {
+test('sparkPoints ocupa a largura toda e escala de 0 ao máximo', () => {
   // janela de 3 leituras em 40 px: cada uma ocupa 20 px; 14 px de altura com 1 de margem
   assert.equal(f.sparkPoints([0, 5, 10], 40, 14, 3), '0,13 20,7 40,1');
-  assert.equal(f.sparkPoints([10, 10], 40, 14, 3), '20,1 40,1');  // série menor que a janela começa no meio
-  assert.equal(f.sparkPoints([0, 0], 40, 14, 3), '20,13 40,13');  // tudo zero não divide por zero
+  // série menor que a janela se estica até ela encher; sem variação, fica no meio da altura (no pé parecia sublinhado)
+  assert.equal(f.sparkPoints([10, 10], 40, 14, 3), '0,7 40,7');
+  assert.equal(f.sparkPoints([0, 0], 40, 14, 3), '0,7 40,7');  // tudo zero não divide por zero
+  assert.equal(f.sparkPoints([1, 2, 3], 40, 14, 60), '0,9 20,5 40,1');
   // piso: 0,5% de CPU com piso de 1% fica na metade, não no topo
-  assert.equal(f.sparkPoints([0.5, 0.5], 40, 14, 3, 1), '20,7 40,7');
+  assert.equal(f.sparkPoints([0.5, 1], 40, 14, 3, 1), '0,7 40,1');
 });
 
 test('trend descreve o sparkline em palavras', () => {
@@ -346,4 +348,41 @@ test('bulkSummary junta sucessos e falhas num aviso só', () => {
   // só a primeira linha do erro, sem ponto duplicado; mensagem vazia não some
   assert.equal(f.bulkSummary('iniciado', 0, [['a', 'deu ruim.\ndetalhe'], ['b', '']]), '2 falharam: a: deu ruim; b: erro sem mensagem.');
   assert.equal(f.bulkSummary('parado', 1, [['a', 'x'], ['b', 'y'], ['c', 'z'], ['d', 'w']]), '1 parado, 4 falharam: a: x; b: y; e mais 2.');
+});
+
+test('logLevel acha o nível pela palavra em maiúsculas, pelo level= e pelo [error] do nginx', () => {
+  assert.equal(f.logLevel('2026-10-05T19:03:40Z ERROR db: connection refused'), 'bad');
+  assert.equal(f.logLevel('api-1  | 2026-10-05T19:03:40Z FATAL boom'), 'bad');
+  assert.equal(f.logLevel('time=1 level=error msg="falhou"'), 'bad');
+  assert.equal(f.logLevel('{"level":"error","msg":"x"}'), 'bad');
+  assert.equal(f.logLevel('2026/10/05 [error] 7#7: *1 open() failed'), 'bad');
+  assert.equal(f.logLevel('Error: Cannot find module x'), 'bad');
+  assert.equal(f.logLevel('2026-10-05 WARN slow query 812ms'), 'warn');
+  assert.equal(f.logLevel('level=warning msg=x'), 'warn');
+  assert.equal(f.logLevel('2026-10-05 DEBUG cache miss'), 'dim');
+  assert.equal(f.logLevel('{"level":"debug"}'), 'dim');
+  // palavra comum no meio da frase não é nível
+  assert.equal(f.logLevel('processed 10 jobs, 0 errors'), '');
+  assert.equal(f.logLevel('a warning about deprecation'), '');
+  assert.equal(f.logLevel('INFO server listening on :8080'), '');
+});
+
+test('reclaimShare lê a porcentagem do df ou faz a conta pelos tamanhos', () => {
+  const d = (Size, Reclaimable) => ({Type: 'Images', TotalCount: '1', Active: '0', Size, Reclaimable});
+  assert.equal(f.reclaimShare(d('5.2GB', '2.1GB (40%)')), 0.4);
+  assert.equal(f.reclaimShare(d('3.3GB', '3.3GB')), 1);
+  assert.equal(f.reclaimShare(d('2GB', '500MB')), 0.25);
+  assert.equal(f.reclaimShare(d('0B', '0B')), null);
+  assert.equal(f.reclaimShare(d('1GB', '2GB')), 1);  // o df às vezes conta mais liberável que o total
+});
+
+test('prunedVolumes: sem uso; no Docker só os anônimos, no Podman os nomeados também', () => {
+  const anon = 'a'.repeat(64), vs = [{Name: anon, Driver: 'local', Containers: []}, {Name: 'dados', Driver: 'local', Containers: []},
+                                     {Name: 'b'.repeat(64), Driver: 'local', Containers: ['web']}];
+  assert.deepEqual(f.prunedVolumes(vs, false).map(v => v.Name), [anon]);
+  assert.deepEqual(f.prunedVolumes(vs, true).map(v => v.Name), [anon, 'dados']);
+});
+
+test('sparkPoints põe série sem variação no meio da altura', () => {
+  assert.equal(f.sparkPoints([5, 5, 5], 48, 14, 3), '0,7 24,7 48,7');
 });

@@ -6,31 +6,32 @@
 <style>/*CSS*/</style>
 </head>
 <body class="min-h-screen bg-canvas text-fg-soft antialiased selection:bg-accent/30">
-<a href="#table" class="sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-50 focus:rounded-md focus:bg-fg-strong focus:px-3 focus:py-2 focus:text-sm focus:text-canvas">Pular para a lista</a>
+<a href="#table" class="sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-50 focus:rounded focus:bg-fg-strong focus:px-3 focus:py-2 focus:text-sm focus:text-canvas">Pular para a lista</a>
 <!-- só com daemon remoto (app.ts): lembra o tempo todo onde as ações caem -->
 <div id="remote" role="note" hidden class="sticky top-0 z-30 border-b border-warn/40 bg-warn/15 px-4 py-2 text-center text-sm text-warn-fg"></div>
-<main class="max-w-7xl mx-auto px-4 pt-8 pb-[calc(2rem+var(--dock,0px))]">
-  <header class="flex flex-wrap items-center justify-between gap-4 mb-4">
+<!-- o cabeçalho em superfície própria, de ponta a ponta: onde a página age, de onde a lista vem e as abas, na borda de baixo -->
+<div class="border-b border-line bg-raised"><div class="max-w-7xl mx-auto px-4">
+  <header class="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 pt-5 pb-3 max-lg:pt-3">
     <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
-      <h1 class="text-2xl font-semibold text-fg-strong tracking-tight flex items-center gap-2.5">
-        <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" class="size-6 text-accent"><path d="M12 2.5 3.5 7v10l8.5 4.5 8.5-4.5V7z"/><path d="M3.5 7 12 11.5 20.5 7M12 11.5v10"/></svg>
-        Docker GUI
-      </h1>
+      <h1 class="text-2xl max-lg:text-xl font-semibold text-fg-strong tracking-tight">Docker GUI</h1>
       <!-- onde as ações caem: o contexto do docker, em âmbar quando o daemon é remoto (app.ts preenche) -->
-      <span id="where" class="empty:hidden font-mono text-xs px-2 py-0.5 rounded-md ring-1 ring-line-strong text-muted"></span>
+      <span id="where" class="empty:hidden font-mono text-xs px-2 py-0.5 rounded ring-1 ring-line-strong text-muted"></span>
+      <!-- de onde a lista vem: eventos do docker (ao vivo) ou poll de 2 s (app.ts, showLive) -->
+      <span id="live" class="font-mono text-xs text-muted"></span>
     </div>
     <div class="flex flex-wrap items-center gap-x-4">
       <button popovertarget="hint" aria-keyshortcuts="?" class="max-lg:hidden text-xs text-muted hover:text-fg rounded focus-visible:outline-2 focus-visible:outline-accent">
         <kbd class="font-mono px-1 rounded ring-1 ring-line-strong text-fg-soft">?</kbd> Atalhos</button>
       <button id="notify" hidden onclick="askNotify()" class="max-lg:py-3 text-xs text-accent-fg underline underline-offset-4 hover:text-accent-soft rounded focus-visible:outline-2 focus-visible:outline-accent">Notificar quando algo der problema</button>
       <!-- popover nativo: fecha com Esc e com clique fora -->
-      <div id="hint" popover class="m-auto w-[min(26rem,calc(100vw-2rem))] rounded-xl bg-raised ring-1 ring-line-strong p-4 text-sm text-fg-soft shadow-lg shadow-black/40 backdrop:bg-transparent">
+      <div id="hint" popover class="m-auto w-[min(26rem,calc(100vw-2rem))] rounded-lg bg-raised ring-1 ring-line-strong p-4 text-sm text-fg-soft shadow-lg shadow-black/40 backdrop:bg-black/40">
         <p class="mb-3 font-semibold text-fg-strong">Atalhos do teclado</p>
         <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 [&_kbd]:font-mono [&_kbd]:text-xs [&_kbd]:px-1.5 [&_kbd]:rounded [&_kbd]:ring-1 [&_kbd]:ring-line-strong [&_kbd]:text-fg-strong">
           <dt><kbd>/</kbd></dt><dd>busca na lista de containers (nos logs, filtra as linhas)</dd>
           <dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>nas abas, troca de aba</dd>
           <dt><kbd>↑</kbd> <kbd>↓</kbd></dt><dd>anda entre os botões Logs</dd>
-          <dt><kbd>r</kbd></dt><dd>reinicia o container da linha em foco</dd>
+          <dt><kbd>Enter</kbd></dt><dd>no botão Logs, abre os logs</dd>
+          <dt><kbd>r</kbd></dt><dd>reinicia o container da linha em foco (nos logs, o dos logs)</dd>
           <dt><kbd>x</kbd></dt><dd>marca ou desmarca a linha em foco</dd>
           <dt><kbd>a</kbd></dt><dd>marca ou desmarca todos os visíveis</dd>
           <dt><kbd>z</kbd></dt><dd>desfaz a última ação (Iniciar de novo, Retomar)</dd>
@@ -41,30 +42,31 @@
     </div>
   </header>
   <!-- abas: Containers é a principal; as outras só vão ao docker quando abrem (app.ts). Setas, Home e End andam entre elas -->
-  <div id="tabs" role="tablist" aria-label="Seções" class="flex overflow-x-auto [scrollbar-width:none] border-b border-line mb-6">
+  <div id="tabs" role="tablist" aria-label="Seções" class="flex overflow-x-auto [scrollbar-width:none] -mb-px">
     <button role="tab" id="tab-containers" aria-controls="panel-containers" aria-selected="true" tabindex="0" onclick="pickTab('containers')"
       class="max-lg:min-h-11 px-3 max-sm:px-2 py-2 border-b-2 border-transparent text-sm font-medium text-muted whitespace-nowrap hover:text-fg aria-selected:border-accent aria-selected:text-fg-strong focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent">Containers</button>
     <button role="tab" id="tab-images" aria-controls="panel-images" aria-selected="false" tabindex="-1" onclick="pickTab('images')"
-      class="max-lg:min-h-11 px-3 max-sm:px-2 py-2 border-b-2 border-transparent text-sm font-medium text-muted whitespace-nowrap hover:text-fg aria-selected:border-accent aria-selected:text-fg-strong focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent">Imagens<span id="obj-images-n" class="font-normal text-muted"></span></button>
+      class="max-lg:min-h-11 px-3 max-sm:px-2 py-2 border-b-2 border-transparent text-sm font-medium text-muted whitespace-nowrap hover:text-fg aria-selected:border-accent aria-selected:text-fg-strong focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent">Imagens<span id="obj-images-n" class="font-mono text-xs font-normal text-muted"></span></button>
     <button role="tab" id="tab-volumes" aria-controls="panel-volumes" aria-selected="false" tabindex="-1" onclick="pickTab('volumes')"
-      class="max-lg:min-h-11 px-3 max-sm:px-2 py-2 border-b-2 border-transparent text-sm font-medium text-muted whitespace-nowrap hover:text-fg aria-selected:border-accent aria-selected:text-fg-strong focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent">Volumes<span id="obj-volumes-n" class="font-normal text-muted"></span></button>
+      class="max-lg:min-h-11 px-3 max-sm:px-2 py-2 border-b-2 border-transparent text-sm font-medium text-muted whitespace-nowrap hover:text-fg aria-selected:border-accent aria-selected:text-fg-strong focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent">Volumes<span id="obj-volumes-n" class="font-mono text-xs font-normal text-muted"></span></button>
     <button role="tab" id="tab-networks" aria-controls="panel-networks" aria-selected="false" tabindex="-1" onclick="pickTab('networks')"
-      class="max-lg:min-h-11 px-3 max-sm:px-2 py-2 border-b-2 border-transparent text-sm font-medium text-muted whitespace-nowrap hover:text-fg aria-selected:border-accent aria-selected:text-fg-strong focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent">Redes<span id="obj-networks-n" class="font-normal text-muted"></span></button>
+      class="max-lg:min-h-11 px-3 max-sm:px-2 py-2 border-b-2 border-transparent text-sm font-medium text-muted whitespace-nowrap hover:text-fg aria-selected:border-accent aria-selected:text-fg-strong focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent">Redes<span id="obj-networks-n" class="font-mono text-xs font-normal text-muted"></span></button>
   </div>
+</div></div>
+<main class="max-w-7xl mx-auto px-4 pt-6 max-lg:pt-4 pb-[calc(2rem+var(--dock,0px))]">
   <p id="shown" class="sr-only" aria-live="polite"></p>
 
   <div id="banner" role="alert" class="hidden mb-4 rounded-lg ring-1 ring-warn/30 bg-warn/10 px-4 py-3 text-sm"></div>
 
   <section id="panel-containers" role="tabpanel" aria-labelledby="tab-containers">
-    <div class="flex flex-wrap items-start justify-between gap-4 mb-6">
-      <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
-        <button id="new" onclick="openCreate()" class="px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 rounded-md text-sm font-medium ring-1 ring-accent/40 bg-accent/10 text-accent-fg hover:bg-accent/20 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">+ Novo container</button>
-        <div id="count" role="group" aria-label="Filtrar por estado" class="flex flex-wrap gap-1 text-sm text-muted">Carregando…</div>
-      </div>
-      <div class="w-full sm:w-72">
+    <!-- no celular a triagem vem primeiro: contagens, busca e, por último, o "Novo container" (tarefa rara) -->
+    <div class="flex flex-wrap items-center gap-x-4 gap-y-3 mb-6 max-lg:mb-4">
+        <button id="new" onclick="openCreate()" class="max-lg:order-3 px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 rounded text-sm font-medium ring-1 ring-accent/40 bg-accent/10 text-accent-fg hover:bg-accent/20 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">+ Novo container</button>
+        <div id="count" role="group" aria-label="Filtrar por estado" class="min-w-0 max-lg:w-full flex flex-wrap gap-1 text-sm text-muted">Carregando…</div>
+      <div class="w-full sm:w-72 lg:ml-auto max-lg:order-2">
         <label for="q" class="sr-only">Filtrar containers por nome, imagem ou projeto</label>
         <input id="q" type="search" placeholder="Filtrar por nome, imagem ou projeto…" aria-describedby="q-hint"
-          class="w-full rounded-lg bg-raised ring-1 ring-line px-3 py-2 max-lg:py-3 text-sm text-fg-strong placeholder:text-muted focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+          class="w-full rounded bg-raised ring-1 ring-line px-3 py-2 max-lg:py-3 text-sm text-fg-strong placeholder:text-muted focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
         <!-- o que o leitor de tela ouve ao focar a busca: só o atalho dela, não a lista inteira do popover -->
         <span id="q-hint" class="sr-only">Atalho: barra (/) volta para esta busca; interrogação (?) mostra todos os atalhos.</span>
       </div>
@@ -72,17 +74,19 @@
 
     <!-- ações em lote: só aparece com algo selecionado. Flutua embaixo (fora do fluxo: marcar uma caixa não empurra a tabela
          para longe do cursor), mas fica aqui no DOM, antes da lista que ela comanda, para o Tab e o leitor de tela -->
-    <div id="bulk" role="region" aria-label="Ações em lote" class="hidden fixed bottom-4 left-1/2 -translate-x-1/2 z-30 w-max max-w-[min(64rem,calc(100vw-2rem))] flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl ring-1 ring-accent/40 bg-raised px-4 py-2.5 shadow-lg shadow-black/30"></div>
+    <div id="bulk" role="region" aria-label="Ações em lote" class="hidden fixed bottom-4 left-1/2 -translate-x-1/2 z-30 w-max max-w-[min(64rem,calc(100vw-2rem))] flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg ring-1 ring-accent/40 bg-raised px-4 py-2.5 shadow-lg shadow-black/30"></div>
+    <!-- aviso do compose down armado (app.ts, render): no pé da tela, para a tabela não se mexer nem esconder linha -->
+    <div id="armdock" aria-hidden="true" class="hidden fixed bottom-4 left-1/2 -translate-x-1/2 z-30 w-max max-w-[min(48rem,calc(100vw-2rem))] rounded-lg ring-1 ring-bad/50 bg-raised px-4 py-2.5 shadow-lg shadow-black/30"></div>
     <!-- fora da barra: região viva escondida com display:none não anuncia nada -->
     <p id="sel-live" class="sr-only" aria-live="polite"></p>
 
-    <div id="table" tabindex="-1" class="rounded-xl ring-1 ring-line bg-raised/40 overflow-x-auto transition-opacity motion-reduce:transition-none focus:outline-none">
+    <div id="table" tabindex="-1" class="rounded-lg ring-1 ring-line bg-raised/40 overflow-x-auto transition-opacity motion-reduce:transition-none focus:outline-none">
       <table role="table" aria-label="Containers" class="w-full text-left max-lg:block">
         <!-- no celular o cabeçalho some, menos o "selecionar todos" -->
-        <thead role="rowgroup" class="max-lg:block text-xs uppercase tracking-wider text-muted">
+        <thead role="rowgroup" class="max-lg:block font-mono text-[11px] uppercase text-muted">
           <tr role="row" class="max-lg:block"><th role="columnheader" scope="col" aria-label="Nome" class="py-3 pl-4 font-medium max-lg:block max-lg:px-4"><div class="flex items-center gap-3">
                 <input id="all" type="checkbox" disabled onchange="selectAll(this.checked)" class="size-4 max-lg:size-6 shrink-0 accent-accent cursor-pointer disabled:cursor-default focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
-                <label for="all" class="lg:sr-only normal-case tracking-normal text-sm cursor-pointer">Selecionar todos os visíveis</label><span class="max-lg:hidden">Nome</span></div></th>
+                <label for="all" class="lg:sr-only font-sans normal-case text-sm cursor-pointer">Selecionar todos os visíveis</label><span class="max-lg:hidden">Nome</span></div></th>
               <th role="columnheader" scope="col" class="font-medium max-lg:hidden">Imagem</th>
               <th role="columnheader" scope="col" class="font-medium max-lg:hidden">Status</th><th role="columnheader" scope="col" class="font-medium max-lg:hidden">Portas</th>
               <th role="columnheader" scope="col" class="pr-4 font-medium max-lg:hidden"><span class="sr-only">Ações</span></th></tr>
@@ -94,28 +98,28 @@
 
   <!-- o docker system df é caro (soma os volumes): só roda ao abrir a aba, nunca no poll -->
   <section id="panel-images" role="tabpanel" aria-labelledby="tab-images" hidden class="space-y-4">
-    <div id="df-images" class="rounded-xl ring-1 ring-line bg-raised/40 px-4 text-sm divide-y divide-line/70"></div>
-    <div id="obj-images-list" class="rounded-xl ring-1 ring-line bg-raised/40 px-4 text-sm"></div>
+    <div id="df-images" class="rounded-lg ring-1 ring-line bg-raised/40 px-4 text-sm divide-y divide-line/70"></div>
+    <div id="obj-images-list" class="rounded-lg ring-1 ring-line bg-raised/40 text-sm overflow-x-auto"></div>
   </section>
   <section id="panel-volumes" role="tabpanel" aria-labelledby="tab-volumes" hidden class="space-y-4">
-    <div id="df-volumes" class="rounded-xl ring-1 ring-line bg-raised/40 px-4 text-sm divide-y divide-line/70"></div>
-    <div id="obj-volumes-list" class="rounded-xl ring-1 ring-line bg-raised/40 px-4 text-sm"></div>
+    <div id="df-volumes" class="rounded-lg ring-1 ring-line bg-raised/40 px-4 text-sm divide-y divide-line/70"></div>
+    <div id="obj-volumes-list" class="rounded-lg ring-1 ring-line bg-raised/40 text-sm overflow-x-auto"></div>
   </section>
   <section id="panel-networks" role="tabpanel" aria-labelledby="tab-networks" hidden class="space-y-4">
-    <div id="obj-networks-list" class="rounded-xl ring-1 ring-line bg-raised/40 px-4 text-sm"></div>
+    <div id="obj-networks-list" class="rounded-lg ring-1 ring-line bg-raised/40 text-sm overflow-x-auto"></div>
   </section>
 </main>
 
 <!-- coluna de altura fixa: o container (encolhe e rola se precisar), as ferramentas dos logs e, com o resto, os logs -->
-<dialog id="dlg" aria-labelledby="dlg-title" class="m-auto w-[min(1100px,95vw)] h-[min(56rem,92dvh)] open:flex flex-col overflow-hidden rounded-xl bg-raised text-fg-soft ring-1 ring-line-strong backdrop:bg-black/70 p-0">
+<dialog id="dlg" aria-labelledby="dlg-title" class="m-auto w-[min(1100px,95vw)] h-[min(56rem,92dvh)] max-lg:w-screen max-lg:h-dvh max-lg:max-w-none max-lg:max-h-none max-lg:rounded-none max-lg:ring-0 open:flex flex-col overflow-hidden rounded-lg bg-raised text-fg-soft ring-1 ring-line-strong backdrop:bg-black/70 p-0">
   <div class="min-h-0 overflow-auto px-4 py-3 border-b border-line space-y-2">
     <div class="flex flex-wrap items-start gap-x-3 gap-y-2">
       <div class="mr-auto min-w-0 flex-1 basis-56">
         <h2 id="dlg-title" class="text-lg font-semibold text-fg-strong truncate">Logs · <span id="lt"></span></h2>
-        <div id="dlg-status" class="text-sm mt-0.5"></div>
+        <div id="dlg-status" class="font-mono text-data mt-0.5"></div>
       </div>
       <span id="dlg-acts" class="flex items-center gap-1.5 max-lg:gap-2 empty:hidden max-lg:order-last max-lg:basis-full"></span>
-      <button onclick="dlg.close(); afterClose()" aria-label="Fechar logs" class="shrink-0 grid place-items-center size-8 max-lg:size-11 rounded-md text-muted hover:text-fg-strong hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent">
+      <button onclick="dlg.close(); afterClose()" aria-label="Fechar logs" class="shrink-0 grid place-items-center size-8 max-lg:size-11 rounded text-muted hover:text-fg-strong hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent">
         <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="size-4"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
     </div>
     <details id="insp" ontoggle="this.open && loadInspect()" class="text-xs">
@@ -126,42 +130,43 @@
   <!-- ferramentas dos logs, coladas na caixa: filtro (só na página; / foca o campo, como a busca da lista) e o que fazer com o texto -->
   <div class="shrink-0 px-4 pt-3 pb-2 flex flex-wrap items-center gap-2">
     <label for="lf" class="sr-only">Filtrar linhas dos logs</label>
-    <input id="lf" type="search" placeholder="Filtrar linhas… (atalho /)" aria-keyshortcuts="/" aria-describedby="lcount" autocomplete="off" spellcheck="false"
-      class="flex-1 min-w-48 sm:max-w-72 rounded-md bg-canvas ring-1 ring-line-strong/80 px-2.5 py-1 max-lg:py-3 text-xs max-lg:text-sm text-fg-strong placeholder:text-muted focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+    <input id="lf" type="search" placeholder="Filtrar linhas…" aria-keyshortcuts="/" aria-describedby="lcount" autocomplete="off" spellcheck="false"
+      class="flex-1 min-w-48 sm:max-w-72 rounded bg-canvas ring-1 ring-line-strong/80 px-2.5 py-1 max-lg:py-3 text-xs max-lg:text-sm text-fg-strong placeholder:text-muted focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
     <span id="lcount" aria-live="polite" aria-atomic="true" class="text-xs text-muted empty:hidden"></span>
     <span class="ml-auto flex flex-wrap items-center gap-1.5 max-lg:gap-2">
-      <button id="follow" aria-pressed="false" aria-label="Acompanhar ao vivo" onclick="toggleFollow()" class="group px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover aria-pressed:bg-accent/15 aria-pressed:text-accent-soft aria-pressed:ring-accent/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"><span aria-hidden="true" class="hidden group-aria-pressed:inline-block size-1.5 mr-1.5 align-middle rounded-full bg-accent animate-pulse motion-reduce:animate-none"></span>Ao vivo</button>
-      <button id="refresh" onclick="refreshLogs()" class="max-lg:hidden px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent aria-disabled:opacity-40">Atualizar</button>
-      <button onclick="copyLogs()" class="max-lg:hidden px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Copiar</button>
-      <button onclick="downloadLogs()" class="max-lg:hidden px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Baixar .log</button>
+      <button id="follow" aria-pressed="false" aria-label="Acompanhar ao vivo" onclick="followClick()" class="group px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover aria-pressed:bg-accent/15 aria-pressed:text-accent-soft aria-pressed:ring-accent/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"><span aria-hidden="true" class="hidden group-aria-pressed:inline-block size-1.5 mr-1.5 align-middle rounded-full bg-accent animate-pulse motion-reduce:animate-none"></span>Ao vivo</button>
+      <button id="refresh" onclick="refreshLogs()" class="max-lg:hidden px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent aria-disabled:opacity-40">Atualizar</button>
+      <button onclick="copyLogs()" class="max-lg:hidden px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Copiar</button>
+      <button onclick="downloadLogs()" class="max-lg:hidden px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Baixar .log</button>
       <!-- no celular, Atualizar, Copiar e Baixar cabem num "⋯" (mesmo menu das linhas): sobra tela para os logs -->
       <details data-keep="menu" class="lg:hidden shrink-0" ontoggle="placeMenu(this)">
-        <summary aria-label="Mais ações dos logs" class="list-none [&::-webkit-details-marker]:hidden cursor-pointer grid place-items-center w-11 min-h-11 rounded-md ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+        <summary aria-label="Mais ações dos logs" class="list-none [&::-webkit-details-marker]:hidden cursor-pointer grid place-items-center w-11 min-h-11 rounded ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
           <svg aria-hidden="true" viewBox="0 0 16 16" fill="currentColor" class="size-4"><circle cx="3.5" cy="8" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="12.5" cy="8" r="1.3"/></svg></summary>
         <div class="fixed z-30 min-w-48 rounded-lg bg-raised ring-1 ring-line-strong p-1 shadow-lg shadow-black/40">
-          <button onclick="menuPick(this); refreshLogs()" class="block w-full text-left px-3 py-3 rounded-md text-sm text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent">Atualizar</button>
-          <button onclick="menuPick(this); copyLogs()" class="block w-full text-left px-3 py-3 rounded-md text-sm text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent">Copiar</button>
-          <button onclick="menuPick(this); downloadLogs()" class="block w-full text-left px-3 py-3 rounded-md text-sm text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent">Baixar .log</button>
+          <button onclick="menuPick(this); refreshLogs()" class="block w-full text-left px-3 py-3 rounded text-sm text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent">Atualizar</button>
+          <button onclick="menuPick(this); copyLogs()" class="block w-full text-left px-3 py-3 rounded text-sm text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent">Copiar</button>
+          <button onclick="menuPick(this); downloadLogs()" class="block w-full text-left px-3 py-3 rounded text-sm text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent">Baixar .log</button>
         </div></details>
     </span>
   </div>
   <!-- quanto do histórico está na caixa; o Carregar mais pede as linhas de antes, que entram por cima -->
   <div class="shrink-0 px-4 pb-2 flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-line">
     <span id="lmeta" class="text-xs text-muted">Últimas 500 linhas</span>
-    <button id="more" onclick="loadMore()" class="data-done:ring-0 data-done:px-0 data-done:min-h-0 data-done:opacity-100 data-done:text-muted data-done:cursor-default px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded-md text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent aria-disabled:opacity-40">Carregar 2.000 linhas</button>
+    <button id="more" onclick="loadMore()" class="data-done:ring-0 data-done:px-0 data-done:min-h-0 data-done:opacity-100 data-done:text-muted data-done:cursor-default px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent aria-disabled:opacity-40">Carregar 2.000 linhas</button>
     <div id="dlg-msg" role="status" aria-live="polite" class="empty:hidden basis-full"></div>
   </div>
-  <pre id="lb" tabindex="0" aria-label="Saída dos logs" class="flex-1 min-h-40 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent overflow-auto p-4 text-xs leading-relaxed font-mono text-fg-soft whitespace-pre-wrap [overflow-wrap:anywhere]"></pre>
+  <!-- vazia com o ao vivo ligado (o container não escreveu nada ainda): o CSS diz isso, sem entrar no Copiar -->
+  <pre id="lb" tabindex="0" aria-label="Saída dos logs" data-empty="Nada no log ainda. As linhas novas aparecem aqui assim que o container escrever." class="empty:before:content-[attr(data-empty)] empty:before:font-sans empty:before:text-muted flex-1 min-h-40 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent overflow-auto p-4 text-xs leading-relaxed font-mono text-fg-soft whitespace-pre-wrap [overflow-wrap:anywhere]"></pre>
 </dialog>
 
 <!-- Esc vai para o programa do terminal (vim, less...): fecha só pelo × -->
-<dialog id="shell" aria-labelledby="shell-title" class="m-auto w-[min(1100px,95vw)] rounded-xl bg-raised text-fg-soft ring-1 ring-line-strong backdrop:bg-black/70 p-0">
+<dialog id="shell" aria-labelledby="shell-title" class="m-auto w-[min(1100px,95vw)] rounded-lg bg-raised text-fg-soft ring-1 ring-line-strong backdrop:bg-black/70 p-0">
   <div class="px-4 py-3 border-b border-line flex items-start gap-3">
     <div class="mr-auto min-w-0">
       <h2 id="shell-title" class="text-lg font-semibold text-fg-strong truncate">Terminal · <span id="shell-name"></span></h2>
       <div id="shell-status" role="status" aria-live="polite" class="text-sm mt-0.5 text-muted"></div>
     </div>
-    <button onclick="shell.close()" aria-label="Fechar terminal" class="shrink-0 grid place-items-center size-8 max-lg:size-11 rounded-md text-muted hover:text-fg-strong hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent">
+    <button onclick="shell.close()" aria-label="Fechar terminal" class="shrink-0 grid place-items-center size-8 max-lg:size-11 rounded text-muted hover:text-fg-strong hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent">
       <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="size-4"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
   </div>
   <div id="shell-box" class="h-[65vh] p-2 bg-black"></div>
@@ -169,55 +174,55 @@
 
 <!-- docker run -d com poucas opções, nenhuma que amplie o acesso ao host (bind mount, --privileged, --cap-add, rede/PID
      do host, devices, comando livre). O app.ts aponta o erro no campo; o servidor confere tudo de novo (run_argv) -->
-<dialog id="create" aria-labelledby="create-title" aria-describedby="create-desc" class="m-auto w-[min(640px,95vw)] rounded-xl bg-raised text-fg-soft ring-1 ring-line-strong backdrop:bg-black/70 p-0">
+<dialog id="create" aria-labelledby="create-title" aria-describedby="create-desc" class="m-auto w-[min(640px,95vw)] rounded-lg bg-raised text-fg-soft ring-1 ring-line-strong backdrop:bg-black/70 p-0">
   <form id="create-form" novalidate>
     <div class="px-4 py-3 border-b border-line flex items-start gap-3">
       <div class="mr-auto min-w-0">
         <h2 id="create-title" class="text-lg font-semibold text-fg-strong">Novo container</h2>
         <p id="create-desc" class="text-sm mt-0.5 text-muted">Cria e inicia com <code class="font-mono">docker run -d</code>. Se a imagem faltar, ela é baixada antes.</p>
       </div>
-      <button type="button" onclick="create.close()" aria-label="Fechar" class="shrink-0 grid place-items-center size-8 max-lg:size-11 rounded-md text-muted hover:text-fg-strong hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent">
+      <button type="button" onclick="create.close()" aria-label="Fechar" class="shrink-0 grid place-items-center size-8 max-lg:size-11 rounded text-muted hover:text-fg-strong hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent">
         <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="size-4"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
     </div>
     <fieldset id="create-fields" class="px-4 py-4 space-y-4 max-h-[65vh] overflow-auto text-sm">
       <div>
         <label for="run-image" class="block font-medium text-fg-strong">Imagem</label>
-        <input id="run-image" required autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="nginx:1.27" aria-describedby="run-image-err"
-          class="mt-1 w-full rounded-lg bg-canvas ring-1 ring-line px-3 py-2 max-lg:py-3 font-mono text-fg-strong placeholder:text-dim focus:ring-accent aria-invalid:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+        <input id="run-image" required autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="ex.: nginx:1.27" aria-describedby="run-image-err"
+          class="mt-1 w-full rounded bg-canvas ring-1 ring-line px-3 py-2 max-lg:py-3 font-mono text-fg-strong placeholder:font-sans placeholder:text-muted focus:ring-accent aria-invalid:ring-bad aria-invalid:focus:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
         <p id="run-image-err" class="empty:hidden mt-1 text-xs text-bad-fg"></p>
       </div>
       <div>
         <label for="run-name" class="block font-medium text-fg-strong">Nome <span class="font-normal text-muted">(opcional; sem ele, o docker sorteia um)</span></label>
-        <input id="run-name" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="web" aria-describedby="run-name-err"
-          class="mt-1 w-full rounded-lg bg-canvas ring-1 ring-line px-3 py-2 max-lg:py-3 font-mono text-fg-strong placeholder:text-dim focus:ring-accent aria-invalid:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+        <input id="run-name" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="ex.: web" aria-describedby="run-name-err"
+          class="mt-1 w-full rounded bg-canvas ring-1 ring-line px-3 py-2 max-lg:py-3 font-mono text-fg-strong placeholder:font-sans placeholder:text-muted focus:ring-accent aria-invalid:ring-bad aria-invalid:focus:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
         <p id="run-name-err" class="empty:hidden mt-1 text-xs text-bad-fg"></p>
       </div>
       <div class="group">
         <label for="run-ports" class="block font-medium text-fg-strong">Portas</label>
-        <input id="run-ports" autocomplete="off" spellcheck="false" placeholder="8080:80, 5353:53/udp" aria-describedby="run-ports-hint run-ports-err"
-          class="mt-1 w-full rounded-lg bg-canvas ring-1 ring-line px-3 py-2 max-lg:py-3 font-mono text-fg-strong placeholder:text-dim focus:ring-accent aria-invalid:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
-        <p id="run-ports-hint" class="mt-1 text-xs text-muted">portaDoHost:portaDoContainer, separadas por vírgula ou espaço. Ficam só em <code class="font-mono">127.0.0.1</code>: só esta máquina acessa.</p>
+        <input id="run-ports" autocomplete="off" spellcheck="false" placeholder="ex.: 8080:80, 5353:53/udp" aria-describedby="run-ports-hint run-ports-err"
+          class="mt-1 w-full rounded bg-canvas ring-1 ring-line px-3 py-2 max-lg:py-3 font-mono text-fg-strong placeholder:font-sans placeholder:text-muted focus:ring-accent aria-invalid:ring-bad aria-invalid:focus:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+        <p id="run-ports-hint" class="mt-1 max-w-[70ch] text-xs text-muted">portaDoHost:portaDoContainer, separadas por vírgula ou espaço. Ficam só em <code class="font-mono">127.0.0.1</code>: só esta máquina acessa.</p>
         <p id="run-ports-err" class="empty:hidden mt-1 text-xs text-bad-fg"></p>
         <label class="mt-2 flex items-start gap-2 w-fit max-lg:py-2 cursor-pointer">
           <input id="run-public" type="checkbox" aria-describedby="run-public-warn" class="mt-0.5 size-4 accent-danger focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
           <span>Publicar em todas as interfaces (<code class="font-mono">0.0.0.0</code>)</span>
         </label>
-        <p id="run-public-warn" class="hidden group-has-checked:block mt-1.5 rounded-lg ring-1 ring-bad/40 bg-bad/10 px-3 py-2 text-xs text-bad-soft">
+        <p id="run-public-warn" class="hidden group-has-checked:block mt-1.5 max-w-[70ch] rounded ring-1 ring-bad/40 bg-bad/10 px-3 py-2 text-xs text-bad-soft">
           Atenção: qualquer máquina que alcance a sua (Wi-Fi, VPN, rede do escritório) passa a acessar essas portas,
           e o Docker abre as portas por cima do firewall do sistema (ufw, firewalld). Só marque se precisar mesmo.</p>
       </div>
       <div>
         <label for="run-env" class="block font-medium text-fg-strong">Variáveis de ambiente</label>
-        <textarea id="run-env" rows="3" spellcheck="false" autocapitalize="off" placeholder="CHAVE=valor (uma por linha)" aria-describedby="run-env-hint run-env-err"
-          class="mt-1 w-full rounded-lg bg-canvas ring-1 ring-line px-3 py-2 font-mono text-fg-strong placeholder:text-dim focus:ring-accent aria-invalid:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"></textarea>
-        <p id="run-env-hint" class="mt-1 text-xs text-muted">Linhas em branco e com <code class="font-mono">#</code> são ignoradas. Os valores ficam visíveis no <code class="font-mono">docker inspect</code>.</p>
+        <textarea id="run-env" rows="3" spellcheck="false" autocapitalize="off" placeholder="ex.: CHAVE=valor (uma por linha)" aria-describedby="run-env-hint run-env-err"
+          class="mt-1 w-full rounded bg-canvas ring-1 ring-line px-3 py-2 font-mono text-fg-strong placeholder:font-sans placeholder:text-muted focus:ring-accent aria-invalid:ring-bad aria-invalid:focus:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"></textarea>
+        <p id="run-env-hint" class="mt-1 max-w-[70ch] text-xs text-muted">Linhas em branco e com <code class="font-mono">#</code> são ignoradas. Os valores ficam visíveis no <code class="font-mono">docker inspect</code>.</p>
         <p id="run-env-err" class="empty:hidden mt-1 text-xs text-bad-fg"></p>
       </div>
       <div class="grid sm:grid-cols-2 gap-4">
         <div>
           <label for="run-restart" class="block font-medium text-fg-strong">Restart</label>
           <select id="run-restart" aria-describedby="run-restart-err"
-            class="mt-1 w-full rounded-lg bg-canvas ring-1 ring-line px-3 py-2 max-lg:py-3 text-fg-strong focus:ring-accent aria-invalid:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+            class="mt-1 w-full rounded bg-canvas ring-1 ring-line px-3 py-2 max-lg:py-3 text-fg-strong focus:ring-accent aria-invalid:ring-bad aria-invalid:focus:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
             <option value="no">no · não reinicia</option>
             <option value="on-failure">on-failure · se sair com erro</option>
             <option value="unless-stopped">unless-stopped · sempre, menos se você parar</option>
@@ -227,19 +232,19 @@
         </div>
         <div>
           <label for="run-volume" class="block font-medium text-fg-strong">Volume <span class="font-normal text-muted">(opcional)</span></label>
-          <input id="run-volume" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="dados:/var/lib/data" aria-describedby="run-volume-hint run-volume-err"
-            class="mt-1 w-full rounded-lg bg-canvas ring-1 ring-line px-3 py-2 max-lg:py-3 font-mono text-fg-strong placeholder:text-dim focus:ring-accent aria-invalid:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+          <input id="run-volume" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="ex.: dados:/var/lib/data" aria-describedby="run-volume-hint run-volume-err"
+            class="mt-1 w-full rounded bg-canvas ring-1 ring-line px-3 py-2 max-lg:py-3 font-mono text-fg-strong placeholder:font-sans placeholder:text-muted focus:ring-accent aria-invalid:ring-bad aria-invalid:focus:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
           <p id="run-volume-hint" class="mt-1 text-xs text-muted">Volume nomeado (criado se não existir): nome:/caminho/no/container.</p>
           <p id="run-volume-err" class="empty:hidden mt-1 text-xs text-bad-fg"></p>
         </div>
       </div>
-      <p class="text-xs text-muted">Ficam de fora, para a GUI não ampliar o acesso ao host: pasta do host (bind mount), <code class="font-mono">--privileged</code>,
+      <p class="max-w-[70ch] text-xs text-muted">Ficam de fora, para a GUI não ampliar o acesso ao host: pasta do host (bind mount), <code class="font-mono">--privileged</code>,
         <code class="font-mono">--cap-add</code>, rede e PID do host, devices e comando ou entrypoint próprio. Para isso, use o terminal.</p>
     </fieldset>
     <div id="create-msg" role="alert" class="empty:hidden mx-4 mb-3 max-h-40 overflow-auto rounded-lg ring-1 ring-bad/40 bg-bad/10 px-3 py-2 text-sm text-bad-soft"></div>
     <div class="px-4 py-3 border-t border-line flex justify-end gap-2">
-      <button type="button" onclick="create.close()" class="px-3 py-1.5 max-lg:min-h-11 max-lg:px-4 rounded-md text-sm font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Cancelar</button>
-      <button id="create-go" type="submit" class="px-3 py-1.5 max-lg:min-h-11 max-lg:px-4 rounded-md text-sm font-medium ring-1 ring-accent/40 bg-accent/15 text-accent-fg hover:bg-accent/25 aria-disabled:opacity-60 aria-disabled:cursor-wait focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Criar e iniciar</button>
+      <button type="button" onclick="create.close()" class="px-3 py-1.5 max-lg:min-h-11 max-lg:px-4 rounded text-sm font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Cancelar</button>
+      <button id="create-go" type="submit" class="px-3 py-1.5 max-lg:min-h-11 max-lg:px-4 rounded text-sm font-medium ring-1 ring-accent/40 bg-accent/15 text-accent-fg hover:bg-accent/25 aria-disabled:opacity-60 aria-disabled:cursor-wait focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Criar e iniciar</button>
     </div>
   </form>
 </dialog>

@@ -88,10 +88,10 @@ test('dá para agir no container sem sair dos logs', async ({ page, gui }) => {
   await gui.open({ containers: [ctr('web')] });
   await page.getByRole('button', { name: 'Logs web' }).click();
   const acts = page.locator('#dlg-acts');
-  // como na linha: a principal à vista, o resto no "⋯"
-  await expect(acts.getByRole('button').filter({ visible: true })).toHaveText(['Parar']);
+  // Reiniciar à vista e primeiro (o ciclo), depois a principal; o resto no "⋯"
+  await expect(acts.getByRole('button').filter({ visible: true })).toHaveText(['Reiniciar', 'Parar']);
   await acts.locator('summary').click();
-  await expect(acts.getByRole('button').filter({ visible: true })).toHaveText(['Parar', 'Reiniciar', 'Copiar docker exec']);
+  await expect(acts.getByRole('button').filter({ visible: true })).toHaveText(['Reiniciar', 'Parar', 'Copiar docker exec']);
   await page.keyboard.press('Escape');  // fecha só o menu, não o modal
   await expect(acts.locator('summary')).toBeFocused();
   await expect(page.locator('#dlg')).toBeVisible();
@@ -298,4 +298,47 @@ test('ao vivo, Carregar mais reconecta com mais histórico (até 10.000)', async
   await more.click();
   await expect(more).toHaveText('Tudo carregado');
   await expect.poll(() => lb.evaluate(el => el.textContent!.split('\n')[0])).toBe('linha 0');
+});
+
+test('reiniciar nos logs (r ou o botão) liga o ao vivo e marca onde o log novo começa', async ({ page, gui }) => {
+  const before = '2020-01-01T00:00:00.000000000Z antes\n', after = '2099-01-01T00:00:00.000000000Z depois\n';
+  await gui.open({ containers: [ctr('web', { logs: before })] });
+  await page.getByRole('button', { name: 'Logs web' }).click();
+  await expect(page.locator('#lb')).toHaveText(before);
+  await expect(page.locator('#dlg-acts').getByRole('button', { name: 'Reiniciar web' })).toBeVisible();
+  await page.locator('#lb').focus();
+  await page.keyboard.press('r');
+  await expect(page.locator('#follow')).toHaveAttribute('aria-pressed', 'true');
+  gui.update(s => { s.containers[0].logs = before + after; });
+  const mark = page.locator('#lb [data-mark]');
+  await expect(mark).toHaveAttribute('data-mark', /^— reiniciado às \d\d:\d\d:\d\d —$/);
+  await expect(mark).toHaveCount(1);
+  expect(await mark.evaluate(m => m.nextSibling?.textContent)).toBe(after);
+  // a marca vem do CSS: Copiar e Baixar levam só o log
+  await expect(page.locator('#lb')).toHaveText(before + after);
+  // o status também diz quando foi: a marca no log depende de o container escrever algo novo
+  await expect(page.locator('#dlg-status')).toContainText(/reiniciado às \d\d:\d\d:\d\d/);
+});
+
+test('erro e aviso ganham cor, e o timestamp fica apagado', async ({ page, gui }) => {
+  const logs = '2026-10-05T19:00:00Z INFO ok\n2026-10-05T19:00:01Z WARN lento\n2026-10-05T19:00:02Z ERROR caiu\n';
+  await gui.open({ containers: [ctr('web', { logs })] });
+  await page.getByRole('button', { name: 'Logs web' }).click();
+  await expect(page.locator('#lb')).toHaveText(logs);
+  await expect(page.locator('#lb .text-warn-fg')).toHaveText('WARN lento\n');
+  await expect(page.locator('#lb .text-bad-fg')).toHaveText('ERROR caiu\n');
+  // o timestamp aparece como HH:MM:SS na hora local (o CSS desenha o data-t); o texto continua o do docker e o UTC vai no title
+  const t = page.locator('#lb span[title]').first();
+  await expect(t).toHaveAttribute('data-t', new Date('2026-10-05T19:00:00Z').toLocaleTimeString('pt-BR'));
+  await expect(t).toHaveAttribute('title', '2026-10-05T19:00:00Z');
+});
+
+test('o Ao vivo lembra a escolha para os próximos logs', async ({ page, gui }) => {
+  await gui.open({ containers: [ctr('web', { logs: 'linha 1\n' }), ctr('api', { logs: 'linha a\n' })] });
+  await page.getByRole('button', { name: 'Logs web' }).click();
+  await page.locator('#follow').click();
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Logs api' }).click();
+  await expect(page.locator('#follow')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#lb')).toHaveText('linha a\n');
 });

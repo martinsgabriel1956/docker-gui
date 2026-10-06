@@ -8,7 +8,7 @@ const containers = [
   ctr('flaky', { Status: 'Up About an hour (unhealthy)' }),
 ];
 const visible = (page: import('@playwright/test').Page) =>
-  page.locator('#rows tr[data-row] th div.font-medium').allTextContents();
+  page.locator('#rows tr[data-row] th div.text-data').allTextContents();
 
 test('busca por nome, imagem e projeto', async ({ page, gui }) => {
   await gui.open({ containers });
