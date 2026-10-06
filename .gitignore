@@ -19,3 +19,6 @@ playwright-report/
 
 # Relatórios locais de design (impeccable)
 .impeccable/
+
+# Configuração pessoal do Claude Code
+.claude/settings.local.json
