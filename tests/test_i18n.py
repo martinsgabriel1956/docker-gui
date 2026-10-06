@@ -3,11 +3,16 @@
 A página: as chaves são os t`...` de src/*.ts (com {0}, {1}... no lugar de cada ${...}) e os textos e atributos
 visíveis do src/page.html; o dicionário é o src/en.json. O servidor: os tr("...") do docker_gui.py e o EN dele.
 """
+import ast
 import json
+import os
 import pathlib
 import re
+import subprocess
+import sys
 import unittest
 from html.parser import HTMLParser
+from typing import ClassVar
 
 import docker_gui
 
@@ -16,6 +21,7 @@ SRC = ROOT / "src"
 ESCAPES = {"n": "\n", "t": "\t"}
 LETTERS = re.compile(r"[A-Za-zÀ-ÿ]")
 PLACEHOLDER = re.compile(r"\{\d+\}")
+DESCRIPTION = "Gerenciador de containers Docker no navegador. Só stdlib + docker CLI."
 
 
 def skip_string(text, i, quote):
@@ -133,6 +139,34 @@ class ServerI18nTest(unittest.TestCase):
         for k, v in docker_gui.EN.items():
             self.assertEqual(re.findall(r"\{\w*\}", k), re.findall(r"\{\w*\}", v), k)
 
+    # o que não passa pelo tr() de propósito: códigos fixos da API (iguais nas duas línguas, como o reason phrase do
+    # HTTP; a página nunca pede o que os provoca) e mensagens de ValueError que o próprio servidor captura
+    NOT_TEXT: ClassVar = {'"forbidden"', '"not found"', "tamanho inválido", "corpo vazio ou grande demais"}
+
+    def test_no_message_outside_tr(self):
+        # regressão: "origem não permitida" e "esperava um WebSocket" iam direto para o send() e saíam em pt com
+        # --lang en. Texto (com espaço, ou JSON entre aspas) que chega ao usuário tem que vir de um tr()
+        sinks = {"send", "print", "exit", "error", "ArgumentParser", "add_argument"}
+        found = set()
+
+        def texts(node):
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "tr":
+                return
+            s = node.value if isinstance(node, ast.Constant) else getattr(node, "s", None)  # 3.7: ast.Str
+            if isinstance(s, str) and (" " in s.strip() or s.startswith('"')):
+                found.add(s)
+            for child in ast.iter_child_nodes(node):
+                texts(child)
+
+        for n in ast.walk(ast.parse((ROOT / "docker_gui.py").read_text())):
+            if isinstance(n, ast.Raise) and n.exc is not None:
+                texts(n.exc)
+            elif isinstance(n, ast.Call) and (getattr(n.func, "attr", None) or getattr(n.func, "id", None)) in sinks:
+                for arg in (*n.args, *(k.value for k in n.keywords)):
+                    texts(arg)
+        self.assertLessEqual(self.NOT_TEXT, found)  # a varredura enxerga as strings (não passa vazia)
+        self.assertEqual(sorted(found - self.NOT_TEXT), [], "mensagem fora do tr()")
+
     def test_tr_follows_lang(self):
         k = next(iter(docker_gui.EN))
         self.assertEqual(docker_gui.tr(k), k)
@@ -148,6 +182,23 @@ class ServerI18nTest(unittest.TestCase):
                           ({"LC_ALL": "en_US.UTF-8", "LANG": "pt_BR.UTF-8"}, "en"), ({"LANG": "C.UTF-8"}, "en"),
                           ({"DOCKER_GUI_LANG": "pt-BR"}, "pt"), ({"LC_MESSAGES": "pt_PT"}, "pt")):
             self.assertEqual(docker_gui.system_lang(env), want, env)
+
+    def test_lang_flag_applies_to_help(self):
+        # regressão: o parser era montado na língua do locale antes de ler o --lang, e o --help sai no parse_args
+        env = {k: v for k, v in os.environ.items() if k not in ("DOCKER_GUI_LANG", "LC_ALL", "LC_MESSAGES", "LANG")}
+        en, pt = docker_gui.EN[DESCRIPTION], DESCRIPTION
+        for argv, locale, want, other in ((["--lang", "en"], "pt_BR.UTF-8", en, pt), (["--lang=en"], "pt_BR.UTF-8", en, pt),
+                                          (["--lang", "pt"], "en_US.UTF-8", pt, en), ([], "en_US.UTF-8", en, pt)):
+            r = subprocess.run([sys.executable, str(ROOT / "docker_gui.py"), *argv, "--help"], capture_output=True,
+                               text=True, env={**env, "LANG": locale}, timeout=30, check=False)
+            self.assertEqual(r.returncode, 0, argv)
+            self.assertIn(want, r.stdout, argv)
+            self.assertNotIn(other, r.stdout, argv)
+        # --lang inválido continua recusado pelo parser de verdade
+        r = subprocess.run([sys.executable, str(ROOT / "docker_gui.py"), "--lang", "fr", "--help"], capture_output=True,
+                           text=True, env=env, timeout=30, check=False)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("invalid choice", r.stderr)
 
 
 if __name__ == "__main__":

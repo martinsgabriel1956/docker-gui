@@ -1,2 +1,4 @@
 # lint só (sem formatter): o arquivo único tem HTML/JS em strings longas
 target-version = "py37"
+# .claude: agentes e skills de terceiros (vendorizados), não são código do projeto
+extend-exclude = [".claude"]

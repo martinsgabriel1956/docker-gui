@@ -90,6 +90,9 @@ EVENTS_IGNORE = ("attach", "resize", "top", "archive-path", "extract-to-dir", "e
 # cada stream de eventos é um `docker events` e uma thread presos enquanto a aba está aberta: teto por servidor.
 # Acima disso o servidor recusa e a página fica no poll de 2 s
 EVENTS_SLOTS = threading.BoundedSemaphore(8)
+# o docker de cada stream aberto (logs -f, compose logs --follow, events): o main() os mata ao sair. Sem isso, um
+# SIGTERM (que só vai para o servidor, ao contrário do Ctrl+C, que vai para o grupo) os deixava órfãos, presos ao daemon
+STREAMS = set()
 # quanto histórico dos logs a página pode pedir (?tail=): o argv sai daqui, nunca da query. "all" é sem --tail
 # (o padrão do docker e do podman; o podman não aceita "--tail all")
 LOG_TAIL = {"500": ["--tail", "500"], "2000": ["--tail", "2000"], "10000": ["--tail", "10000"], "all": [],
@@ -144,6 +147,8 @@ EN = {
     "volume inválido: use nome:/caminho/no/container (só volume nomeado, nunca pasta do host)":
         "invalid volume: use name:/path/in/container (named volumes only, never a host folder)",
     "token ausente ou inválido": "missing or invalid token",
+    "origem não permitida": "origin not allowed",
+    "esperava um WebSocket": "expected a WebSocket",
     "tail inválido": "invalid tail",
     "since inválido": "invalid since",
     "não consegui ler quando o container subiu": "could not read when the container started",
@@ -572,6 +577,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype + "; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
+        # a página nunca vai num iframe de outro site (clickjacking); o X-Frame-Options é para navegador antigo
+        self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+        self.send_header("X-Frame-Options", "DENY")
         self.end_headers()
         self.wfile.write(data)
 
@@ -700,6 +708,7 @@ class Handler(BaseHTTPRequestHandler):
         # O with fecha o pipe e espera o processo morto (sem zumbi nem fd vazando)
         with subprocess.Popen([*CLI, *args],
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as p:
+            STREAMS.add(p)
             rest = b""
             try:
                 while True:
@@ -717,6 +726,7 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:  # cliente fechou no meio da escrita
                 pass
             finally:
+                STREAMS.discard(p)
                 p.kill()
 
     def sse_start(self):
@@ -742,6 +752,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             # mesmo ciclo de vida do stream_logs: o select percebe o cliente fechando com o docker quieto,
             # e o with espera o processo morto
+            STREAMS.add(p)
             with p:
                 rest = b""
                 try:
@@ -760,6 +771,7 @@ class Handler(BaseHTTPRequestHandler):
                 except OSError:
                     pass
                 finally:
+                    STREAMS.discard(p)
                     p.kill()
         finally:
             EVENTS_SLOTS.release()
@@ -805,14 +817,14 @@ class Handler(BaseHTTPRequestHandler):
         # WebSocket não passa por CORS: sem conferir o Origin, qualquer site aberto no navegador conectaria
         # aqui (cross-site WebSocket hijacking). O navegador sempre manda o Origin e a página não consegue forjá-lo.
         if self.headers.get("Origin") not in (f"http://127.0.0.1:{port}", f"http://localhost:{port}"):
-            return self.send(403, '"origem não permitida"')
+            return self.send(403, json.dumps(tr("origem não permitida")))
         # o WebSocket do navegador não manda header custom: o token vem na query (o servidor não loga URLs)
         token = parse_qs(self.path.partition("?")[2]).get("t", [""])[0]
         if not hmac.compare_digest(token.encode(), TOKEN.encode()):
             return self.send(401, json.dumps(tr("token ausente ou inválido")))
         key = self.headers.get("Sec-WebSocket-Key")
         if self.headers.get("Upgrade", "").lower() != "websocket" or not key:
-            return self.send(400, '"esperava um WebSocket"')
+            return self.send(400, json.dumps(tr("esperava um WebSocket")))
 
         self.send_response(101)
         self.send_header("Upgrade", "websocket")
@@ -1119,7 +1131,12 @@ def where():
 
 def main():
     global CLI, LANG, PAGE
-    LANG = system_lang()  # já vale para a ajuda do --help; o --lang, se vier, troca depois
+    # a língua antes de montar o parser: a ajuda do --help sai durante o parse_args. Só o --lang, sem validar
+    # (nargs="?" e sem choices: este parser nunca sai com erro); o parser de verdade recusa o valor inválido
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--lang", nargs="?")
+    lang = pre.parse_known_args()[0].lang
+    LANG = lang if lang in ("pt", "en") else system_lang()
     ap = argparse.ArgumentParser(description=tr("Gerenciador de containers Docker no navegador. Só stdlib + docker CLI."))
     ap.add_argument("--port", type=int, help=tr("porta local (padrão: {port}, ou a próxima livre)").format(port=PORT))
     ap.add_argument("--cli", default=os.environ.get("DOCKER_GUI_CLI", "docker"),
@@ -1142,10 +1159,15 @@ def main():
     print(tr("Docker GUI em {url}  (Ctrl+C para sair)").format(url=url))
     if not args.no_browser:
         webbrowser.open(url)
+    # SIGTERM vira saída normal (SystemExit), para o finally rodar; o código 143 é o de quem morre por SIGTERM
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(128 + signal.SIGTERM))
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        for p in list(STREAMS):  # as threads dos streams são daemon: morrem com o servidor sem passar pelo finally delas
+            p.kill()
 
 
 # Front (HTML, JS e o CSS do Tailwind) embutido: sem CDN, funciona offline e não pisca sem estilo.
@@ -1959,6 +1981,15 @@ PAGE = r"""<!doctype html>
   var project = (c) => (c.Labels || "").match(/(?:^|,)com\.docker\.compose\.project=([^,]*)/)?.[1] || "";
   var workingDir = (c) => (c.Labels || "").match(/(?:^|,)com\.docker\.compose\.project\.working_dir=([^,]*)/)?.[1] || "";
   var service = (c) => (c.Labels || "").match(/(?:^|,)com\.docker\.compose\.service=([^,]*)/)?.[1] || "";
+  function logServices(p, cs2) {
+    const m = /* @__PURE__ */ new Map();
+    for (const c of cs2) {
+      const s15 = service(c), replica = c.Names.slice(p.length + s15.length + 2);
+      if (project(c) !== p || !s15) continue;
+      m.set(c.Names.startsWith(`${p}-${s15}-`) && /^\d+$/.test(replica) ? `${s15}-${replica}` : c.Names, s15);
+    }
+    return m;
+  }
   function dur(s15) {
     if (/less than a second/i.test(s15)) return "<1 s";
     const m = s15.match(/(about )?(an?|\d+) (second|minute|hour|day|week|month|year)/i);
@@ -12599,7 +12630,12 @@ ${h2.join(`
   var level = "";
   var svcPick = "";
   var narrowed = () => !!(level || svcPick);
-  var svcOf = (prefix) => prefix.replace(/(-\d+)?\s.*$/s, "");
+  var svcNames = null;
+  var svcOf = (prefix) => {
+    const p = logProject?.project ?? "", name = prefix.replace(/\s.*$/s, "");
+    if (svcNames?.d !== data || svcNames.p !== p) svcNames = { d: data, p, m: logServices(p, data) };
+    return svcNames.m.get(name) ?? name.replace(/-\d+$/, "");
+  };
   var passes = (pre, lv) => (!svcPick || svcOf(pre) === svcPick) && (!level || lv === "bad" || level === "warn" && lv === "warn");
   var prevLv = /* @__PURE__ */ new Map();
   function levelOf(pre, rest) {

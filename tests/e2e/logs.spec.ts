@@ -390,6 +390,32 @@ test('nos logs do projeto, o filtro de serviço mostra só aquele serviço', asy
   await expect(page.getByLabel('Período').locator('option[value="start"]')).toBeDisabled();
 });
 
+test('serviço com container_name terminado em -<número> não se junta a outro serviço', async ({ page, gui }) => {
+  // regressão: o seletor tirava o "-17" de "postgres-17" (container_name do serviço pg17) e o juntava ao serviço postgres
+  const shop = (svc: string, n: number) => `${compose('shop', svc)},com.docker.compose.container-number=${n},com.docker.compose.project.working_dir=/srv/shop,com.docker.compose.project.config_files=/srv/shop/compose.yml`;
+  await gui.open({ containers: [
+    ctr('shop-postgres-1', { Labels: shop('postgres', 1), logs: '2026-10-05T10:00:01Z postgres 16 pronto\n' }),
+    ctr('postgres-17', { Labels: shop('pg17', 1), logs: '2026-10-05T10:00:02Z postgres 17 pronto\n' }),
+    ctr('shop-api-1', { Labels: shop('api', 1), logs: '2026-10-05T10:00:03Z api réplica 1\n' }),
+    ctr('shop-api-2', { Labels: shop('api', 2), logs: '2026-10-05T10:00:04Z api réplica 2\n' }),
+  ] });
+  await page.getByRole('button', { name: 'Logs do projeto shop' }).click();
+  const lb = page.locator('#lb'), svc = page.getByLabel('Serviço', { exact: true });
+  await expect(lb).toContainText('postgres-17  | ');
+  await expect(svc.locator('option')).toHaveText(['Todos os serviços', 'api', 'pg17', 'postgres']);
+  await svc.selectOption('postgres');
+  await expect(lb).toHaveText('postgres-1  | 2026-10-05T10:00:01Z postgres 16 pronto\n');
+  await svc.selectOption('pg17');
+  await expect(lb).toHaveText('postgres-17  | 2026-10-05T10:00:02Z postgres 17 pronto\n');
+  await svc.selectOption('api');  // as réplicas continuam juntas
+  await expect(lb).toHaveText('api-1  | 2026-10-05T10:00:03Z api réplica 1\napi-2  | 2026-10-05T10:00:04Z api réplica 2\n');
+  // cada serviço com a sua cor
+  await svc.selectOption('');
+  const tone = async (pre: string) => (await lb.locator('span[class^="text-svc"]').filter({ hasText: pre }).first().getAttribute('class'))!;
+  expect(await tone('postgres-17')).not.toBe(await tone('postgres-1'));
+  expect(await tone('api-2')).toBe(await tone('api-1'));
+});
+
 test('período: "desde que subiu" deixa de fora as execuções anteriores', async ({ page, gui }) => {
   await gui.open({ containers: [ctr('web', { started: '2026-10-05T12:00:00Z',
     logs: '2026-10-05T11:00:00Z execução antiga\n2026-10-05T12:00:01Z execução de agora\n' })] });

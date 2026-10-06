@@ -477,3 +477,18 @@ test('topTable separa as colunas do docker top e deixa o comando inteiro', () =>
   ]);
   assert.deepEqual(f.topTable(''), []);
 });
+
+test('logServices: o prefixo do compose logs vira o serviço pelo nome do container, não pelo "-<número>"', () => {
+  const ctr = (Names, svc, p = 'shop') => ({Names, Labels: `com.docker.compose.project=${p},com.docker.compose.service=${svc}`});
+  const m = f.logServices('shop', [
+    ctr('shop-api-1', 'api'), ctr('shop-api-2', 'api'),  // réplicas: o compose tira o projeto do nome padrão
+    ctr('shop-postgres-1', 'postgres'),
+    ctr('postgres-17', 'pg17'),  // regressão: container_name terminado em -<número> virava "postgres"
+    ctr('app-v2-3', 'legacy'),  // container_name com hífen e número
+    ctr('blog-api-1', 'api', 'blog'), ctr('avulso', ''),  // outro projeto e fora do compose: ficam de fora
+  ]);
+  assert.deepEqual(Object.fromEntries(m), {'api-1': 'api', 'api-2': 'api', 'postgres-1': 'postgres', 'postgres-17': 'pg17',
+                                           'app-v2-3': 'legacy'});
+  // nome que só parece o padrão (o resto não é número): é container_name, vai inteiro
+  assert.deepEqual(Object.fromEntries(f.logServices('shop', [ctr('shop-api-x', 'api')])), {'shop-api-x': 'api'});
+});

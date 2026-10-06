@@ -2,7 +2,7 @@ import {
   type Bucket, type Container, type ContainerState, type DiskUsage, type Facts, type HistoryEvent, type Image, type LogLevel,
   type Network, type Port, type RunErrors, type RunField, type Sample, type Stats, type Tone, type Volume, HISTORY, age, anonVolume,
   bucket, bulkSummary, bytes, continues, errHint, esc, eventText, fmtBytes, hasHealth, healthChanges, historySummary, io, isProblem,
-  logFilter, logLevel, newProblems, percent, ports, project, prunedVolumes, pushSample, reclaimShare, runSpec, service, shortImage,
+  logFilter, logLevel, logServices, newProblems, percent, ports, project, prunedVolumes, pushSample, reclaimShare, runSpec, service, shortImage,
   sparkPoints, status, tone, topTable, trend, usage, workingDir,
 } from './format';
 import {LOCALE, t, translatePage} from './i18n';
@@ -1050,8 +1050,14 @@ const filterRe = () => logFilter($<HTMLInputElement>('#lf').value);
 // nível e serviço: filtram na página, como o texto. level 'warn' = avisos e erros; svcPick = serviço do compose
 let level = '', svcPick = '';
 const narrowed = () => !!(level || svcPick);
-// "api-1  | " -> "api" (as réplicas juntas); com container_name, o prefixo é o nome inteiro
-const svcOf = (prefix: string) => prefix.replace(/(-\d+)?\s.*$/s, '');
+// "api-1  | " -> "api" (as réplicas juntas), pelos nomes e labels dos containers do projeto (logServices), refeito a
+// cada leitura da lista. Container que ainda não chegou à lista (acabou de subir): o "-<número>" no fim é a réplica
+let svcNames: {d: Container[]; p: string; m: Map<string, string>} | null = null;
+const svcOf = (prefix: string) => {
+  const p = logProject?.project ?? '', name = prefix.replace(/\s.*$/s, '');
+  if (svcNames?.d !== data || svcNames.p !== p) svcNames = {d: data, p, m: logServices(p, data)};
+  return svcNames.m.get(name) ?? name.replace(/-\d+$/, '');
+};
 const passes = (pre: string, lv: LogLevel) =>
   (!svcPick || svcOf(pre) === svcPick) && (!level || lv === 'bad' || (level === 'warn' && lv === 'warn'));
 // nível de cada linha, na ordem em que chegam: a que continua um stack trace herda o da linha que o abriu (nos logs do
