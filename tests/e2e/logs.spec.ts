@@ -451,3 +451,10 @@ test('"Só erros" mostra o stack trace inteiro, não só a primeira linha', asyn
   gui.update(s => { s.containers[0].logs += 'Traceback (most recent call last):\n  File "app.py", line 3\nValueError: boom\nok de novo\n'; });
   await expect(page.locator('#lb')).toHaveText(`${trace}Traceback (most recent call last):\n  File "app.py", line 3\nValueError: boom\n`);
 });
+
+test('ao vivo por padrão: quem nunca escolheu abre os logs de um container rodando já acompanhando', async ({ page, gui }) => {
+  await gui.open({ containers: [ctr('web', { logs: 'linha 1\n' })] }, { follow: null });
+  await page.getByRole('button', { name: 'Logs web' }).click();
+  await expect(page.locator('#follow')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#lmeta')).toContainText('Ao vivo');
+});

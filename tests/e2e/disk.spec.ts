@@ -37,7 +37,7 @@ test('limpar containers parados diz quais saem e tira eles da lista', async ({ p
   await openTab(page, 'images');
   await page.getByRole('button', { name: 'Limpar containers parados' }).click();
   // a lista sai da página (o df só conta): parado e criado vão, rodando e pausado ficam
-  await expect(page.locator('#df-images')).toContainText('Apagar os containers parados? Vai remover cron e velho. Os logs deles se perdem; os volumes ficam. Esc cancela.');
+  await expect(page.locator('#armdock')).toContainText('Apagar os containers parados? Vai remover cron e velho. Os logs deles se perdem; os volumes ficam. Esc cancela.');
   await page.waitForTimeout(700);
   await page.getByRole('button', { name: 'Confirmar limpeza de containers parados' }).click();
   await expect(page.locator('#toast')).toHaveText('Containers parados: 53.25kB liberados.');
@@ -52,7 +52,7 @@ test('limpar imagens usa a confirmação em 2 passos', async ({ page, gui }) => 
   await page.getByRole('button', { name: 'Limpar imagens' }).click();
   const confirm = page.getByRole('button', { name: 'Confirmar limpeza de imagens' });
   await expect(page.getByRole('button', { name: 'Cancelar limpeza de imagens' })).toBeFocused();
-  await expect(page.locator('#df-images')).toContainText('Apagar as imagens que nenhum container usa? Libera até 1.2GB, de 3 itens sem uso. Dá para baixar de novo. Esc cancela.');
+  await expect(page.locator('#armdock')).toContainText('Apagar as imagens que nenhum container usa? Libera até 1.2GB, de 3 itens sem uso. Dá para baixar de novo. Esc cancela.');
 
   await confirm.click();  // logo em seguida, < 600 ms: duplo clique não confirma
   await page.getByRole('button', { name: 'Cancelar limpeza de imagens' }).click();
@@ -152,9 +152,9 @@ test('remover um volume usa a confirmação em 2 passos', async ({ page, gui }) 
   await gui.open(OBJECTS());
   await openTab(page, 'volumes');
   await page.getByRole('button', { name: 'Remover o volume cache' }).click();
-  const confirm = page.getByRole('button', { name: 'Confirmar remoção de o volume cache' });
-  await expect(page.getByRole('button', { name: 'Cancelar remoção de o volume cache' })).toBeFocused();
-  await expect(item(page, 'volumes', 'cache')).toContainText('Remover o volume cache? Os dados dele se perdem. Esc cancela.');
+  const confirm = page.getByRole('button', { name: 'Confirmar remoção do volume cache' });
+  await expect(page.getByRole('button', { name: 'Cancelar remoção do volume cache' })).toBeFocused();
+  await expect(page.locator('#armdock')).toContainText('Remover o volume cache? Os dados dele se perdem. Esc cancela.');
 
   await page.keyboard.press('Escape');
   await expect(confirm).toBeHidden();
@@ -167,28 +167,26 @@ test('remover um volume usa a confirmação em 2 passos', async ({ page, gui }) 
   await expect(item(page, 'volumes', 'cache')).toHaveCount(0);
   await expect(page.locator('#tab-volumes')).toHaveText('Volumes · 2');
   expect(gui.read().removed).toEqual(['volume rm cache']);
-  // o foco vai para o próximo item, não se perde no body
-  await expect(page.getByRole('button', { name: 'Remover o volume pgdata' })).toBeFocused();
+  // o foco vai para o próximo item (o pgdata, indisponível porque está em uso), não se perde no body
+  await expect(page.getByRole('button', { name: 'Remover (indisponível: em uso por db)' })).toBeFocused();
 });
 
-test('em uso: o erro do docker aparece explicado e o item fica', async ({ page, gui }) => {
+test('em uso: o Remover diz por quê em vez de tentar; o erro do docker aparece explicado', async ({ page, gui }) => {
   await gui.open(OBJECTS());
   await openTab(page, 'volumes');
-  await page.getByRole('button', { name: 'Remover o volume pgdata' }).click();
-  await page.waitForTimeout(700);
-  await page.getByRole('button', { name: 'Confirmar remoção de o volume pgdata' }).click();
-  await expect(page.locator('#toast')).toHaveText(
-    'Não deu para remover o volume pgdata. Em uso: remova o container que usa (ou tire ele da rede) antes.');
-  const pg = item(page, 'volumes', 'pgdata');
-  await expect(pg).toContainText(`Error response from daemon: remove pgdata: volume is in use - [${gui.container('db')!.ID}]`);
-  await expect(page.getByRole('button', { name: 'Remover o volume pgdata' })).toBeFocused();
-  expect(gui.read().volumes!.map(v => v.Name)).toContain('pgdata');
+  // o docker recusaria (sem -f): o botão fica indisponível, com quem usa
+  const pg = page.getByRole('button', { name: 'Remover (indisponível: em uso por db)' });
+  await expect(pg).toHaveAttribute('aria-disabled', 'true');
+  await expect(pg).toHaveAttribute('title', 'Em uso por db: remova o container antes');
+  await pg.click({ force: true });  // o clique que o aria-disabled não impede
+  await expect(page.locator('#armdock')).toBeHidden();
+  expect(gui.read().removed).toBeUndefined();
 
   // imagem com duas tags: o docker exige -f, e a página diz o que fazer
   await openTab(page, 'images');
   await page.getByRole('button', { name: 'Remover a imagem app:latest, app:1.0' }).click();
   await page.waitForTimeout(700);
-  await page.getByRole('button', { name: 'Confirmar remoção de a imagem app:latest, app:1.0' }).click();
+  await page.getByRole('button', { name: 'Confirmar remoção da imagem app:latest, app:1.0' }).click();
   await expect(item(page, 'images', 'app:latest')).toContainText('A imagem tem mais de uma tag');
   await expect(item(page, 'images', 'app:latest')).toContainText('image is referenced in multiple repositories');
   expect(gui.read().removed).toBeUndefined();
@@ -200,7 +198,7 @@ test('remover uma imagem atualiza a lista e o uso de disco', async ({ page, gui 
   await page.getByRole('button', { name: `Remover a imagem sem tag ${sha('old').slice(0, 12)}` }).click();
   await page.waitForTimeout(700);
   gui.update(s => { s.df![0].Size = '3.99GB'; });  // o que o docker system df diria depois
-  await page.getByRole('button', { name: `Confirmar remoção de a imagem sem tag ${sha('old').slice(0, 12)}` }).click();
+  await page.getByRole('button', { name: `Confirmar remoção da imagem sem tag ${sha('old').slice(0, 12)}` }).click();
   await expect(page.locator('#toast')).toHaveText(`Imagem sem tag ${sha('old').slice(0, 12)} removida.`);
   await expect(item(page, 'images', 'sem tag')).toHaveCount(0);
   await expect(page.locator('#df-images')).toContainText('3.99GB no total');
@@ -211,9 +209,9 @@ test('remover uma rede criada; as padrão não têm botão', async ({ page, gui 
   await gui.open(OBJECTS());
   await openTab(page, 'networks');
   await page.getByRole('button', { name: 'Remover a rede velha' }).click();
-  await expect(item(page, 'networks', 'velha')).toContainText('Remover a rede velha? Esc cancela.');
+  await expect(page.locator('#armdock')).toContainText('Remover a rede velha? Esc cancela.');
   await page.waitForTimeout(700);
-  await page.getByRole('button', { name: 'Confirmar remoção de a rede velha' }).click();
+  await page.getByRole('button', { name: 'Confirmar remoção da rede velha' }).click();
   await expect(page.locator('#toast')).toHaveText('Rede velha removida.');
   await expect(item(page, 'networks', 'velha')).toHaveCount(0);
   expect(gui.read().removed).toEqual([`network rm ${sha('velha')}`]);
@@ -253,7 +251,7 @@ test('limpar volumes diz quais saem: no Docker, só os anônimos sem uso', async
   await gui.open(OBJECTS());
   await openTab(page, 'volumes');
   await page.getByRole('button', { name: 'Limpar volumes' }).click();
-  await expect(page.locator('#df-volumes')).toContainText(`Vai apagar 1 volume anônimo sem uso: ${ANON.slice(0, 12)}…. Os dados deles se perdem. Os nomeados ficam.`);
+  await expect(page.locator('#armdock')).toContainText(`Vai apagar 1 volume anônimo sem uso: ${ANON.slice(0, 12)}…. Os dados deles se perdem. Os nomeados ficam.`);
 });
 
 test('cada categoria do disco tem a barra do que a limpeza libera', async ({ page, gui }) => {

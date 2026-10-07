@@ -136,7 +136,7 @@ test('Reiniciar serviço pelo menu roda compose restart só daquele serviço', a
   await page.keyboard.press('Escape');
 
   await page.locator('summary[aria-label="Mais ações para db"]').click();
-  await page.getByRole('button', { name: 'Reiniciar serviço db' }).click();
+  await page.getByRole('button', { name: 'compose restart db' }).click();
   await expect(page.locator('#toast')).toHaveText('Os 2 containers estão de pé.');
   expect(gui.read().compose_calls).toEqual([[...PREFIX, 'restart', '--', 'db']]);
   expect(gui.container('api')!.State).toBe('exited');  // outro serviço: fica como estava
@@ -145,7 +145,7 @@ test('Reiniciar serviço pelo menu roda compose restart só daquele serviço', a
 test('Reconstruir serviço roda compose up --build --no-deps só daquele serviço', async ({ page, gui }) => {
   await gui.open({ containers: [ctr('api', { Labels: shop('api') }), ctr('db', { Labels: shop('db'), State: 'exited', Status: 'Exited (0) 1 hour ago' })] });
   await page.locator('summary[aria-label="Mais ações para api"]').click();
-  await page.getByRole('button', { name: 'Reconstruir serviço api' }).click();
+  await page.getByRole('button', { name: 'compose up --build api' }).click();
   await expect(page.locator('#toast')).toHaveText('api está de pé.');
   expect(gui.read().compose_calls).toEqual([[...PREFIX, 'up', '-d', '--build', '--no-deps', '--', 'api']]);
   expect(gui.container('db')!.State).toBe('exited');  // --no-deps: a dependência fica como estava
@@ -156,7 +156,7 @@ test('Reconstruir serviço que recria o container confere o container novo', asy
   await gui.open({ containers: [ctr('api', { Labels: shop('api') })],
                    compose_recreate: { State: 'exited', Status: 'Exited (1) Less than a second ago' } });
   await page.locator('summary[aria-label="Mais ações para api"]').click();
-  await page.getByRole('button', { name: 'Reconstruir serviço api' }).click();
+  await page.getByRole('button', { name: 'compose up --build api' }).click();
   await expect(page.locator('#toast')).toContainText('api subiu mas não ficou bem: Saiu com código 1');
 });
 
@@ -182,7 +182,7 @@ test('b reconstrói o serviço da linha em foco; nos logs, o dos logs, que segue
 test('Reiniciar serviço que falha mostra a última linha do stderr', async ({ page, gui }) => {
   await gui.open({ containers: containers(), compose_fail: 'no such service: db' });
   await page.locator('summary[aria-label="Mais ações para db"]').click();
-  await page.getByRole('button', { name: 'Reiniciar serviço db' }).click();
+  await page.getByRole('button', { name: 'compose restart db' }).click();
   await expect(page.locator('#toast')).toHaveText('shop: compose restart db falhou. no such service: db');
 });
 
