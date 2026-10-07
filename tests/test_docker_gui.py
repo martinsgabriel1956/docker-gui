@@ -680,7 +680,7 @@ class InspectTest(ServerTest):
         "Mounts": [{"Type": "volume", "Name": "pgdata", "Source": "/var/lib/docker/volumes/pgdata/_data",
                     "Destination": "/var/lib/postgresql/data", "RW": True, "Driver": "local"}],
         "Config": {"Env": ["POSTGRES_PASSWORD=s3cr3t=x", "EMPTY=", "BARE"]},
-        "State": {"OOMKilled": True, "ExitCode": 137}, "RestartCount": 4}
+        "State": {"OOMKilled": True, "ExitCode": 137, "FinishedAt": "2026-10-05T12:00:00Z"}, "RestartCount": 4}
 
     def test_env_masked_by_default(self):
         self.docker.return_value = ok(json.dumps(self.INFO) + "\n")
@@ -692,7 +692,7 @@ class InspectTest(ServerTest):
             "Mounts": [{"Type": "volume", "Name": "pgdata", "Source": "/var/lib/docker/volumes/pgdata/_data",
                         "Destination": "/var/lib/postgresql/data", "RW": True}],
             "Env": [["POSTGRES_PASSWORD", None], ["EMPTY", None], ["BARE", None]],
-            "OOMKilled": True, "RestartCount": 4})
+            "OOMKilled": True, "RestartCount": 4, "FinishedAt": "2026-10-05T12:00:00Z"})
         self.docker.assert_called_once_with("inspect", "--format", "{{json .}}", HEX_ID)
 
     def test_env_revealed_on_request(self):
@@ -706,7 +706,7 @@ class InspectTest(ServerTest):
                           "NetworkSettings": {"Networks": None}, "Mounts": None, "Config": {"Env": None},
                           "State": None, "RestartCount": None}):
             self.assertEqual(docker_gui.summary(info), {"Restart": "no", "Networks": {}, "Mounts": [], "Env": [],
-                                                        "OOMKilled": False, "RestartCount": 0})
+                                                        "OOMKilled": False, "RestartCount": 0, "FinishedAt": ""})
 
     def test_inspect_error(self):
         self.docker.return_value = fail("Error: No such object: 0123456789ab\n")

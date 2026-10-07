@@ -37,7 +37,7 @@ type ComposeAction = 'up' | 'rebuild' | 'down' | 'pull' | 'restart' | 'build' | 
 // confirmação em 2 passos pendente: remover um container (ou os selecionados, id = "bulk"), derrubar um projeto
 // (id = "stack-<projeto>"), limpar uma categoria do disco ou remover uma imagem, volume ou rede; a é o data-a do
 // botão e note vai para o leitor de tela
-type Arming = {id: string; name: string; a: 'remove' | 'down' | 'prune' | 'rm'; note: string; at: number; timer: number};
+type Arming = {id: string; name: string; a: 'remove' | 'down' | 'prune' | 'rm'; note: string; run: () => unknown; at: number; timer: number};
 type Health = {Log?: {ExitCode: number; Output: string}[]} | null;
 // resumo do /api/inspect; o valor do env vem null (mascarado) até o usuário pedir para revelar
 type Inspect = {Restart: string; Networks: Record<string, string>; Env: [key: string, value: string | null][];
@@ -72,10 +72,13 @@ const BUCKETS: [Bucket, string, string, string][] = [
   ['pausado', t`pausado`, t`pausados`, 'text-fg'], ['reiniciando', t`reiniciando`, t`reiniciando`, 'text-fg'],
   ['parado', t`parado`, t`parados`, 'text-fg']];
 const TOUCH = matchMedia('(pointer: coarse)').matches;
+// a partir de 1280px (xl) a tabela tem as 5 colunas do docker ps; abaixo, imagem e portas descem para baixo do nome.
+// Decidido aqui, não por CSS: com as duas cópias no DOM, o leitor de tela e o Tab achariam cada porta duas vezes
+const WIDE = matchMedia('(min-width: 80rem)');
 const PROBLEM_TXT: Record<ProblemKind, string> = {docker: t`Docker fora do ar`, perm: t`sem acesso ao Docker`, server: t`sem conexão`, auth: t`sem token`};
 // Logs é a ação mais usada e a mais inofensiva: sem contorno, para a principal (Parar, Iniciar) ser a que salta aos olhos
 const ghost = () => BTN.replace(' ring-1 ring-line-strong/80', '');
-const BTN = 'px-2.5 py-1 max-lg:min-h-11 max-lg:px-4 max-lg:text-sm rounded text-xs font-medium ring-1 ring-line-strong/80 transition motion-reduce:transition-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent aria-disabled:opacity-40 aria-disabled:cursor-wait';
+const BTN = 'px-2.5 py-1 coarse:min-h-11 coarse:px-4 coarse:text-sm rounded text-xs font-medium ring-1 ring-line-strong/80 transition-[background-color] motion-reduce:transition-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent aria-disabled:opacity-40 aria-disabled:cursor-wait';
 let data: Container[] = [], busy = new Map<string, Action>(), composing = new Map<string, ComposeAction>(), errors = new Map<string, RowError>(), lastOk: Date | null = null,
     problem = '', problemKind: ProblemKind | '' = '', only: Bucket | '' = '',
     toastTimer: number | undefined, logId: string | null = null, stream: EventSource | null = null, pending: string[] = [],
@@ -86,7 +89,7 @@ let data: Container[] = [], busy = new Map<string, Action>(), composing = new Ma
 // (filtros e busca aplicados); armedIds = o que o Remover em lote armou, para o Confirmar não apagar nada além disso
 let sel = new Set<string>(), visible: string[] = [], bulkBusy: Action | '' = '', bulkHtml = '', armedIds: string[] = [],
     lastSel = t`Nenhum container selecionado`;
-const CHECK = 'size-4 max-lg:size-6 shrink-0 accent-accent cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent';
+const CHECK = 'size-4 coarse:size-6 shrink-0 accent-accent cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent';
 
 let toastFn: (() => unknown) | null = null;
 function toast(msg: string, ok = false, action: ToastAction | null = null) {
@@ -119,7 +122,7 @@ function showProblem(p: Problem | null) {
   $('#table').inert = $('#bulk').inert = !!p;  // dados velhos não aceitam clique
   if (p) $('#banner').innerHTML = `<p class="font-medium text-warn-strong">${p[0]}</p>
     <p class="mt-0.5 text-warn-soft">${p[1]}</p>
-    <details class="mt-2 text-xs text-warn-soft"><summary class="cursor-pointer w-fit py-1 max-lg:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent">${t`Detalhes técnicos`}</summary>
+    <details class="mt-2 text-xs text-warn-soft"><summary class="cursor-pointer w-fit py-1 coarse:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent">${t`Detalhes técnicos`}</summary>
     <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono">${esc(p[2])}</pre></details>`;
   renderCount();
   if (!lastOk) render();
@@ -140,6 +143,8 @@ async function load() {
     // só redesenha se mudou (ou na 1ª carga, senão a lista vazia nunca aparece)
     if (first || JSON.stringify(j) !== JSON.stringify(data)) {
       data = j as Container[];
+      // a última linha e o inspect de uma queda valem enquanto ela dura: subiu, a próxima queda (mesmo código) lê de novo
+      for (const k of Object.keys(tails)) if (!data.some(c => fell(c) && tailKey(c) === k)) { delete tails[k]; delete facts[k]; }
       // container que sumiu (removido, recriado pelo compose com outro ID) sai da seleção
       for (const id of sel) if (!data.some(c => c.ID === id)) sel.delete(id);
       if (selectingRows()) dirty = true; else render();
@@ -276,22 +281,25 @@ if (REMOTE) {
 }
 
 function renderCount() {
-  const n = (k: Bucket) => data.filter(c => bucket(c) === k).length, running = data.filter(c => c.State === 'running').length;
+  const n = (k: Bucket) => data.filter(c => bucket(c) === k).length;
   const problemTxt = problemKind ? PROBLEM_TXT[problemKind] : '';
-  setIcon(problem ? '!' : n('problema') > 9 ? '9+' : String(n('problema') || ''));
-  document.title = !lastOk && !problem ? TITLE : !problem ? `${TITLE} · ${t`${running} rodando`}${n('problema') ? ` · ${t`${n('problema')} com problema`}` : ''}`
+  // o favicon conta a faixa de atenção (a queda já vista sai dela); o título usa as mesmas palavras das contagens
+  const band = data.filter(inBand).length;
+  setIcon(problem ? '!' : band > 9 ? '9+' : String(band || ''));
+  document.title = !lastOk && !problem ? TITLE : !problem ? `${TITLE} · ${t`${n('rodando')} rodando bem`}${n('problema') ? ` · ${t`${n('problema')} com problema`}` : ''}`
     : `${TITLE} · ${problemTxt}`;
+  $('#obj-containers-n').textContent = lastOk ? ` · ${data.length}` : '';
   if (problem) {
     const at = lastOk?.toLocaleTimeString(LOCALE, {hour: '2-digit', minute: '2-digit'});
     $('#count').textContent = lastOk ? t`Desatualizado · dados de ${at}` : problemTxt[0].toUpperCase() + problemTxt.slice(1);
     return;
   }
-  const pill = 'shrink-0 whitespace-nowrap rounded px-2 py-0.5 max-lg:py-3 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent';
+  const pill = 'shrink-0 whitespace-nowrap rounded px-2 py-0.5 coarse:py-3 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent';
   // um controle segmentado (é um filtro, não um selo); no celular ele rola de lado em vez de quebrar em duas linhas
   const segs = BUCKETS.filter(([k]) => n(k) || only === k).map(([k, one, many, color]) =>
     `<button data-id="count-${k}" data-a="filter" aria-pressed="${only === k}" onclick="filterBy('${k}')"
       class="${pill} rounded-none font-mono text-data hover:bg-hover aria-pressed:bg-fg-strong aria-pressed:text-canvas ${color}"><span class="font-semibold tabular-nums">${n(k)}</span> ${n(k) === 1 ? one : many}</button>`).join('');
-  $('#count').innerHTML = (segs ? `<span class="flex max-lg:max-w-full max-lg:overflow-x-auto [scrollbar-width:none] rounded ring-1 ring-line divide-x divide-line">${segs}</span>`
+  $('#count').innerHTML = (segs ? `<span class="flex max-sm:max-w-full max-sm:overflow-x-auto [scrollbar-width:none] rounded ring-1 ring-line divide-x divide-line">${segs}</span>`
     : `<span>${t`0 containers`}</span>`) + (only || $<HTMLInputElement>('#q').value.trim()
     ? `<button data-id="count-clear" data-a="filter" onclick="clearFilters()" class="${pill} text-accent-fg underline underline-offset-4 hover:text-accent-soft">${t`Limpar filtros`}</button>` : '');
 }
@@ -362,7 +370,7 @@ const reachable = (c: Container, h: string) => !REMOTE || c.Ports.split(', ').so
 function portChip(c: Container, [h, p, proto]: Port) {
   const label = `${h}<span class="font-sans">→</span>${p}${proto === 'tcp' ? '' : '/' + proto}`, svg = 'aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" class="inline size-3 ml-1 -mt-0.5"';
   // texto mono, como o PORTS do docker ps: o link sublinha no hover, e o padding vira alvo de toque no celular
-  const base = 'whitespace-nowrap font-mono text-xs px-1 py-0.5 max-lg:px-2 max-lg:py-3.5 rounded underline-offset-4 focus-visible:outline-2 focus-visible:outline-accent';
+  const base = 'whitespace-nowrap font-mono text-xs px-1 py-0.5 coarse:px-2 coarse:py-3.5 rounded underline-offset-4 focus-visible:outline-2 focus-visible:outline-accent';
   // faixa longa: não há um endereço para abrir ou copiar, então o chip só informa
   if (!reachable(c, h)) return `<span title="${t`Só no loopback do daemon remoto ${esc(CTX)}: não abre daqui`}"
     class="${base} text-muted">${label}</span>`;
@@ -381,7 +389,7 @@ function errHtml(c: Container) {
   if (!e) return '';
   if (e.state !== c.State) { errors.delete(c.ID); return ''; }
   const hint = errHint(e.msg);  // a causa traduzida fica à vista; o erro do docker, no "ver erro"
-  return `<details data-keep="err" class="mt-1 text-xs text-bad-fg"><summary class="cursor-pointer w-fit py-1 max-lg:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent">${t`Falhou ao ${e.what.toLowerCase()} · ver erro`}</summary>
+  return `<details data-keep="err" class="mt-1 text-xs text-bad-fg"><summary class="cursor-pointer w-fit py-1 coarse:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent">${t`Falhou ao ${e.what.toLowerCase()} · ver erro`}</summary>
     <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-bad-soft">${esc(e.msg)}</pre></details>${
     hint ? `<p class="[contain:inline-size] font-sans text-xs text-bad-soft">${esc(hint)}</p>` : ''}`;
 }
@@ -417,7 +425,7 @@ async function loadTail(c: Container) {
   const [txt, info]: [string | null, Facts | null] = await Promise.all([get(`/api/logs/${c.ID}?tail=5`), get(`/api/inspect/${c.ID}`)]);
   // stdout e stderr chegam um depois do outro: o timestamp ISO no começo de cada linha devolve a ordem
   tails[k] = txt?.split('\n').filter(l => l.trim()).sort().at(-1)?.replace(/^\d{4}-\d\d-\d\dT\S+\s/, '') ?? '';
-  if (info) facts[k] = {OOMKilled: info.OOMKilled, RestartCount: info.RestartCount};
+  if (info) facts[k] = {OOMKilled: info.OOMKilled, RestartCount: info.RestartCount, FinishedAt: info.FinishedAt};
   if (tails[k] || info) render();
 }
 
@@ -425,7 +433,7 @@ const rowCache = new Map<string, {sig: string; html: string}>();
 function row(c: Container, withProject = false) {
   if (fell(c)) loadTail(c);
   const sig = JSON.stringify([c, withProject, tails[tailKey(c)], facts[tailKey(c)], busy.get(c.ID), arming?.id === c.ID, errors.get(c.ID), health[c.ID + c.Status], stats[sid(c.ID)],
-                              series.get(sid(c.ID))?.at(-1)?.t, composing.has(project(c)), TOUCH, sel.has(c.ID)]);
+                              series.get(sid(c.ID))?.at(-1)?.t, composing.has(project(c)), TOUCH, WIDE.matches, sel.has(c.ID), quiet(c), fallKey(c)]);
   const hit = rowCache.get(c.ID);
   if (hit?.sig === sig) return hit.html;
   const html = rowHtml(c, withProject);
@@ -433,72 +441,104 @@ function row(c: Container, withProject = false) {
   return html;
 }
 
-// armada, a linha troca a principal pelo Confirmar e o "⋯" por um ×, nas mesmas larguras: a coluna não muda e a tabela
-// não se mexe na hora da decisão. O aviso também não alarga a coluna ([contain:inline-size]): quebra dentro dela
+// armada, a linha só fica marcada (e a principal e o "⋯" inertes): o Confirmar, o × e o aviso vão para o pé da tela
+// (armHtml). A tabela não se mexe na hora da decisão, e o clique por hábito no mesmo lugar não confirma nada
 const RESTART_ICON = '<svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="size-4"><path d="M13 8a5 5 0 1 1-1.6-3.7"/><path d="M13 2.5v3h-3"/></svg>';
 const X_ICON = '<svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="size-4"><path d="M4 4l8 8M12 4l-8 8"/></svg>';
+// nomes que vêm do docker, dentro de uma frase: em mono, como no resto da página
+const mono = (s: string) => `<span class="font-mono">${s}</span>`;
 // todo estado armado tem o × ao lado do Confirmar (no toque não há Esc, e esperar 8 s não é saída) e o mesmo aviso,
 // que começa pelo contexto quando o daemon é remoto: a confirmação diz onde vai apagar
 const cancelBtn = (id: string, what: string) => `<button data-id="${id}" data-a="cancel" aria-label="${t`Cancelar ${what}`}" title="${t`Cancelar (Esc)`}"
-  onclick="disarm()" class="grid place-items-center shrink-0 lg:w-9 max-lg:w-11 ${BTN} text-fg hover:bg-hover">${X_ICON}</button>`;
-const armNote = (text: string, cls = 'w-full [contain:inline-size] lg:text-right text-balance') => `<p aria-hidden="true" class="${cls} text-xs text-bad-soft">${
+  onclick="disarm()" class="grid place-items-center shrink-0 w-9 coarse:w-11 ${BTN} text-fg hover:bg-hover">${X_ICON}</button>`;
+const armNote = (text: string, cls = 'w-full text-balance') => `<p aria-hidden="true" class="${cls} text-xs text-bad-soft">${
   REMOTE ? `<span class="font-semibold text-warn-fg">${esc(CTX)}</span> · ` : ''}${text} ${TOUCH ? t`Cancela sozinho em 8 s.` : t`Esc cancela.`}</p>`;
+// a queda que alguém já viu sai da faixa de atenção até o container cair de novo (o FinishedAt do inspect muda).
+// Fica neste navegador; ponytail: guarda as últimas 200
+const SEEN_KEY = 'docker-gui-seen';
+let seenFails = new Set<string>((() => { try { return JSON.parse(localStorage.getItem(SEEN_KEY) || '[]'); } catch { return []; } })());
+const fallKey = (c: Container) => { const f = facts[tailKey(c)]; return f?.FinishedAt ? `${c.ID}@${f.FinishedAt}` : ''; };
+const quiet = (c: Container) => (c.State === 'exited' || c.State === 'dead') && seenFails.has(fallKey(c));
+// na faixa de atenção: o que está com problema, menos a queda antiga que alguém marcou como vista
+const inBand = (c: Container) => isProblem(c) && !quiet(c);
+function saveSeen() {
+  try { localStorage.setItem(SEEN_KEY, JSON.stringify([...seenFails].slice(-200))); } catch { /* aba privada: vale só agora */ }
+  render();
+}
+function ackFail(id: string) {
+  const c = data.find(c => c.ID === id), k = c && fallKey(c);
+  if (!k) return;
+  seenFails.add(k); saveSeen();
+  toast(t`${c.Names} saiu da faixa de atenção. Volta para lá se cair de novo.`, true, [t`Desfazer`, () => { seenFails.delete(k); saveSeen(); }]);
+  document.querySelector<HTMLElement>(`[data-id="${id}"][data-a="logs"]`)?.focus();
+}
 function rowHtml(c: Container, withProject: boolean) {
   const b = busy.get(c.ID), tn = TONE[b ? 'busy' : tone(c)], st = status(c, facts[tailKey(c)]), pp = ports(c.Ports), p = project(c), bt = b && busyText(c, b);
   const armed = arming?.id === c.ID, prim = PRIMARY[c.State], sec = SECONDARY[c.State];
   const u = c.State === 'running' && !b && stats[sid(c.ID)] ? usage(stats[sid(c.ID)]) : null, h = series.get(sid(c.ID)) ?? [];
-  const slot = (w = 'lg:w-20') => `<span aria-hidden="true" class="${w} shrink-0 max-lg:hidden"></span>`;
+  const slot = (w = 'w-20') => `<span aria-hidden="true" class="${w} shrink-0 max-sm:hidden"></span>`;
   const btn = (a: RowAction, cls = 'text-fg hover:bg-hover', text = LABEL[a], aria = `${LABEL[a]} ${esc(c.Names)}`, base = BTN) =>
-    `<button data-id="${c.ID}" data-a="${a}" ${(b || armed && a !== 'remove') && a !== 'logs' ? 'aria-disabled="true"' : ''}
-      aria-label="${aria}" aria-describedby="st-${c.ID}" onclick="act('${a}','${c.ID}')" class="lg:w-20 max-lg:min-w-24 shrink-0 ${base} ${cls}">${text}</button>`;
-  // ações raras (reiniciar, pausar, remover, exec) ficam no "⋯": a linha mostra só a ação principal e Logs
+    `<button data-id="${c.ID}" data-a="${a}" ${(b || armed) && a !== 'logs' ? 'aria-disabled="true"' : ''}
+      aria-label="${aria}" aria-describedby="st-${c.ID}" onclick="act('${a}','${c.ID}')" class="sm:w-20 max-sm:min-w-24 shrink-0 ${base} ${cls}">${text}</button>`;
+  // ações raras (pausar, remover, exec, o compose do serviço) ficam no "⋯": a linha mostra a principal, Reiniciar e Logs
   const svc = p && workingDir(c) && service(c);  // compose restart só com a pasta no label, como o compose up
-  // Reiniciar (o ciclo de quem desenvolve: muda, reinicia, olha os logs) fica à vista, em ícone para caber; sai do "⋯"
+  // Reiniciar (o ciclo de quem desenvolve: muda, reinicia, olha os logs) fica à vista, em ícone para caber; sai do "⋯".
+  // É o docker restart deste container; o do serviço inteiro (todas as réplicas) é o "compose restart" do "⋯"
   const restart = c.State === 'running' ? `<button data-id="${c.ID}" data-a="restart" ${b ? 'aria-disabled="true"' : ''} aria-label="${t`Reiniciar ${esc(c.Names)}`}"
-      aria-describedby="st-${c.ID}" title="${t`Reiniciar (r)`}" onclick="act('restart','${c.ID}')"
-      class="grid place-items-center shrink-0 lg:w-9 max-lg:w-11 ${BTN} text-fg hover:bg-hover">${RESTART_ICON}</button>` : slot('lg:w-9');
-  const more = [sec && sec !== 'restart' && [sec, LABEL[sec]], svc && ['srestart', t`Reiniciar serviço ${esc(svc)}`],
-                svc && ['sbuild', t`Reconstruir serviço ${esc(svc)}`], c.State === 'running' && ['pause', t`Pausar`],
+      aria-describedby="st-${c.ID}" title="${t`Reiniciar este container (r)`}" onclick="act('restart','${c.ID}')"
+      class="grid place-items-center shrink-0 w-9 coarse:w-11 ${BTN} text-fg hover:bg-hover">${RESTART_ICON}</button>` : slot('w-9');
+  // no "⋯", o compose do serviço com o comando literal: "compose restart api" não se confunde com o Reiniciar da linha
+  const more = [sec && sec !== 'restart' && [sec, LABEL[sec]], svc && ['srestart', `compose restart ${esc(svc)}`],
+                svc && ['sbuild', `compose up --build ${esc(svc)}`], c.State === 'running' && ['pause', t`Pausar`],
                 c.State === 'running' && ['shell', t`Abrir terminal`], c.State === 'running' && ['exec', t`Copiar docker exec`],
                 removable(c) ? ['remove', t`Remover…`] : ['noremove', t`Pare antes de remover`]].filter((x): x is [MenuAction, string] => !!x);
-  const menu = !more.length ? slot('lg:w-9') : menuBox(c.ID, t`Mais ações para ${esc(c.Names)}`, !!b,
+  const menu = !more.length ? slot('w-9') : menuBox(c.ID, t`Mais ações para ${esc(c.Names)}`, !!b || armed,
     more.map(([a, text]) => a === 'noremove' ? `<button data-id="${c.ID}" data-a="m-noremove" aria-disabled="true" aria-label="${t`Remover (indisponível: pare o container antes)`}" title="${t`O docker só remove container parado (sem -f)`}"
       class="${MENU_ITEM} text-muted cursor-not-allowed hover:bg-transparent">${text}</button>` : `<button data-id="${c.ID}" data-a="m-${a}" ${b || ((a === 'srestart' || a === 'sbuild') && composing.has(p)) ? 'aria-disabled="true"' : ''} onclick="menuPick(this); ${a === 'exec' ? `copyExec('${c.ID}')` : a === 'shell' ? `openShell('${c.ID}')`
       : a === 'srestart' || a === 'sbuild' ? `serviceAct('${a.slice(1)}','${c.ID}')` : `act('${a}','${c.ID}')`}"
-      class="${MENU_ITEM} ${a === 'remove' ? 'text-bad-fg' : 'text-fg'}">${text}</button>`).join(''));
-  const healthBox = hasHealth(c) && !b ? `<details data-keep="health" class="mt-1 text-xs" ontoggle="this.open && loadHealth('${c.ID}')">
-      <summary class="cursor-pointer w-fit py-1 max-lg:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent text-muted hover:text-fg">${t`Ver último healthcheck`}</summary>
+      ${a === 'srestart' ? `title="${t`Reinicia todas as réplicas do serviço ${esc(svc)}`}"` : a === 'sbuild' ? `title="${t`Reconstrói a imagem e recria o serviço ${esc(svc)} (b)`}"` : ''}
+      class="${MENU_ITEM} ${a === 'remove' ? 'text-bad-fg' : a === 'srestart' || a === 'sbuild' ? 'font-mono text-xs text-fg' : 'text-fg'}">${text}</button>`).join(''));
+  // [contain:inline-size]: o healthcheck aberto quebra dentro da coluna, sem alargá-la (a tabela inteira se mexia)
+  const healthBox = hasHealth(c) && !b ? `<details data-keep="health" class="mt-1 text-xs [contain:inline-size]" ontoggle="this.open && loadHealth('${c.ID}')">
+      <summary class="cursor-pointer w-fit py-1 coarse:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent text-muted hover:text-fg">${t`Ver último healthcheck`}</summary>
       <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-fg-soft">${esc(health[c.ID + c.Status] || t`Carregando…`)}</pre></details>` : '';
-  // no card do celular, imagem, status e portas recuam até o nome (pl-14 = checkbox + bolinha + os gaps)
-  const on = sel.has(c.ID);
-  return `<tr data-row data-key="c:${c.ID}" role="row" class="border-t border-line/70 ${on ? 'bg-accent/10' : 'hover:bg-raised/70'} transition motion-reduce:transition-none max-lg:block max-lg:px-4 max-lg:py-4 max-lg:space-y-1.5">
-    <th role="rowheader" scope="row" class="py-3 pl-4 pr-6 max-lg:block max-lg:p-0 text-left font-normal"><div class="flex items-center gap-3">
-      <input type="checkbox" data-id="${c.ID}" data-a="sel" ${on ? 'checked' : ''} aria-label="${t`Selecionar ${esc(c.Names)}`}" onchange="toggleSel('${c.ID}')" class="${CHECK}">
-      <span aria-hidden="true" class="size-2 shrink-0 rounded-full ${tn[0]}"></span>
-      <div class="min-w-0"><div class="font-mono text-data font-semibold text-fg-strong lg:truncate lg:max-w-[28ch]" title="${esc(c.Names)} · ${c.ID.slice(0, 12)}">${esc(c.Names)}</div>${
-           withProject && p ? `<div class="font-mono text-xs text-muted">${esc(p)}</div>` : ''}</div></div></th>
-    <td role="cell" class="font-mono text-xs text-muted pr-4 max-lg:block max-lg:p-0 max-lg:pl-14 [overflow-wrap:anywhere]">
-      <span class="sr-only lg:hidden">${t`Imagem:`} </span><div class="lg:truncate lg:max-w-[24ch] lg:[direction:rtl] lg:text-left" title="${esc(c.Image)}"><bdi dir="ltr">${esc(shortImage(c.Image))}</bdi></div></td>
-    <td role="cell" class="font-mono text-data pr-4 lg:min-w-[24ch] max-lg:block max-lg:p-0 max-lg:pl-14" title="${esc(c.Status)}">
-      <span id="st-${c.ID}" class="${tn[1]}">${bt || esc(st[0])}${st[1] && !b ? `<span class="block text-xs text-muted">${st[1]}</span>` : ''}</span>${
-      // [contain:inline-size]: a linha do log ocupa a largura que a coluna já tem, sem alargá-la (a tabela estourava)
-      fell(c) && !b && tails[tailKey(c)] ? `<span class="block [contain:inline-size] mt-1 font-mono text-xs text-fg-soft lg:truncate [overflow-wrap:anywhere]" title="${esc(tails[tailKey(c)])}"><span aria-hidden="true" class="text-dim">› </span><span class="sr-only">${t`Última linha do log:`} </span>${esc(tails[tailKey(c)])}</span>` : ''}${
-      u ? `<span id="us-${c.ID}" class="block text-xs font-mono text-muted" title="${esc(u[2])}"><span class="whitespace-nowrap">${esc(u[0])} ${spark(h, 'cpu')}</span> <span class="whitespace-nowrap max-xl:block"><span class="max-xl:hidden">· </span>${esc(u[1])} ${spark(h, 'mem')}</span></span>` : ''}${b ? '' : errHtml(c) + healthBox}</td>
-    <td role="cell" class="pr-4 max-lg:hidden max-lg:has-[div]:block max-lg:p-0 max-lg:pl-14">${pp.length
-      ? `<div class="flex flex-wrap gap-1 max-lg:gap-x-2 max-lg:-ml-2 max-lg:-my-3">${pp.map(x => portChip(c, x)).join('')}</div>` : ''}</td>
-    <td role="cell" class="pr-4 max-lg:block max-lg:p-0 max-lg:pt-2"><div class="flex justify-end max-lg:justify-start items-center gap-1.5 max-lg:gap-2">
-      ${prim ? btn(prim, prim === 'start' ? 'text-ok-fg hover:bg-ok/10' : undefined) : slot()}${restart}${btn('logs', 'text-fg-soft hover:text-fg-strong hover:bg-hover', undefined, undefined, ghost())}
-      ${armed ? menuBox(c.ID, t`Mais ações para ${esc(c.Names)}`, true, '') : menu}
-    </div>${armed ? `<div class="mt-1.5 flex flex-wrap items-center justify-end max-lg:justify-start gap-x-1.5 gap-y-1 [contain:inline-size]">${
-      armNote(t`Remover ${esc(c.Names)} de vez? Os volumes ficam.`, 'basis-full lg:text-right text-balance')}${
-      btn('remove', 'bg-danger text-white ring-danger hover:bg-danger-hover', t`Remover`, t`Confirmar remoção de ${esc(c.Names)}`)}${cancelBtn(c.ID, t`remoção de ${esc(c.Names)}`)}</div>` : ''}</td></tr>`;
+  const tail = fell(c) && !b ? tails[tailKey(c)] : '';
+  // na faixa, a última linha do log é o atalho para o diagnóstico: abre os logs
+  const tailBtn = tail ? `<button data-id="${c.ID}" data-a="tail" onclick="act('logs','${c.ID}')" title="${esc(tail)}"
+      class="block w-full [contain:inline-size] mt-1 text-left font-mono text-xs text-fg-soft sm:truncate [overflow-wrap:anywhere] rounded cursor-pointer hover:text-fg-strong hover:underline underline-offset-4 focus-visible:outline-2 focus-visible:outline-accent"><span aria-hidden="true" class="text-dim">› </span><span class="sr-only">${t`Abrir os logs. Última linha:`} </span>${esc(tail)}</button>` : '';
+  const seenBtn = withProject && !b && (c.State === 'exited' || c.State === 'dead') && fallKey(c) ? `<button data-id="${c.ID}" data-a="seen" onclick="ackFail('${c.ID}')"
+      aria-label="${t`Marcar a queda de ${esc(c.Names)} como vista: sai da faixa de atenção`}" class="mt-1 py-0.5 coarse:py-3 font-sans text-xs text-muted underline underline-offset-4 rounded hover:text-fg focus-visible:outline-2 focus-visible:outline-accent">${t`Marcar como visto`}</button>` : '';
+  // abaixo de 1280px a imagem e as portas descem para baixo do nome (a tabela fica com nome, status e ações)
+  const image = `<bdi dir="ltr">${esc(shortImage(c.Image))}</bdi>`, chips = pp.map(x => portChip(c, x)).join('');
+  const on = sel.has(c.ID), cell = 'py-3 align-top';
+  // na faixa de atenção diagnosticar é a tarefa: o Logs ganha contorno e o ciano do que é interativo
+  const logsBtn = withProject ? btn('logs', 'text-accent-fg hover:bg-accent/10', undefined, undefined, BTN.replace('ring-line-strong/80', 'ring-accent/40'))
+    : btn('logs', 'text-fg-soft hover:text-fg-strong hover:bg-hover', undefined, undefined, ghost());
+  return `<tr data-row data-key="c:${c.ID}" role="row" class="border-t border-line/70 ${armed ? 'bg-bad/10' : on ? 'bg-accent/10' : 'hover:bg-raised/70'} transition-[background-color] motion-reduce:transition-none max-sm:block max-sm:px-4 max-sm:py-4 max-sm:space-y-1.5">
+    <th role="rowheader" scope="row" class="${cell} pl-4 pr-6 max-sm:block max-sm:p-0 text-left font-normal"><div class="flex items-start gap-3">
+      <input type="checkbox" data-id="${c.ID}" data-a="sel" ${on ? 'checked' : ''} aria-label="${t`Selecionar ${esc(c.Names)}`}" onchange="toggleSel('${c.ID}')" class="${CHECK} mt-0.5 coarse:mt-0">
+      <span aria-hidden="true" class="size-2 mt-1.5 coarse:mt-2 shrink-0 rounded-full ${tn[0]}"></span>
+      <div class="min-w-0"><div class="font-mono text-data font-semibold text-fg-strong sm:truncate sm:max-w-[28ch]" title="${esc(c.Names)} · ${c.ID.slice(0, 12)}">${esc(c.Names)}</div>${
+           withProject && p ? `<div class="font-mono text-xs text-muted">${esc(p)}</div>` : ''}
+${WIDE.matches ? '' : `
+        <div class="font-mono text-xs text-muted sm:truncate sm:max-w-[28ch] sm:[direction:rtl] sm:text-left [overflow-wrap:anywhere]" title="${esc(c.Image)}"><span class="sr-only">${t`Imagem:`} </span>${image}</div>${
+        chips ? `<div class="mt-0.5 flex flex-wrap gap-1 -ml-1 coarse:gap-x-2 coarse:-ml-2">${chips}</div>` : ''}`}</div></div></th>
+    <td role="cell" class="${cell} font-mono text-xs text-muted pr-4 max-xl:hidden">${WIDE.matches ? `<div class="truncate [direction:rtl] text-left" title="${esc(c.Image)}">${image}</div>` : ''}</td>
+    <td role="cell" class="${cell} font-mono text-data pr-4 sm:min-w-[20ch] max-sm:block max-sm:p-0 max-sm:pl-12 max-sm:coarse:pl-14" title="${esc(c.Status)}">
+      <span id="st-${c.ID}" class="${tn[1]}">${bt || esc(st[0])}${st[1] && !b ? `<span class="block text-xs text-muted">${st[1]}</span>` : ''}</span>${tailBtn}${
+      u ? `<span id="us-${c.ID}" class="block text-xs font-mono text-muted" title="${esc(u[2])}"><span class="whitespace-nowrap">${esc(u[0])} ${spark(h, 'cpu')}</span> <span class="whitespace-nowrap max-xl:block"><span class="max-xl:hidden">· </span>${esc(u[1])} ${spark(h, 'mem')}</span></span>` : ''}${b ? '' : errHtml(c) + healthBox}${seenBtn}</td>
+    <td role="cell" class="${cell} pr-4 max-xl:hidden">${WIDE.matches && chips ? `<div class="flex flex-wrap gap-1">${chips}</div>` : ''}</td>
+    <td role="cell" class="py-2.5 align-top pr-4 max-sm:block max-sm:p-0 max-sm:pt-2"><div class="flex justify-end max-sm:justify-start items-center gap-1.5 coarse:gap-2">
+      ${prim ? btn(prim, prim === 'start' ? 'text-ok-fg hover:bg-ok/10' : undefined) : slot()}${restart}${logsBtn}
+      ${menu}
+    </div></td></tr>`;
 }
 
 // "⋯" das ações raras, de um container ou de um projeto: o id e o aria-label dizem de quem é
-const MENU_ITEM = 'block w-full text-left px-3 py-2 max-lg:py-3 rounded text-sm hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent';
+const MENU_ITEM = 'block w-full text-left px-3 py-2 coarse:py-3 rounded text-sm hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent';
 const menuBox = (id: string, label: string, off: boolean, items: string) => `<details data-keep="menu" class="shrink-0" ontoggle="placeMenu(this)">
     <summary data-id="${id}" data-a="menu" aria-label="${label}" ${off ? 'aria-disabled="true"' : ''}
-      class="list-none [&::-webkit-details-marker]:hidden cursor-pointer grid place-items-center lg:w-9 max-lg:w-11 ${BTN} text-fg hover:bg-hover">
+      class="list-none [&::-webkit-details-marker]:hidden cursor-pointer grid place-items-center w-9 coarse:w-11 ${BTN} text-fg hover:bg-hover">
       <svg aria-hidden="true" viewBox="0 0 16 16" fill="currentColor" class="size-4"><circle cx="3.5" cy="8" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="12.5" cy="8" r="1.3"/></svg></summary>
     <div class="fixed z-30 min-w-48 rounded-lg bg-raised ring-1 ring-line-strong p-1 shadow-lg shadow-black/40">${items}</div></details>`;
 
@@ -517,6 +557,7 @@ function placeMenu(d: HTMLDetailsElement) {
   Object.assign(m.style, {left: left + 'px', top: top + 'px'});
 }
 addEventListener('resize', () => closeMenus());
+WIDE.addEventListener('change', () => render());
 // rolar (a página, a tabela de lado, o modal) leva o menu junto do "⋯"; só fecha quando o "⋯" sai da tela. Fechar a cada
 // rolagem derrubava o menu no celular com um toque de dedo, e no desktop quando o clique precisava rolar a tabela até o "⋯"
 addEventListener('scroll', () => document.querySelectorAll<HTMLDetailsElement>('details[data-keep="menu"][open]').forEach(d => {
@@ -531,15 +572,19 @@ function closeMenus(except?: Element | null) {
 // clique fora ou Esc fecha o "⋯"
 document.addEventListener('click', e => closeMenus(e.target instanceof Element ? e.target.closest('details[data-keep="menu"]') : null));
 
-const bandHead = (text: string, cls: string) => `<tr data-key="h:attn" role="row" class="max-lg:block"><th role="columnheader" colspan="5" scope="colgroup"
-  class="max-lg:block px-4 pt-4 pb-2 text-left font-mono text-xs font-semibold uppercase border-t border-line ${cls}">${text}<span class="ml-3 font-sans font-normal normal-case text-bad-soft/80">${t`healthcheck falhando, loop de reinício ou saída com erro`}</span></th></tr>`;
+const bandHead = (text: string, cls: string) => `<tr data-key="h:attn" role="row" class="max-sm:block"><th role="columnheader" colspan="5" scope="colgroup"
+  class="max-sm:block px-4 pt-4 pb-2 text-left font-mono text-xs font-semibold uppercase border-t border-line ${cls}">${text}<span class="ml-3 font-sans font-normal normal-case text-bad-soft/80">${t`healthcheck falhando, loop de reinício ou saída com erro`}</span></th></tr>`;
 
 // cabeçalho do projeto compose: contagem e ações para o stack inteiro (sempre sobre todos os containers do projeto).
 // Como na linha: uma ação principal (Iniciar tudo se algo está parado, senão Parar tudo), Logs e o resto no "⋯"
 function groupHead(k: string, label: string) {
   const all = data.filter(c => project(c) === k), on = all.filter(c => c.State === 'running').length;
   const anyBusy = composing.has(k) || all.some(c => busy.has(c.ID)), dir = k && workingDir(all[0]), armed = arming?.id === `stack-${k}`;
-  const inBand = all.filter(isProblem).length, ek = esc(k), off = anyBusy ? 'aria-disabled="true"' : '';
+  const nBand = all.filter(inBand).length, ek = esc(k), off = anyBusy ? 'aria-disabled="true"' : '';
+  // o que não está rodando nem parado aparece pelo nome: "Parar tudo (5)" fecha com "3 de 5 rodando · 1 pausado · 1 reiniciando"
+  const nst = (st: ContainerState) => all.filter(c => c.State === st).length;
+  const also = [nst('paused') && plural(nst('paused'), t`pausado`, t`pausados`), nst('restarting') && t`${nst('restarting')} reiniciando`]
+    .filter(Boolean).map(x => ` · ${x}`).join('');
   const prim: Action = stackList('start', k).length ? 'start' : 'stop';
   // com um container só, o botão diz qual: "Iniciar worker" em vez de "Iniciar tudo (1)"
   const sbtn = (a: Action, text: string, cls: string) => {
@@ -564,22 +609,46 @@ function groupHead(k: string, label: string) {
   // a faixa de estado: um bloco por container do projeto, na cor do estado, como uma calha de processos
   const strip = k ? `<span aria-hidden="true" data-strip class="flex items-center gap-0.5">${[...all].sort((a, b) => a.Names.localeCompare(b.Names)).map(c =>
     `<span title="${esc(c.Names)}: ${esc(status(c)[0])}" class="h-3 w-1.5 rounded-[1px] ${TONE[busy.has(c.ID) ? 'busy' : tone(c)][0]}"></span>`).join('')}</span>` : '';
-  return `<tr data-key="g:${ek}" role="row" class="max-lg:block"><th role="columnheader" colspan="5" scope="colgroup" class="max-lg:block px-4 pt-3 pb-2.5 text-left font-normal border-t border-line-strong bg-raised">
+  return `<tr data-key="g:${ek}" role="row" class="max-sm:block"><th role="columnheader" colspan="5" scope="colgroup" class="max-sm:block px-4 pt-3 pb-2.5 text-left font-normal border-t border-line-strong bg-raised">
     <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
-      <span class="font-mono text-group font-semibold ${k ? 'text-fg-strong' : 'text-muted'}">${label}</span>${strip}
-      ${k ? `<span class="font-mono text-xs ${verb ? 'text-fg-strong' : 'text-muted'}">compose · ${verb ? COMPOSE_VERB[verb] : t`${on} de ${all.length} rodando`}</span>` : ''}
-      ${k && inBand ? `<span class="text-xs text-bad-fg">${t`${inBand} na faixa de atenção, acima`}</span>` : ''}
+      <span class="font-mono text-group font-semibold ${k ? 'text-fg-strong' : 'text-fg-soft'}">${label}</span>${strip}
+      ${k ? `<span class="font-mono text-xs ${verb ? 'text-fg-strong' : 'text-muted'}">compose · ${verb ? COMPOSE_VERB[verb] : t`${on} de ${all.length} rodando` + also}</span>` : ''}
+      ${k && nBand ? `<span class="text-xs text-bad-fg">${t`${nBand} na faixa de atenção, acima`}</span>` : ''}
       ${missing.length ? `<span class="text-xs text-muted" title="${t`No arquivo do compose, sem container: sobem pelo menu ⋯ do projeto`}">${
         t`sem container: ${`<span class="font-mono">${esc(missing.join(', '))}</span>`}`}</span>` : ''}
-      <span class="lg:ml-auto max-lg:w-full flex flex-wrap items-center gap-1.5 max-lg:gap-2">${sbtn(prim, prim === 'start' ? t`Iniciar tudo` : t`Parar tudo`,
+      <span class="sm:ml-auto max-sm:w-full flex flex-wrap items-center gap-1.5 coarse:gap-2">${sbtn(prim, prim === 'start' ? t`Iniciar tudo` : t`Parar tudo`,
         `${BTN} ${prim === 'start' ? 'text-ok-fg hover:bg-ok/10' : 'text-fg hover:bg-hover'}`)}${dir
         ? `<button data-id="stack-${ek}" data-a="plogs" data-p="${ek}" aria-label="${t`Logs do projeto ${ek}`}" onclick="projectLogs(this.dataset.p)"
-            class="lg:w-20 ${ghost()} text-fg-soft hover:text-fg-strong hover:bg-hover">${t`Logs`}</button>` : ''}${armed
-        ? `<button data-id="stack-${ek}" data-a="down" data-p="${ek}" aria-label="${t`Confirmar compose down do projeto ${ek}`}" onclick="composeAct('down', this.dataset.p)"
-            class="${BTN} bg-danger text-white ring-danger hover:bg-danger-hover">${t`Derrubar ${ek}`}</button>${cancelBtn(`stack-${ek}`, t`compose down do projeto ${ek}`)}`
-        : groups.length ? menuBox(`stack-${ek}`, t`Mais ações do projeto ${ek}`, anyBusy, groups.join('<hr class="my-1 border-line">')) : ''}</span>
-      
+            class="w-20 ${ghost()} text-fg-soft hover:text-fg-strong hover:bg-hover">${t`Logs`}</button>` : ''}${groups.length
+        ? menuBox(`stack-${ek}`, t`Mais ações do projeto ${ek}`, anyBusy || armed, groups.join('<hr class="my-1 border-line">')) : ''}</span>
     </div></th></tr>`;
+}
+
+// pt-BR: "remoção de a rede" -> "remoção da rede" (o artigo vem do OBJ; em inglês não acontece)
+const de = (s: string) => s.replace(/\bde ([ao]s?) /g, 'd$1 ');
+// o segundo passo de uma ação destrutiva (menos o lote, que tem a barra dele): o que sai e o que fica, o Confirmar com o
+// verbo e o alvo, e o ×. Calculado a cada render: o aviso do volume prune, por exemplo, chega depois da lista de volumes
+let dockHtml = '';
+function armHtml() {
+  if (!arming || arming.id === 'bulk') return '';
+  const {id, a, name} = arming;
+  let note: string, text: string, aria: string, what: string;
+  if (a === 'down') {
+    note = t`Derrubar ${mono(esc(name))}? ${downNote(name, true)}`; text = t`Derrubar ${esc(name)}`;
+    aria = t`Confirmar compose down do projeto ${esc(name)}`; what = t`compose down do projeto ${esc(name)}`;
+  } else if (a === 'prune') {
+    const [type, , label, what0, note0] = DISK.find(d => 'df-' + d[1] === id)!, d = Array.isArray(disk) ? disk.find(d => d.Type === type) : undefined;
+    note = t`Apagar ${what0}? ${esc(pruneNote(d, note0))}`; text = t`Limpar ${label.toLowerCase()}`;
+    aria = t`Confirmar limpeza de ${label.toLowerCase()}`; what = t`limpeza de ${label.toLowerCase()}`;
+  } else if (a === 'rm') {
+    note = t`Remover ${esc(name)}? ${OBJ[id.split('-')[1] as ObjKind][5]}`; text = t`Remover`;
+    aria = de(t`Confirmar remoção de ${esc(name)}`); what = de(t`remoção de ${esc(name)}`);
+  } else {
+    note = t`Remover ${mono(esc(name))} de vez? Os volumes ficam.`; text = t`Remover`;
+    aria = t`Confirmar remoção de ${esc(name)}`; what = t`remoção de ${esc(name)}`;
+  }
+  return `${armNote(note, 'max-w-[60ch] text-balance')}<span class="flex shrink-0 gap-1.5 coarse:gap-2"><button data-id="${esc(id)}" data-a="confirm"
+    aria-label="${aria}" onclick="confirmArm()" class="${BTN} bg-danger text-white ring-danger hover:bg-danger-hover">${text}</button>${cancelBtn(esc(id), what)}</span>`;
 }
 
 function render() {
@@ -589,8 +658,8 @@ function render() {
   const rows = data.filter(c => (!only || bucket(c) === only) && [c.Names, c.Image, project(c)].join(' ').toLowerCase().includes(q))
                    .sort((a, b) => a.Names.localeCompare(b.Names));
   visible = rows.map(c => c.ID);
-  const attn = rows.filter(isProblem), groups = new Map<string, Container[]>();
-  for (const c of rows) if (!isProblem(c)) groups.set(project(c), [...(groups.get(project(c)) || []), c]);
+  const attn = rows.filter(inBand), groups = new Map<string, Container[]>();
+  for (const c of rows) if (!inBand(c)) groups.set(project(c), [...(groups.get(project(c)) || []), c]);
   // projeto com todos os containers na faixa ainda precisa do cabeçalho (e das ações do stack)
   for (const c of attn) if (project(c) && !groups.has(project(c))) groups.set(project(c), []);
   const keys = [...groups.keys()].sort((a, b) => Number(a === '') - Number(b === '') || a.localeCompare(b));  // soltos por último
@@ -601,15 +670,14 @@ function render() {
     ? [...(attn.length ? [bandHead(t`Precisa de atenção · ${attn.length}`, 'text-bad-fg bg-bad/10'), ...attn.map(c => row(c, true))] : []),
        ...keys.flatMap(k => [...(heads ? [groupHead(k, k ? esc(k) : keys.length > 1 ? t`Sem projeto compose` : t`Demais containers`)] : []),
                              ...groups.get(k)!.map(c => row(c))])]
-    : [`<tr data-key="empty" role="row" class="max-lg:block"><td role="cell" colspan="5" class="max-lg:block py-16 px-4 text-center text-muted">${
+    : [`<tr data-key="empty" role="row" class="max-sm:block"><td role="cell" colspan="5" class="max-sm:block py-16 px-4 text-center text-muted">${
       !lastOk ? (problem ? t`Sem dados ainda.` : t`Carregando…`)  // nunca recebeu dados: não afirma que a lista está vazia
       : !data.length ? t`Nenhum container ainda. Crie um em “Novo container” ou com ${code('docker run')}.`
       : q ? t`Nenhum container ${label}corresponde a “${esc(q)}”.` : t`Nenhum container ${label}agora.`}</td></tr>`]);
   dirty = false;
-  // o aviso do compose down fica preso no pé da tela: dentro da tabela, ou empurrava as linhas ou cobria uma delas
-  const dk = arming?.a === 'down' ? arming.name : '';
-  const dock = dk ? armNote(t`Derrubar ${esc(dk)}? ${esc(downNote(dk))}`, 'max-w-[80ch]') : '';
-  if ($('#armdock').innerHTML !== dock) $('#armdock').innerHTML = dock;
+  // o segundo passo fica preso no pé da tela: dentro da tabela, ou empurrava as linhas ou cobria uma delas
+  const dock = armHtml();
+  if (dock !== dockHtml) $('#armdock').innerHTML = dockHtml = dock;  // só troca se mudou: o foco fica no × ou no Confirmar
   $('#armdock').classList.toggle('hidden', !dock);
   renderCount();
   renderBulk();
@@ -636,7 +704,7 @@ function refocus(id: string, a?: string) {
   };
   (q(`[data-id="${id}"][data-a="${a}"]`)
    ?? (['m-remove', 'm-down', 'menu'].includes(a ?? '') ? q(`[data-id="${id}"]:is([data-a="remove"], [data-a="down"])`) : null)
-   ?? (['remove', 'cancel'].includes(a ?? '') ? q(`[data-id="${id}"][data-a="menu"]`) : null)
+   ?? (['remove', 'cancel', 'confirm'].includes(a ?? '') ? q(`[data-id="${id}"][data-a="menu"]`) : null)
    ?? q(`[data-id="${id}"][data-a="logs"]`)
    ?? (id === 'dlg' ? $('#lb') : null)
    ?? (id.startsWith('stack-') ? q(`[data-id="${id}"][data-a="menu"]`) ?? groupLogs() : null)
@@ -688,13 +756,14 @@ async function run(a: Action, c: Container): Promise<boolean> {
   } finally { busy.delete(c.ID); render(); }
 }
 
-async function act(a: RowAction, id: string) {
+// sure: veio do Confirmar do segundo passo
+async function act(a: RowAction, id: string, sure = false): Promise<unknown> {
   if (a === 'logs') return logs(id);
   // com a remoção armada, a principal fica inerte: clicar nela por hábito só cancela
   if (arming?.id === id && a !== 'remove') return disarm();
   const c = data.find(c => c.ID === id);
   if (!c || busy.has(id)) return;
-  if (a === 'remove' && !confirmed(id, c.Names, 'remove', t`Os volumes não são afetados.`)) return;
+  if (a === 'remove' && !sure) return arm(id, c.Names, 'remove', t`Os volumes não são afetados.`, () => act('remove', id, true));
   const trs = [...document.querySelectorAll<HTMLElement>('#rows tr[data-row]')], i = trs.findIndex(tr => tr.dataset.key === 'c:' + id);
   const near = (trs[i + 1] || trs[i - 1])?.dataset.key?.slice(2), since = new Date().toISOString();
   const done = run(a, c);
@@ -791,13 +860,13 @@ function renderBulk() {
               : a === 'start' ? 'text-ok-fg hover:bg-ok/10' : a === 'remove' ? 'text-bad-fg hover:bg-bad/10' : 'text-fg hover:bg-hover';
     const aria = armed && a === 'remove' ? t`Confirmar remoção de ${plural(k, 'container', 'containers')}` : `${text.replace('…', '')} ${plural(k, t`selecionado`, t`selecionados`)}`;
     return `<button data-id="bulk" data-a="${a}" ${bulkBusy ? 'aria-disabled="true"' : ''} aria-label="${aria}" title="${esc(bulkList(a, armed && a === 'remove' ? armedIds : undefined).map(c => c.Names).join(', '))}"
-      onclick="bulkAct('${a}')" class="${BTN} ${cls}">${bulkBusy === a ? `${VERB[a]} (${k})` : armed && a === 'remove' ? t`Remover ${plural(k, 'container', 'containers')}` : `${text} (${k})`}</button>`;
+      onclick="${armed && a === 'remove' ? 'confirmArm()' : `bulkAct('${a}')`}" class="${BTN} ${cls}">${bulkBusy === a ? `${VERB[a]} (${k})` : armed && a === 'remove' ? t`Remover ${plural(k, 'container', 'containers')}` : `${text} (${k})`}</button>`;
   };
   const html = !n ? '' : `<p class="mr-auto text-sm font-medium text-fg-strong">${plural(n, t`selecionado`, t`selecionados`)}${
       hidden ? `<span class="font-normal text-muted"> · ${t`${hidden} fora do filtro`}</span>` : ''}</p>
     <div class="flex flex-wrap gap-1.5">${BULK.map(btn).join('')}${armed ? cancelBtn('bulk', t`remoção em lote`) : ''}
       ${armed ? '' : `<button data-id="bulk" data-a="clear" onclick="clearSel()" class="${BTN} text-muted hover:bg-hover">${t`Limpar seleção`}</button>`}</div>
-    ${armed ? armNote(t`Remover ${esc(names(data.filter(c => armedIds.includes(c.ID)), 10))} de vez? Os volumes ficam.`) : ''}`;
+    ${armed ? armNote(t`Remover ${mono(esc(names(data.filter(c => armedIds.includes(c.ID)), 10)))} de vez? Os volumes ficam.`) : ''}`;
   $('#bulk').classList.toggle('hidden', !n);  // a altura dela vira --dock (ResizeObserver lá embaixo)
   if (html !== bulkHtml) $('#bulk').innerHTML = bulkHtml = html;  // o render roda a cada poll: só troca se mudou
 }
@@ -816,10 +885,10 @@ async function pool<T>(xs: T[], n: number, fn: (x: T) => Promise<boolean>): Prom
 async function bulkAct(a: Action, ids?: string[]) {
   if (bulkBusy) return;
   if (a === 'remove' && !ids) {
-    if (arming?.id !== 'bulk') armedIds = bulkList('remove').map(c => c.ID);
-    const k = armedIds.length, name = names(data.filter(c => armedIds.includes(c.ID)));
-    if (!k || !confirmed('bulk', name, 'remove', t`Os volumes não são afetados.`)) return;
-    ids = armedIds;
+    armedIds = bulkList('remove').map(c => c.ID);
+    const ids = armedIds;
+    if (ids.length) arm('bulk', names(data.filter(c => ids.includes(c.ID))), 'remove', t`Os volumes não são afetados.`, () => bulkAct('remove', ids));
+    return;
   }
   const list = bulkList(a, ids).filter(c => !busy.has(c.ID));
   if (!list.length) return;
@@ -842,26 +911,28 @@ async function bulkAct(a: Action, ids?: string[]) {
   if (a === 'remove' && (!document.activeElement || document.activeElement === document.body)) $('#q').focus();
 }
 
-// 1º clique só arma (e desarma o que estiver armado); o 2º confirma. Devolve true quando é para executar
-function confirmed(id: string, name: string, a: Arming['a'], note: string): boolean {
-  if (arming?.id !== id || arming.a !== a) {
-    disarm(false);
-    arming = {id, name, a, note, at: Date.now(), timer: setTimeout(armTick, 8000)}; render();
-    // o foco vai para o ×, o botão seguro: um segundo Enter cancela em vez de apagar (o Confirmar fica a um Tab)
-    document.querySelector<HTMLElement>(`[data-id="${id}"][data-a="cancel"]`)?.focus();
-    return false;
-  }
-  if (Date.now() - arming.at < 600) return false;  // duplo clique não pode virar confirmação
+// 1º clique arma (e desarma o que estiver armado): o Confirmar aparece no pé da tela (ou na barra do lote) e roda run.
+// O mesmo botão de novo cancela, como a principal da linha armada: o hábito nunca confirma
+function arm(id: string, name: string, a: Arming['a'], note: string, run: () => unknown) {
+  if (arming?.id === id && arming.a === a) return disarm();
   disarm(false);
-  return true;
+  arming = {id, name, a, note, run, at: Date.now(), timer: setTimeout(armTick, 8000)}; render();
+  // o foco vai para o ×, o botão seguro: um segundo Enter cancela em vez de apagar (o Confirmar fica a um Shift+Tab)
+  document.querySelector<HTMLElement>(`[data-id="${CSS.escape(id)}"][data-a="cancel"]`)?.focus();
+}
+function confirmArm() {
+  if (!arming || Date.now() - arming.at < 600) return;  // duplo clique não pode virar confirmação
+  const run = arming.run;
+  disarm(false);
+  run();
 }
 
 // docker compose up/up --build/pull/down no projeto inteiro (down pede confirmação: o projeto some da lista),
 // ou restart/build de um serviço (svc)
-async function composeAct(a: ComposeAction, p: string, svc = '') {
+async function composeAct(a: ComposeAction, p: string, svc = '', sure = false): Promise<unknown> {
   const c = data.find(c => project(c) === p);
   if (!c || composing.has(p) || data.some(c => project(c) === p && busy.has(c.ID))) return;
-  if (a === 'down' && !confirmed(`stack-${p}`, p, 'down', downNote(p))) return;
+  if (a === 'down' && !sure) return arm(`stack-${p}`, p, 'down', downNote(p), () => composeAct('down', p, '', true));
   // por serviço, as linhas dele (todas as réplicas) ficam ocupadas e depois passam pelo confirmUp
   const mine = () => data.filter(c => project(c) === p && service(c) === svc).map(c => c.ID), ids = svc ? mine() : [];
   // svcup é de um serviço sem container: depois do up, os containers novos dele passam pelo confirmUp
@@ -918,8 +989,10 @@ function missingSvcs(p: string, dir: string, all: Container[]): string[] {
 
 // o que o compose down leva, pelo nome (primeiro os da faixa de atenção: são os que você mais quer saber se vão junto). Depois dele o projeto some da lista (a pasta vinha dos labels dos containers),
 // então o up para voltar é pelo terminal
-const downNote = (p: string) =>
-  t`Remove ${names(data.filter(c => project(c) === p).sort((a, b) => +isProblem(b) - +isProblem(a)), 10)} e as redes do projeto. Os volumes ficam; para subir de novo, use compose up no terminal.`;
+const downNote = (p: string, html = false) => {
+  const who = names(data.filter(c => project(c) === p).sort((a, b) => +isProblem(b) - +isProblem(a)), 10);
+  return t`Remove ${html ? mono(esc(who)) : who} e as redes do projeto. Os volumes ficam; para subir de novo, use compose up no terminal.`;
+};
 
 // "Reiniciar serviço" e "Reconstruir serviço" do menu "⋯": compose restart ou up --build --no-deps do serviço do
 // container (o servidor confere o nome nos labels)
@@ -935,7 +1008,7 @@ const busyText = (c: Container, b: Action) => composing.get(project(c)) === 'bui
 // No toque não há hover e o foco fica parado no último botão tocado: lá vale o relógio, como o aviso promete
 function armTick() {
   if (!arming) return;
-  const els = [...document.querySelectorAll(`[data-id="${arming.id}"]:is([data-a="${arming.a}"], [data-a="cancel"])`)];
+  const els = [...document.querySelectorAll(`[data-id="${CSS.escape(arming.id)}"]:is([data-a="confirm"], [data-a="remove"], [data-a="cancel"])`)];
   if (!TOUCH && els.some(el => el.matches(':hover') || el === document.activeElement)) arming.timer = setTimeout(armTick, 1000);
   else { disarm(); toast(t`Confirmação cancelada: passaram 8 s sem o segundo clique. Nada foi apagado.`, true); }
 }
@@ -971,6 +1044,9 @@ document.addEventListener('keydown', e => {
   // x marca a linha em foco (junto com ↑↓ dá para selecionar sem mouse); a marca ou desmarca todos os visíveis
   const curId = el.closest?.<HTMLElement>('tr[data-row]')?.dataset.key?.slice(2);
   if ((e.key === 'x' || e.key === 'X') && !typing && curId) return toggleSel(curId);
+  // s faz a ação principal da linha em foco (Iniciar, Parar ou Retomar), a mesma do primeiro botão dela
+  const prim = curId && PRIMARY[data.find(c => c.ID === curId)?.State as ContainerState];
+  if ((e.key === 's' || e.key === 'S') && !typing && curId && prim) return act(prim, curId);
   // r reinicia a linha em foco (com ↑↓ entre os Logs: muda o código, reinicia, olha os logs, sem mouse)
   if ((e.key === 'r' || e.key === 'R') && !typing && curId && data.find(c => c.ID === curId)?.State === 'running') return act('restart', curId);
   // l abre os logs da linha em foco: o ciclo inteiro (↑↓, r, l) fica no teclado
@@ -987,6 +1063,15 @@ document.addEventListener('keydown', e => {
   const next = trs[Math.max(0, Math.min(trs.length - 1, cur ? trs.indexOf(cur) + (e.key === 'ArrowDown' ? 1 : -1) : 0))];
   next.querySelector<HTMLElement>('[data-a="logs"]')?.focus();
 });
+
+// CPU, memória e, fora do celular, rede e disco: cada grupo inteiro numa linha, com o "·" no fim do anterior, para a
+// quebra nunca começar uma linha com "·"
+function usageLine(s: Stats, u: NonNullable<ReturnType<typeof usage>>, hs: Sample[]) {
+  const extra = io(s), sep = (i: number) => i === 1 && extra.length ? '<span class="max-sm:hidden"> ·</span>' : i < 1 + extra.length ? ' ·' : '';
+  const parts = [`<span class="text-fg-soft">${esc(u[0])}</span> ${spark(hs, 'cpu', 96, 20)}`, `<span class="text-fg-soft">${esc(u[1])}</span> ${spark(hs, 'mem', 96, 20)}`,
+                 ...extra.map(x => `<span class="text-fg-soft" title="${t`Totais desde que o container subiu`}">${esc(x)}</span>`)];
+  return parts.map((x, i) => `<span class="whitespace-nowrap${i > 1 ? ' max-sm:hidden' : ''}">${x}${sep(i)}</span>`).join(' ');
+}
 
 // status e ações do container dentro do modal: diagnosticar e agir sem sair dos logs
 function renderDlg() {
@@ -1014,9 +1099,8 @@ function renderDlg() {
   // depois de reiniciar daqui, o status diz quando foi: a marca no log só aparece se o container escrever algo novo
   const again = mark && c.State === 'running' && !b ? `<span class="text-muted"> · ${esc(mark.label)}</span>` : '';
   $('#dlg-status').innerHTML = `<span class="${tn[1]}">${b ? busyText(c, b) : esc(st[0])}</span>${st[1] && !b ? `<span class="text-muted"> · ${st[1]}</span>` : ''}${again}${b ? '' : errHtml(c)}${
-    h ? `<div class="mt-1 text-xs text-muted lg:truncate" title="${esc(h)}"><span class="font-sans">${t`Último healthcheck:`}</span> <span class="text-fg-soft">${esc(h)}</span></div>` : ''}${
-    s && u ? `<div id="dlg-usage" class="mt-1 text-xs text-muted"><span class="whitespace-nowrap"><span class="text-fg-soft">${esc(u[0])}</span> ${spark(hs, 'cpu', 96, 20)}</span> <span class="whitespace-nowrap">· <span class="text-fg-soft">${esc(u[1])}</span> ${spark(hs, 'mem', 96, 20)}</span>${
-      io(s).length ? `<span class="max-lg:hidden text-fg-soft" title="${t`Totais desde que o container subiu`}">${io(s).map(x => ` <span class="whitespace-nowrap">· ${esc(x)}</span>`).join('')}</span>` : ''}</div>` : ''}`;
+    h ? `<div class="mt-1 text-xs text-muted sm:truncate" title="${esc(h)}"><span class="font-sans">${t`Último healthcheck:`}</span> <span class="text-fg-soft">${esc(h)}</span></div>` : ''}${
+    s && u ? `<div id="dlg-usage" class="mt-1 text-xs text-muted">${usageLine(s, u, hs)}</div>` : ''}`;
   // Reiniciar à vista e primeiro (é o ciclo: reiniciar e ver o log novo), depois a ação principal; o resto no "⋯"
   // (remover fica na lista, onde a confirmação aparece)
   const prim = PRIMARY[c.State], sec = SECONDARY[c.State];
@@ -1246,7 +1330,7 @@ function openLogs(title: string, running: boolean) {
   renderHits(); renderMore();
   $<HTMLDialogElement>('#dlg').showModal(); renderDlg(); fetchLogs();
   $('#lb').focus();  // a caixa do log: as setas rolam, / vai para o filtro e r reinicia
-  if (running && wantsFollow()) toggleFollow(true);  // quem deixou o ao vivo ligado da última vez
+  if (running && wantsFollow()) toggleFollow(true);  // ao vivo por padrão; desligado só para quem desligou da última vez
 }
 
 function logs(id: string) {
@@ -1332,7 +1416,7 @@ function followClick() {
   toggleFollow();
   try { localStorage.setItem('docker-gui-follow', stream ? '1' : ''); } catch { /* aba privada: vale só agora */ }
 }
-const wantsFollow = () => { try { return localStorage.getItem('docker-gui-follow') === '1'; } catch { return false; } };
+const wantsFollow = () => { try { return localStorage.getItem('docker-gui-follow') !== ''; } catch { return true; } };
 
 // botão Atualizar: com o ao vivo ligado não faz nada (já atualiza sozinho)
 function refreshLogs() {
@@ -1610,10 +1694,11 @@ function renderDisk() {
   for (const panel of ['images', 'volumes'] as const) {
     const html = disk === null ? `<p class="py-3 text-muted">${t`Carregando…`}</p>`
       : typeof disk === 'string' ? `<p class="py-3 text-bad-fg">${esc(disk)}</p>`
-      : DISK.filter(([, k]) => (k === 'volumes') === (panel === 'volumes')).map(([type, k, label, what, note]) => {
+      : DISK.filter(([, k]) => (k === 'volumes') === (panel === 'volumes')).map(([type, k, label]) => {
         const d = (disk as DiskUsage[]).find(d => d.Type === type), id = 'df-' + k, armed = arming?.id === id;
         if (!d) return '';
-        const cls = armed ? 'bg-danger text-white ring-danger hover:bg-danger-hover' : 'text-fg hover:bg-hover', share = reclaimShare(d);
+        // armado, o botão só fica marcado: o Confirmar está no pé da tela, e clicar aqui de novo cancela
+        const cls = armed ? 'ring-bad/60 text-bad-fg hover:bg-bad/10' : 'text-fg hover:bg-hover', share = reclaimShare(d);
         // a barra é o total; a parte em ciano, na ponta, é o que a limpeza libera
         const bar = share === null ? '' : `<div aria-hidden="true" class="mt-1.5 h-1.5 w-full max-w-80 rounded-sm bg-line-strong overflow-hidden flex justify-end">
             <span class="h-full bg-accent" style="width:${Math.round(share * 100)}%"></span></div>`;
@@ -1621,19 +1706,18 @@ function renderDisk() {
           <div class="mr-auto min-w-0 flex-1"><div class="font-medium text-fg-strong">${label}</div>
             <div class="font-mono text-xs text-muted">${t`${esc(d.Size)} no total · ${esc(d.Reclaimable)} liberável · ${esc(d.TotalCount)} ${d.TotalCount === '1' ? t`item` : t`itens`}, ${esc(d.Active)} em uso`}</div>${bar}</div>
           <button data-id="${id}" data-a="prune" ${diskBusy ? 'aria-disabled="true"' : ''} onclick="prune('${k}')"
-            aria-label="${armed ? t`Confirmar limpeza de ${label.toLowerCase()}` : t`Limpar ${label.toLowerCase()}`}" class="${BTN} ${cls}">${
-            diskBusy === k ? t`Limpando…` : armed ? t`Limpar ${label.toLowerCase()}` : t`Limpar…`}</button>${armed ? cancelBtn(id, t`limpeza de ${label.toLowerCase()}`) : ''}
-          ${armed ? armNote(t`Apagar ${what}? ${esc(pruneNote(d, note))}`) : ''}
+            aria-label="${t`Limpar ${label.toLowerCase()}`}" ${armed ? 'aria-expanded="true"' : ''} class="${BTN} ${cls}">${diskBusy === k ? t`Limpando…` : t`Limpar…`}</button>
         </div>`;
       }).join('');
     if (html !== diskHtml[panel]) $('#df-' + panel).innerHTML = diskHtml[panel] = html;  // o render roda a cada poll: só troca se mudou
   }
 }
 
-async function prune(k: DiskKind) {
+async function prune(k: DiskKind, sure = false): Promise<unknown> {
   const [type, , label, what, note] = DISK.find(d => d[1] === k)!, d = Array.isArray(disk) ? disk.find(d => d.Type === type) : undefined;
   if (k === 'volumes' && !Array.isArray(objs.volumes)) loadObjects('volumes');  // o aviso diz quais saem
-  if (diskBusy || !confirmed('df-' + k, what, 'prune', pruneNote(d, note))) return;
+  if (diskBusy) return;
+  if (!sure) return arm('df-' + k, what, 'prune', pruneNote(d, note), () => prune(k, true));
   diskBusy = k; render();
   $('#shown').textContent = t`Limpando ${label.toLowerCase()}…`;
   try {
@@ -1699,19 +1783,23 @@ function objItem(k: ObjKind, o: Obj) {
   cells.push(o.Containers.length ? `<span class="text-fg-soft">${esc(o.Containers.join(', '))}</span>` : t`nenhum container`);
   // rede padrão não remove; rede sem ID (formato antigo do podman) não tem como
   const canRm = k !== 'networks' || (!(o as Network).Builtin && !!(o as Network).ID);
-  const cls = armed ? 'bg-danger text-white ring-danger hover:bg-danger-hover' : 'text-fg hover:bg-hover';
+  // em uso, o docker recusa o rm (sem -f): o botão diz por quê em vez de deixar tentar. A rede só segura com o container de pé
+  const holds = k === 'networks' ? o.Containers.filter(n => data.some(c => c.Names === n && c.State === 'running')) : o.Containers;
+  const held = holds.length ? esc(holds.join(', ')) : '';
+  const cls = armed ? 'ring-bad/60 text-bad-fg hover:bg-bad/10' : 'text-fg hover:bg-hover';
   const cols = OBJ_COLS[k].slice(1);
-  return `<tr class="border-t border-line/70 max-lg:block max-lg:py-3">
-    <th scope="row" class="py-2.5 pl-4 pr-6 max-lg:block max-lg:p-0 max-lg:px-4 text-left font-normal align-top">
+  return `<tr class="border-t border-line/70 ${armed ? 'bg-bad/10' : ''} max-sm:block max-sm:py-3">
+    <th scope="row" class="py-2.5 pl-4 pr-6 max-sm:block max-sm:p-0 max-sm:px-4 text-left font-normal align-top">
       <div class="font-mono text-data font-semibold text-fg-strong [overflow-wrap:anywhere]">${title}</div>
-      ${err ? `<div class="mt-1 [contain:inline-size] max-lg:[contain:none] text-xs text-bad-fg">${hint ? `<p class="font-sans">${hint}</p>` : ''}
+      ${err ? `<div class="mt-1 [contain:inline-size] max-sm:[contain:none] text-xs text-bad-fg">${hint ? `<p class="font-sans">${hint}</p>` : ''}
         <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-bad-soft">${esc(err)}</pre></div>` : ''}</th>
-    ${cells.map((c, i) => `<td class="py-2.5 pr-4 max-lg:block max-lg:p-0 max-lg:px-4 align-top font-mono text-xs text-muted [overflow-wrap:anywhere]"><span class="lg:sr-only">${cols[i]}: </span>${c}</td>`).join('')}
-    <td class="py-2 pr-4 max-lg:block max-lg:p-0 max-lg:px-4 max-lg:pt-2 align-top"><div class="flex justify-end max-lg:justify-start items-center gap-1.5">${canRm
-      ? `<button data-id="${esc(id)}" data-a="rm" data-k="${k}" data-r="${esc(r)}" ${objBusy ? 'aria-disabled="true"' : ''}
-      onclick="rmObj(this.dataset.k, this.dataset.r)" aria-label="${armed ? t`Confirmar remoção de ${esc(what)}` : t`Remover ${esc(what)}`}"
-      class="${BTN} ${cls}">${objBusy === id ? t`Removendo…` : armed ? t`Remover` : t`Remover…`}</button>${armed ? cancelBtn(id, t`remoção de ${esc(what)}`) : ''}` : ''}</div>
-      ${armed ? armNote(t`Remover ${esc(what)}? ${OBJ[k][5]}`, 'mt-1.5 [contain:inline-size] max-lg:[contain:none] lg:text-right text-balance') : ''}</td></tr>`;
+    ${cells.map((c, i) => `<td class="py-2.5 pr-4 max-sm:block max-sm:p-0 max-sm:px-4 align-top font-mono text-xs leading-5 text-muted [overflow-wrap:anywhere]"><span class="sm:sr-only">${cols[i]}: </span>${c}</td>`).join('')}
+    <td class="py-2 pr-4 max-sm:block max-sm:p-0 max-sm:px-4 max-sm:pt-2 align-top"><div class="flex justify-end max-sm:justify-start items-center gap-1.5">${!canRm ? '' : held
+      ? `<button data-id="${esc(id)}" data-a="rm" aria-disabled="true" aria-label="${t`Remover (indisponível: em uso por ${held})`}"
+      title="${k === 'networks' ? t`Em uso por ${held}: pare o container antes` : t`Em uso por ${held}: remova o container antes`}" class="${BTN} text-muted cursor-not-allowed">${t`Remover…`}</button>`
+      : `<button data-id="${esc(id)}" data-a="rm" data-k="${k}" data-r="${esc(r)}" ${objBusy ? 'aria-disabled="true"' : ''} ${armed ? 'aria-expanded="true"' : ''}
+      onclick="rmObj(this.dataset.k, this.dataset.r)" aria-label="${t`Remover ${esc(what)}`}"
+      class="${BTN} ${cls}">${objBusy === id ? t`Removendo…` : t`Remover…`}</button>`}</div></td></tr>`;
 }
 
 // quantos o docker system df conta na categoria (redes não entram no df)
@@ -1723,20 +1811,20 @@ function renderObjects() {
     const html = v === null ? `<p class="py-3 text-muted">${t`Carregando…`}</p>`
       : typeof v === 'string' ? `<p class="py-3 text-bad-fg">${esc(v)}</p>`
       : !v.length ? `<p class="py-3 px-4 text-muted">${OBJ[k][6]}${dfCount(k) ? t` O docker system df conta ${dfCount(k)}: a lista pode ter vindo antes do df. Troque de aba e volte para ler de novo.` : ''}</p>`
-      : `<table aria-label="${OBJ[k][3]}" class="w-full text-left max-lg:block"><thead class="max-lg:hidden font-mono text-[11px] uppercase text-muted"><tr>${
+      : `<table aria-label="${OBJ[k][3]}" class="w-full text-left max-sm:block"><thead class="max-sm:hidden font-mono text-[11px] uppercase text-muted"><tr>${
         OBJ_COLS[k].map((h, i) => `<th scope="col" class="py-3 ${i ? '' : 'pl-4 '}pr-4 font-medium">${h}</th>`).join('')}<th scope="col" class="pr-4"><span class="sr-only">${t`Ações`}</span></th></tr></thead>
-        <tbody class="max-lg:block">${v.map(o => objItem(k, o)).join('')}</tbody></table>`;
+        <tbody class="max-sm:block">${v.map(o => objItem(k, o)).join('')}</tbody></table>`;
     if (html !== objHtml[k]) $(`#obj-${k}-list`).innerHTML = objHtml[k] = html;  // o render roda a cada poll
     $(`#obj-${k}-n`).textContent = Array.isArray(v) ? ` · ${v.length}` : '';
   }
 }
 
 // docker image/volume/network rm, com a confirmação em 2 passos. Em uso, o docker recusa e o erro fica no item
-async function rmObj(k: ObjKind, r: string) {
+async function rmObj(k: ObjKind, r: string, sure = false): Promise<unknown> {
   const list = objs[k], o = Array.isArray(list) ? list.find(o => objRef(k, o) === r) : undefined;
   if (!o || objBusy) return;
   const id = `rm-${k}-${r}`, [rm, one, label, , done, note] = OBJ[k], name = objName(k, o);
-  if (!confirmed(id, `${one} ${name}`, 'rm', note)) return;
+  if (!sure) return arm(id, `${one} ${name}`, 'rm', note, () => rmObj(k, r, true));
   const btns = [...document.querySelectorAll<HTMLElement>(`#obj-${k}-list [data-a="rm"]`)], i = btns.findIndex(b => b.dataset.id === id);
   const near = (btns[i + 1] || btns[i - 1])?.dataset.id;
   objErr.delete(id); objBusy = id; render();
@@ -1759,7 +1847,7 @@ async function rmObj(k: ObjKind, r: string) {
 // o HTML gerado chama estas funções pelo nome (onclick="act(...)"); com módulos nada é global, então
 // esta lista é a interface completa entre o HTML e o código
 Object.assign(window, {
-  act, afterClose, askNotify, bulkAct, clearFilters, clearSel, composeAct, copyAddr, copyExec, copyLogs, disarm, downloadLogs,
+  ackFail, act, afterClose, askNotify, confirmArm, bulkAct, clearFilters, clearSel, composeAct, copyAddr, copyExec, copyLogs, disarm, downloadLogs,
   filterBy, followClick, loadHealth, loadHistory, loadInspect, loadMore, loadTop, logPick, menuPick, openCreate, openShell, pickTab, placeMenu, projectLogs,
   prune, refreshLogs, rmObj, serviceAct, runToastAction, selectAll, sinceChange, stackAct, toggleSel,
 });
@@ -1768,8 +1856,13 @@ $('#dlg').addEventListener('close', afterClose);
 $('#shell').addEventListener('close', closeShell);
 $('#shell').addEventListener('cancel', e => e.preventDefault());
 // a barra de lote flutua embaixo: o toast sobe acima dela e a página ganha a mesma folga, para a última linha não ficar atrás
-new ResizeObserver(() => document.documentElement.style.setProperty('--dock', `${$('#bulk').offsetHeight && $('#bulk').offsetHeight + 8}px`))
-  .observe($('#bulk'));  // Esc é do vim/less, não do modal
+// e a confirmação armada (#armdock) fica acima da barra de lote: --bulk é a altura dela, --dock a das duas
+const docks = new ResizeObserver(() => {
+  const b = $('#bulk').offsetHeight, d = $('#armdock').offsetHeight, root = document.documentElement.style;
+  root.setProperty('--bulk', `${b && b + 8}px`);
+  root.setProperty('--dock', `${(b && b + 8) + (d && d + 8)}px`);
+});
+docks.observe($('#bulk')); docks.observe($('#armdock'));
 $('#tabs').addEventListener('keydown', tabKey);
 $('#create-form').addEventListener('submit', createContainer);
 $('#run-public').addEventListener('change', createLabel);

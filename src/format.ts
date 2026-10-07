@@ -35,7 +35,7 @@ export type Port = [host: string, container: string, proto: string];
 export const esc = (s: unknown): string => String(s).replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
 
 export const EXIT: Record<number, string> = {
-  1: t`erro da aplicação`, 125: t`falha do próprio docker run`, 126: t`comando sem permissão de execução`,
+  1: t`erro da aplicação (veja o log)`, 125: t`falha do próprio docker run`, 126: t`comando sem permissão de execução`,
   127: t`comando não encontrado`, 137: t`morto à força ou sem memória (OOM)`, 139: t`falha de segmentação`,
   143: t`encerrado por SIGTERM`,
 };
@@ -94,7 +94,8 @@ export function dur(s: string): string {
 
 // o que o inspect acrescenta a uma queda (/api/inspect): se o kernel matou por falta de memória e quantas vezes o
 // docker já reiniciou o container
-export type Facts = {OOMKilled: boolean; RestartCount: number};
+// FinishedAt: quando caiu (o "Marcar como visto" da faixa de atenção vale só para esta queda)
+export type Facts = {OOMKilled: boolean; RestartCount: number; FinishedAt?: string};
 
 // a dica de uma queda: a causa do código de saída e, com o inspect na mão, o 137 separado em memória ou SIGKILL e os
 // reinícios. undefined quando não há o que dizer

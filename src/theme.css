@@ -85,3 +85,17 @@
 
 /* superfícies do navegador também levam a paleta: barra de rolagem e cursor */
 :root { scrollbar-color: var(--color-line-strong) transparent; caret-color: var(--color-accent); }
+
+/* a barra de rolagem aparece sem empurrar a página de lado */
+html { scrollbar-gutter: stable; }
+
+/* alvo de 44px só no toque: com mouse, a janela estreita ao lado do editor continua densa como o terminal */
+@custom-variant coarse (@media (pointer: coarse));
+
+/* abas que não cabem (celular): esmaecem na borda direita enquanto há mais para rolar. Sem rolagem, a linha do tempo
+   fica inativa e a máscara não entra */
+#tabs { animation: tabs-more linear both; animation-timeline: scroll(self inline); }
+@keyframes tabs-more {
+  from, 95% { mask-image: linear-gradient(to right, #000 calc(100% - 2.5rem), transparent); }
+  to { mask-image: none; }
+}

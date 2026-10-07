@@ -62,7 +62,7 @@ test('menu "⋯" aberto não fecha sozinho com o poll', async ({ page, gui }) =>
 
 test('rolar leva o menu "⋯" junto e só fecha quando o botão sai da tela', async ({ page, gui }) => {
   await page.setViewportSize({ width: 390, height: 500 });
-  await gui.open({ containers: ['a', 'b', 'c', 'd', 'e', 'f'].map(n => ctr(n)) });
+  await gui.open({ containers: 'abcdefghijkl'.split('').map(n => ctr(n)) });  // cards baixos (mouse): mais linhas para rolar
   const menu = row(page, 'c').locator('details[data-keep="menu"]');
   await menu.locator('summary').click();
   const gap = () => menu.evaluate(d => Math.round(d.querySelector('div')!.getBoundingClientRect().top - d.querySelector('summary')!.getBoundingClientRect().bottom));

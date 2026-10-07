@@ -47,5 +47,5 @@ test('no celular o sparkline cabe no card, sem rolagem horizontal', async ({ pag
   await gui.open({ containers: [ctr(name, { stats: [reading(5, 900), reading(80, 1500)] })] });
   await expect(page.locator(`#us-${id(name)} [data-spark="mem"]`)).toBeVisible(slow);
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
-  expect(overflow).toBe(0);
+  expect(overflow).toBeLessThanOrEqual(0);  // negativo: o espaço reservado da barra de rolagem
 });

@@ -75,7 +75,7 @@ test('status traduz o texto e explica o código de saída', () => {
                    ['Saiu com código 137 há 2 min', 'morto à força ou sem memória (OOM)']);
   assert.deepEqual(f.status(c('exited', 'Exited (2) About an hour ago')), ['Saiu com código 2 há ~1 h', undefined]);
   assert.deepEqual(f.status(c('restarting', 'Restarting (1) 5 seconds ago')),
-                   ['Reiniciando em loop · saiu com código 1', 'erro da aplicação']);
+                   ['Reiniciando em loop · saiu com código 1', 'erro da aplicação (veja o log)']);
   assert.deepEqual(f.status(c('restarting', 'Restarting (0) Less than a second ago')), ['Reiniciando…']);
   assert.deepEqual(f.status(c('created', 'Created')), ['Criado, nunca iniciado']);
   assert.deepEqual(f.status(c('dead', 'Dead')), ['Morto · só dá para remover']);
@@ -87,7 +87,7 @@ test('status com o inspect separa OOM de SIGKILL e conta os reinícios', () => {
   assert.deepEqual(f.status(exited, {OOMKilled: false, RestartCount: 3}),
                    ['Saiu com código 137 há 2 min', 'morto à força (SIGKILL), não por falta de memória · reiniciou 3 vezes']);
   assert.deepEqual(f.status(c('exited', 'Exited (1) 1 minute ago'), {OOMKilled: false, RestartCount: 1}),
-                   ['Saiu com código 1 há 1 min', 'erro da aplicação · reiniciou 1 vez']);
+                   ['Saiu com código 1 há 1 min', 'erro da aplicação (veja o log) · reiniciou 1 vez']);
   assert.deepEqual(f.status(c('exited', 'Exited (2) 1 minute ago'), {OOMKilled: false, RestartCount: 0}), ['Saiu com código 2 há 1 min', undefined]);
   // em loop, a contagem estaria velha: fica só a causa
   assert.deepEqual(f.status(c('restarting', 'Restarting (137) 1 second ago'), {OOMKilled: true, RestartCount: 9}),
