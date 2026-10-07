@@ -114,7 +114,14 @@ export class Gui {
   }
 
   // sobe o servidor e abre a página; sem token = link sem o #t=..., como uma aba aberta à mão
-  async open(state: DockerState, { token = true, env = {} as Record<string, string> } = {}) {
+  // follow: o Ao vivo dos logs começa desligado (como quem desligou da última vez), para os testes lerem o log parado;
+  // null deixa o padrão da página (ligado para container rodando)
+  async open(state: DockerState, { token = true, env = {} as Record<string, string>, follow = false as boolean | null } = {}) {
+    if (follow !== null) {
+      await this.page.addInitScript(f => {
+        try { if (localStorage.getItem('docker-gui-follow') === null) localStorage.setItem('docker-gui-follow', f ? '1' : ''); } catch { /* sem storage */ }
+      }, follow);
+    }
     await this.start(state, env);
     await this.page.goto(token ? this.url : this.url.split('#')[0]);
     // a primeira consulta ao docker é assíncrona: sem esperar, um teste que lê o DOM direto (evaluateAll)

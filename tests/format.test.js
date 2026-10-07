@@ -75,7 +75,7 @@ test('status traduz o texto e explica o código de saída', () => {
                    ['Saiu com código 137 há 2 min', 'morto à força ou sem memória (OOM)']);
   assert.deepEqual(f.status(c('exited', 'Exited (2) About an hour ago')), ['Saiu com código 2 há ~1 h', undefined]);
   assert.deepEqual(f.status(c('restarting', 'Restarting (1) 5 seconds ago')),
-                   ['Reiniciando em loop · saiu com código 1', 'erro da aplicação']);
+                   ['Reiniciando em loop · saiu com código 1', 'erro da aplicação (veja o log)']);
   assert.deepEqual(f.status(c('restarting', 'Restarting (0) Less than a second ago')), ['Reiniciando…']);
   assert.deepEqual(f.status(c('created', 'Created')), ['Criado, nunca iniciado']);
   assert.deepEqual(f.status(c('dead', 'Dead')), ['Morto · só dá para remover']);
@@ -87,7 +87,7 @@ test('status com o inspect separa OOM de SIGKILL e conta os reinícios', () => {
   assert.deepEqual(f.status(exited, {OOMKilled: false, RestartCount: 3}),
                    ['Saiu com código 137 há 2 min', 'morto à força (SIGKILL), não por falta de memória · reiniciou 3 vezes']);
   assert.deepEqual(f.status(c('exited', 'Exited (1) 1 minute ago'), {OOMKilled: false, RestartCount: 1}),
-                   ['Saiu com código 1 há 1 min', 'erro da aplicação · reiniciou 1 vez']);
+                   ['Saiu com código 1 há 1 min', 'erro da aplicação (veja o log) · reiniciou 1 vez']);
   assert.deepEqual(f.status(c('exited', 'Exited (2) 1 minute ago'), {OOMKilled: false, RestartCount: 0}), ['Saiu com código 2 há 1 min', undefined]);
   // em loop, a contagem estaria velha: fica só a causa
   assert.deepEqual(f.status(c('restarting', 'Restarting (137) 1 second ago'), {OOMKilled: true, RestartCount: 9}),
@@ -476,4 +476,19 @@ test('topTable separa as colunas do docker top e deixa o comando inteiro', () =>
     ['root', '7', '1', '0', '10:00', '?', '00:00:00', 'sh -c echo  oi'],
   ]);
   assert.deepEqual(f.topTable(''), []);
+});
+
+test('logServices: o prefixo do compose logs vira o serviço pelo nome do container, não pelo "-<número>"', () => {
+  const ctr = (Names, svc, p = 'shop') => ({Names, Labels: `com.docker.compose.project=${p},com.docker.compose.service=${svc}`});
+  const m = f.logServices('shop', [
+    ctr('shop-api-1', 'api'), ctr('shop-api-2', 'api'),  // réplicas: o compose tira o projeto do nome padrão
+    ctr('shop-postgres-1', 'postgres'),
+    ctr('postgres-17', 'pg17'),  // regressão: container_name terminado em -<número> virava "postgres"
+    ctr('app-v2-3', 'legacy'),  // container_name com hífen e número
+    ctr('blog-api-1', 'api', 'blog'), ctr('avulso', ''),  // outro projeto e fora do compose: ficam de fora
+  ]);
+  assert.deepEqual(Object.fromEntries(m), {'api-1': 'api', 'api-2': 'api', 'postgres-1': 'postgres', 'postgres-17': 'pg17',
+                                           'app-v2-3': 'legacy'});
+  // nome que só parece o padrão (o resto não é número): é container_name, vai inteiro
+  assert.deepEqual(Object.fromEntries(f.logServices('shop', [ctr('shop-api-x', 'api')])), {'shop-api-x': 'api'});
 });

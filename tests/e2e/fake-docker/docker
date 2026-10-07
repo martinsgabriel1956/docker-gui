@@ -144,9 +144,13 @@ def project(state, args):
 
 def prefixed(c, text):
     # o compose prefixa cada linha com o nome do container sem o projeto ("api-1")
-    svc = labels(c).get("com.docker.compose.service", "")
+    lb = labels(c)
+    svc, num = lb.get("com.docker.compose.service", ""), lb.get("com.docker.compose.container-number")
+    # com o container-number, a regra do compose: o nome inteiro se não for o padrão (container_name). Sem ele, "<svc>-1"
+    default = f'{lb.get("com.docker.compose.project")}-{svc}-{num}'
+    pre = f"{svc}-1" if num is None else f"{svc}-{num}" if c["Names"] == default else c["Names"]
     # cada linha termina em \n, como no compose de verdade (um log sem \n no fim não cola na linha do próximo)
-    return "".join(f"{svc}-1  | {line}\n" for line in text.splitlines())
+    return "".join(f"{pre}  | {line}\n" for line in text.splitlines())
 
 
 def subcommand(args):

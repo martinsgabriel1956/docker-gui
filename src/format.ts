@@ -35,7 +35,7 @@ export type Port = [host: string, container: string, proto: string];
 export const esc = (s: unknown): string => String(s).replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
 
 export const EXIT: Record<number, string> = {
-  1: t`erro da aplicação`, 125: t`falha do próprio docker run`, 126: t`comando sem permissão de execução`,
+  1: t`erro da aplicação (veja o log)`, 125: t`falha do próprio docker run`, 126: t`comando sem permissão de execução`,
   127: t`comando não encontrado`, 137: t`morto à força ou sem memória (OOM)`, 139: t`falha de segmentação`,
   143: t`encerrado por SIGTERM`,
 };
@@ -70,6 +70,18 @@ export const workingDir = (c: Pick<Container, 'Labels'>): string =>
 // serviço do compose (vai para o compose restart; o servidor confere contra os serviços do projeto)
 export const service = (c: Pick<Container, 'Labels'>): string =>
   (c.Labels || '').match(/(?:^|,)com\.docker\.compose\.service=([^,]*)/)?.[1] || '';
+// prefixo do `docker compose logs` -> serviço, para os containers do projeto p. O compose escreve o nome do container
+// sem o projeto quando é o nome padrão ("shop-api-2" -> "api-2"), e o nome inteiro com container_name ("postgres-17"):
+// só o nome e o label dizem qual dos dois é, o "-<número>" no fim do prefixo não
+export function logServices(p: string, cs: Pick<Container, 'Names' | 'Labels'>[]): Map<string, string> {
+  const m = new Map<string, string>();
+  for (const c of cs) {
+    const s = service(c), replica = c.Names.slice(p.length + s.length + 2);
+    if (project(c) !== p || !s) continue;
+    m.set(c.Names.startsWith(`${p}-${s}-`) && /^\d+$/.test(replica) ? `${s}-${replica}` : c.Names, s);
+  }
+  return m;
+}
 
 // "About an hour" -> "~1 h", "23 minutes" -> "23 min", "Less than a second" -> "<1 s"
 export function dur(s: string): string {
@@ -82,7 +94,8 @@ export function dur(s: string): string {
 
 // o que o inspect acrescenta a uma queda (/api/inspect): se o kernel matou por falta de memória e quantas vezes o
 // docker já reiniciou o container
-export type Facts = {OOMKilled: boolean; RestartCount: number};
+// FinishedAt: quando caiu (o "Marcar como visto" da faixa de atenção vale só para esta queda)
+export type Facts = {OOMKilled: boolean; RestartCount: number; FinishedAt?: string};
 
 // a dica de uma queda: a causa do código de saída e, com o inspect na mão, o 137 separado em memória ou SIGKILL e os
 // reinícios. undefined quando não há o que dizer

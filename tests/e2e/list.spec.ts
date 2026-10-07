@@ -31,7 +31,7 @@ test('o cabeçalho diz em qual daemon a página age, em âmbar quando é remoto'
   const where = page.locator('#where');
   await expect(where).toHaveText('docker · default');
   await expect(where).toHaveClass(/text-muted/);
-  await expect(page).toHaveTitle('Docker GUI · 1 rodando');  // o default não entra no título
+  await expect(page).toHaveTitle('Docker GUI · 1 rodando bem');  // o default não entra no título
   await gui.stop();
 
   await gui.open({
@@ -45,13 +45,13 @@ test('o cabeçalho diz em qual daemon a página age, em âmbar quando é remoto'
   await expect(where).toHaveText('docker · producao, daemon remoto em tcp://10.0.0.5:2376');  // o sr-only conta
   await expect(where).toHaveClass(/text-warn-fg/);
   await expect(where).toHaveAttribute('title', 'Daemon em tcp://10.0.0.5:2376');
-  await expect(page).toHaveTitle('Docker GUI · producao · 1 rodando');
+  await expect(page).toHaveTitle('Docker GUI · producao · 1 rodando bem');
   // o aviso e a confirmação também dizem onde
   await page.getByRole('button', { name: 'Parar web' }).click();
   await expect(page.locator('#toast')).toContainText('producao · web parado.');
   await page.locator('summary[aria-label="Mais ações para web"]').click();
   await page.getByRole('button', { name: 'Remover…' }).click();
-  await expect(row(page, 'web')).toContainText('producao · Remover web de vez?');
+  await expect(page.locator('#armdock')).toContainText('producao · Remover web de vez?');
   await expect(page.locator('#shown')).toContainText('No daemon remoto producao: Clique em Remover para apagar web de vez.');
 });
 
@@ -60,7 +60,7 @@ test('quem caiu mostra a última linha do log na faixa de atenção', async ({ p
   const logs = '2026-10-05T12:00:01.000000000Z booting\n2026-10-05T12:00:03.000000000Z FATAL: out of memory\n'
     + '2026-10-05T12:00:02.000000000Z loading cache\n';
   await gui.open({ containers: [ctr('web', { State: 'exited', Status: 'Exited (137) 2 minutes ago', logs }), ctr('ok', { logs })] });
-  await expect(row(page, 'web')).toContainText('Última linha do log: FATAL: out of memory');
+  await expect(row(page, 'web')).toContainText('Abrir os logs. Última linha: FATAL: out of memory');
   await expect(row(page, 'ok')).not.toContainText('Última linha do log');  // quem está de pé não precisa
 });
 
@@ -78,7 +78,7 @@ test('contagem por estado e título da aba', async ({ page, gui }) => {
   await gui.open({ containers: [...shop, ...loose] });
   const pills = page.locator('#count button[data-a="filter"]');
   await expect(pills).toHaveText(['2 com problema', '3 rodando bem', '1 parado']);
-  await expect(page).toHaveTitle('Docker GUI · 4 rodando · 2 com problema');
+  await expect(page).toHaveTitle('Docker GUI · 3 rodando bem · 2 com problema');  // as palavras das contagens
 });
 
 test('lista só de containers soltos dispensa cabeçalho', async ({ page, gui }) => {
@@ -103,7 +103,7 @@ test('status do docker vem traduzido, com o original no title', async ({ page, g
     ['db', 'Rodando há 2 h · saudável'],
     ['flaky', 'Rodando há ~1 h · healthcheck falhando'],
     ['cron', 'Parado há 3 d'],
-    ['loop', 'Reiniciando em loop · saiu com código 1erro da aplicação'],
+    ['loop', 'Reiniciando em loop · saiu com código 1erro da aplicação (veja o log)'],
     ['novo', 'Criado, nunca iniciado'],
     ['zumbi', 'Morto · só dá para remover'],
     ['parado', 'Pausado'],
@@ -187,7 +187,7 @@ test('no celular vira cards, sem rolagem horizontal', async ({ page, gui }) => {
   await expect(page.locator('thead th').filter({ visible: true })).toHaveCount(1);
   await expect(page.getByRole('checkbox', { name: 'Selecionar todos os visíveis' })).toBeVisible();
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
-  expect(overflow).toBe(0);
+  expect(overflow).toBeLessThanOrEqual(0);  // negativo: o espaço reservado da barra de rolagem
 });
 
 test('CPU e memória do docker stats aparecem só nos containers rodando, e atualizam sozinhos', async ({ page, gui }) => {
@@ -214,4 +214,52 @@ test('quem saiu com 137 diz se foi falta de memória, pelo inspect, e quantas ve
   await expect(row(page, 'worker')).toContainText('morto à força (SIGKILL), não por falta de memória');
   await page.getByRole('button', { name: 'Logs api' }).click();
   await expect(page.locator('#dlg-status')).toContainText('sem memória (OOM) · reiniciou 2 vezes');
+});
+
+test('queda antiga marcada como vista sai da faixa de atenção, e o Desfazer devolve', async ({ page, gui }) => {
+  const job = ctr('migrate', { State: 'exited', Status: 'Exited (1) 2 days ago', logs: 'erro: tabela já existe\n',
+                               inspect: { State: { FinishedAt: '2026-10-04T10:00:00Z' } } });
+  await gui.open({ containers: [ctr('web'), job] });
+  const band = page.locator('#rows tr[data-key="h:attn"]');
+  await expect(band).toContainText('Precisa de atenção · 1');
+  await expect(page).toHaveTitle('Docker GUI · 1 rodando bem · 1 com problema');
+  await row(page, 'migrate').getByRole('button', { name: 'Marcar a queda de migrate como vista: sai da faixa de atenção' }).click();
+  await expect(band).toHaveCount(0);
+  // continua vermelho e contado como problema: só não grita mais na faixa
+  await expect(page.locator(`#st-${id('migrate')}`)).toContainText('Saiu com código 1');
+  await expect(page).toHaveTitle('Docker GUI · 1 rodando bem · 1 com problema');
+  await expect(page.locator('#toast')).toContainText('migrate saiu da faixa de atenção. Volta para lá se cair de novo.');
+  await page.locator('#toast').getByRole('button', { name: 'Desfazer' }).click();
+  await expect(band).toContainText('Precisa de atenção · 1');
+});
+
+test('na faixa, a última linha do log abre os logs e o Logs tem contorno', async ({ page, gui }) => {
+  await gui.open({ containers: [ctr('web', { State: 'exited', Status: 'Exited (137) 1 minute ago', logs: 'FATAL: out of memory\n' })] });
+  const logs = row(page, 'web').getByRole('button', { name: 'Logs web' });
+  await expect(logs).toHaveClass(/ring-accent\/40/);
+  await row(page, 'web').getByRole('button', { name: 'Abrir os logs. Última linha: FATAL: out of memory' }).click();
+  await expect(page.locator('#dlg')).toBeVisible();
+  await expect(page.locator('#lt')).toHaveText('web');
+});
+
+test('janela estreita (760px, ao lado do editor) com mouse: tabela compacta, sem virar card', async ({ page, gui }) => {
+  await page.setViewportSize({ width: 760, height: 800 });
+  await gui.open({ containers: [...shop, ...loose, ctr('site', { Ports: '0.0.0.0:8080->80/tcp' })] });
+  // o cabeçalho continua (Nome, Status e as ações); imagem e portas descem para baixo do nome
+  await expect(page.locator('thead th').filter({ visible: true })).toHaveCount(3);
+  await expect(row(page, 'site').getByRole('link', { name: /Abrir localhost:8080/ })).toHaveCount(1);
+  await expect(row(page, 'site').getByRole('rowheader')).toContainText('site:latest');
+  // alvo de toque só no toque: com mouse, o botão fica baixo
+  const h = await row(page, 'api').getByRole('button', { name: 'Logs api' }).evaluate(b => b.getBoundingClientRect().height);
+  expect(h).toBeLessThan(30);
+  await expect(page.getByRole('button', { name: /Atalhos/ })).toBeVisible();
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(0);  // negativo: o espaço reservado da barra de rolagem
+});
+
+test('o cabeçalho do projeto conta quem está pausado ou reiniciando, e a aba Containers tem a contagem', async ({ page, gui }) => {
+  await gui.open({ containers: [
+    ctr('a', { Labels: compose('p', 'a') }), ctr('b', { Labels: compose('p', 'b'), State: 'paused', Status: 'Up 1 hour (Paused)' })] });
+  await expect(page.locator('#rows tr[data-key="g:p"]')).toContainText('compose · 1 de 2 rodando · 1 pausado');
+  await expect(page.locator('#tab-containers')).toHaveText('Containers · 2');
 });

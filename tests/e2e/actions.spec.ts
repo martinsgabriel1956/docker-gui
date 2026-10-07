@@ -84,11 +84,14 @@ test.describe('remover em 2 passos', () => {
     await gui.open({ containers: [stopped('cron'), ctr('web', { Status: 'Restarting (1) 4 seconds ago', State: 'restarting' })] });
     // posição das colunas pela linha vizinha: o Confirmar e o aviso não podem alargar a coluna de ações
     const cols = () => row(page, 'web').locator('td').evaluateAll(tds => tds.map(td => Math.round(td.getBoundingClientRect().left)));
-    const before = await cols();
+    const before = await cols(), height = () => row(page, 'cron').evaluate(tr => tr.getBoundingClientRect().height), h = await height();
     await menu(page, 'cron').click();
     await page.getByRole('button', { name: 'Remover…' }).click();
     await expect(page.getByRole('button', { name: 'Cancelar remoção de cron' })).toBeFocused();
     expect(await cols()).toEqual(before);
+    // o Confirmar, o × e o aviso ficam no pé da tela: a linha armada não cresce nem empurra as de baixo
+    expect(await height()).toBe(h);
+    await expect(page.locator('#armdock').getByRole('button', { name: 'Confirmar remoção de cron' })).toBeVisible();
 
     await page.getByRole('button', { name: 'Cancelar remoção de cron' }).click();
     await expect(page.getByRole('button', { name: 'Confirmar remoção de cron' })).toBeHidden();
@@ -102,7 +105,7 @@ test.describe('remover em 2 passos', () => {
     await page.getByRole('button', { name: 'Remover…' }).click();
     const confirm = page.getByRole('button', { name: 'Confirmar remoção de cron' });
     await expect(confirm).toBeVisible();
-    await expect(row(page, 'cron')).toContainText('Remover cron de vez? Os volumes ficam. Esc cancela.');
+    await expect(page.locator('#armdock')).toContainText('Remover cron de vez? Os volumes ficam. Esc cancela.');
 
     await page.keyboard.press('Escape');
     await expect(confirm).toBeHidden();
@@ -159,7 +162,7 @@ test.describe('remover em 2 passos', () => {
       await menu(page, 'cron').click();
       await page.getByRole('button', { name: 'Remover…' }).click();
       const confirm = page.getByRole('button', { name: 'Confirmar remoção de cron' });
-      await expect(row(page, 'cron')).toContainText('Cancela sozinho em 8 s.');
+      await expect(page.locator('#armdock')).toContainText('Cancela sozinho em 8 s.');
       await expect(page.getByRole('button', { name: 'Cancelar remoção de cron' })).toBeFocused();
       await page.clock.runFor(9_000);
       await expect(confirm).toBeHidden();
@@ -265,4 +268,12 @@ test('Iniciar que falha por porta ocupada diz a causa no aviso e na linha', asyn
   await expect(toast(page)).toHaveText(`Não deu para iniciar web. ${hint}`);
   await expect(row(page, 'web')).toContainText(hint);  // à vista; o erro do docker fica no "ver erro"
   await expect(row(page, 'web').locator('pre')).toHaveText(err);
+});
+
+test('s faz a ação principal da linha em foco', async ({ page, gui }) => {
+  await gui.open({ containers: [ctr('web')] });
+  await page.getByRole('button', { name: 'Logs web' }).focus();
+  await page.keyboard.press('s');
+  await expect(toast(page)).toContainText('web parado.');
+  await expect(page.getByRole('button', { name: 'Iniciar web' })).toBeVisible();
 });
