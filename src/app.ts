@@ -38,6 +38,8 @@ type ComposeAction = 'up' | 'rebuild' | 'down' | 'pull' | 'restart' | 'build' | 
 // (id = "stack-<projeto>"), limpar uma categoria do disco ou remover uma imagem, volume ou rede; a é o data-a do
 // botão e note vai para o leitor de tela
 type Arming = {id: string; name: string; a: 'remove' | 'down' | 'prune' | 'rm'; note: string; run: () => unknown; at: number; timer: number};
+// saída do compose de um projeto, enquanto roda (code null) e, se falhou, até fechar (code -1: o stream caiu no meio)
+type Out = {what: string; text: string; code: number | null};
 type Health = {Log?: {ExitCode: number; Output: string}[]} | null;
 // resumo do /api/inspect; o valor do env vem null (mascarado) até o usuário pedir para revelar
 type Inspect = {Restart: string; Networks: Record<string, string>; Env: [key: string, value: string | null][];
@@ -669,12 +671,15 @@ function render() {
   patchRows(rows.length
     ? [...(attn.length ? [bandHead(t`Precisa de atenção · ${attn.length}`, 'text-bad-fg bg-bad/10'), ...attn.map(c => row(c, true))] : []),
        ...keys.flatMap(k => [...(heads ? [groupHead(k, k ? esc(k) : keys.length > 1 ? t`Sem projeto compose` : t`Demais containers`)] : []),
+                             ...(outs.has(k) ? [outRow(k)] : []),
                              ...groups.get(k)!.map(c => row(c))])]
     : [`<tr data-key="empty" role="row" class="max-sm:block"><td role="cell" colspan="5" class="max-sm:block py-16 px-4 text-center text-muted">${
       !lastOk ? (problem ? t`Sem dados ainda.` : t`Carregando…`)  // nunca recebeu dados: não afirma que a lista está vazia
       : !data.length ? t`Nenhum container ainda. Crie um em “Novo container” ou com ${code('docker run')}.`
       : q ? t`Nenhum container ${label}corresponde a “${esc(q)}”.` : t`Nenhum container ${label}agora.`}</td></tr>`]);
   dirty = false;
+  // o texto da saída não vai no HTML da linha (cada linha que chega a redesenharia): entra aqui quando a linha é nova
+  outs.forEach((o, k) => { const pre = outPre(k); if (pre && pre.textContent!.length !== o.text.length) { pre.textContent = o.text; pre.scrollTop = pre.scrollHeight; } });
   // o segundo passo fica preso no pé da tela: dentro da tabela, ou empurrava as linhas ou cobria uma delas
   const dock = armHtml();
   if (dock !== dockHtml) $('#armdock').innerHTML = dockHtml = dock;  // só troca se mudou: o foco fica no × ou no Confirmar
@@ -927,6 +932,55 @@ function confirmArm() {
   run();
 }
 
+// a saída do compose chega um JSON por linha: cada linha da saída é uma string, e o fim é {code}. Sem o fim (o
+// servidor caiu no meio), -1
+async function readOut(r: Response, p: string, o: Out): Promise<number> {
+  const reader = r.body!.pipeThrough(new TextDecoderStream()).getReader();
+  let rest = '', code = -1;
+  for (;;) {
+    const {value, done} = await reader.read();
+    if (done) return code;
+    const lines = (rest + value).split('\n');
+    rest = lines.pop()!;
+    for (const l of lines) {
+      const v: string | {code: number} = JSON.parse(l);
+      if (typeof v === 'string') addOut(p, o, v + '\n'); else code = v.code;
+    }
+  }
+}
+
+// ponytail: guarda só o fim de um build enorme (OUT_MAX caracteres); o motivo da falha fica nas últimas linhas
+const OUT_MAX = 200_000;
+const outs = new Map<string, Out>();
+const outPre = (k: string) => document.querySelector<HTMLElement>(`pre[data-out="${CSS.escape(k)}"]`);
+function addOut(p: string, o: Out, s: string) {
+  o.text += s;
+  const pre = outPre(p), cut = o.text.length > 2 * OUT_MAX;  // corta de vez em quando, não a cada linha
+  if (cut) o.text = o.text.slice(-OUT_MAX);
+  if (!pre) return;
+  // acompanha o fim, a não ser que a pessoa tenha rolado para cima para ler
+  const end = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 8;
+  if (cut) pre.textContent = o.text; else pre.append(s);
+  if (end) pre.scrollTop = pre.scrollHeight;
+}
+function closeOut(p: string) {
+  outs.delete(p); render();
+  document.querySelector<HTMLElement>(`[data-id="stack-${CSS.escape(p)}"][data-a="menu"]`)?.focus();
+}
+// linha logo abaixo do cabeçalho do projeto: o comando, o estado e a saída (o texto entra pelo render e pelo addOut)
+function outRow(k: string) {
+  const o = outs.get(k)!, ek = esc(k), what = esc(o.what), running = o.code === null;
+  const state = running ? t`rodando…` : o.code === -1 ? t`sem resposta do servidor` : t`falhou (código ${o.code})`;
+  return `<tr data-key="o:${ek}" role="row" class="max-sm:block"><td role="cell" colspan="5" class="max-sm:block px-4 pb-3 bg-raised">
+    <div class="flex items-center gap-2 font-mono text-xs ${running ? 'text-fg-soft' : 'text-bad-fg'}">
+      <span>${what} · ${state}</span>${running ? '' : `<button data-id="out-${ek}" data-a="close" data-p="${ek}" onclick="closeOut(this.dataset.p)"
+        aria-label="${t`Fechar a saída do ${what} do projeto ${ek}`}" title="${t`Fechar`}" class="ml-auto grid place-items-center shrink-0 w-9 coarse:w-11 ${BTN} text-fg hover:bg-hover">${X_ICON}</button>`}
+    </div>
+    <pre data-out="${ek}" tabindex="0" aria-label="${t`Saída do ${what}`}"
+      class="mt-1.5 max-h-64 overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] rounded bg-canvas p-2 font-mono text-xs text-fg-soft ring-1 ring-line focus-visible:outline-2 focus-visible:outline-accent"></pre>
+  </td></tr>`;
+}
+
 // docker compose up/up --build/pull/down no projeto inteiro (down pede confirmação: o projeto some da lista),
 // ou restart/build de um serviço (svc)
 async function composeAct(a: ComposeAction, p: string, svc = '', sure = false): Promise<unknown> {
@@ -939,17 +993,24 @@ async function composeAct(a: ComposeAction, p: string, svc = '', sure = false): 
   const since = new Date().toISOString();
   const what = `${COMPOSE_CMD[a]}${svc ? ` ${svc}` : ''}`;
   let ok = false;
-  composing.set(p, a); ids.forEach(id => busy.set(id, 'restart')); render();
+  const o: Out = {what, text: '', code: null};
+  composing.set(p, a); outs.set(p, o); ids.forEach(id => busy.set(id, 'restart')); render();
   $('#shown').textContent = `${COMPOSE_VERB[a]} ${svc || p}`;
   try {
     const r = await api(`/api/compose/${a}`, {method: 'POST', headers: {'Content-Type': 'application/json'},
                                               body: JSON.stringify({project: p, dir: workingDir(c), ...(svc ? {service: svc} : {})})});
-    const msg: string = await r.json();
-    ok = r.ok;
-    // o compose escreve o progresso no stderr: no erro, a última linha é a que explica
-    toast(r.ok ? ids.length ? t`${p}: ${what} concluído, conferindo se ficou de pé…` : t`${p}: ${what} concluído.`
-               : t`${p}: ${what} falhou. ${errHint(msg) || msg.trim().split('\n').at(-1) || t`Erro sem mensagem.`}`, r.ok);
-  } catch { toast(t`${p}: sem resposta do servidor do Docker GUI.`); }
+    // erro antes do compose rodar (projeto ou serviço que não existe): JSON com a mensagem, sem saída para mostrar
+    const msg: string = r.ok ? (o.code = await readOut(r, p, o), o.text) : (outs.delete(p), await r.json());
+    ok = r.ok && o.code === 0;
+    // o compose escreve o progresso no stderr: no erro, a última linha é a que explica (a saída inteira fica na tela)
+    toast(ok ? ids.length ? t`${p}: ${what} concluído, conferindo se ficou de pé…` : t`${p}: ${what} concluído.`
+             : t`${p}: ${what} falhou. ${errHint(msg) || msg.trim().split('\n').at(-1) || t`Erro sem mensagem.`}`, ok);
+  } catch {
+    o.code = -1;
+    toast(t`${p}: sem resposta do servidor do Docker GUI.`);
+  }
+  // deu certo: o aviso basta. Falhou: a saída fica aberta até o ×, com o motivo
+  if (ok || !o.text) outs.delete(p);
   composing.delete(p); ids.forEach(id => busy.delete(id)); svcs.delete(p); render();
   await load();
   // o build recria o container quando a imagem mudou: o ID novo é o que tem que ficar de pé
@@ -1847,7 +1908,7 @@ async function rmObj(k: ObjKind, r: string, sure = false): Promise<unknown> {
 // o HTML gerado chama estas funções pelo nome (onclick="act(...)"); com módulos nada é global, então
 // esta lista é a interface completa entre o HTML e o código
 Object.assign(window, {
-  ackFail, act, afterClose, askNotify, confirmArm, bulkAct, clearFilters, clearSel, composeAct, copyAddr, copyExec, copyLogs, disarm, downloadLogs,
+  ackFail, act, afterClose, askNotify, confirmArm, bulkAct, clearFilters, clearSel, closeOut, composeAct, copyAddr, copyExec, copyLogs, disarm, downloadLogs,
   filterBy, followClick, loadHealth, loadHistory, loadInspect, loadMore, loadTop, logPick, menuPick, openCreate, openShell, pickTab, placeMenu, projectLogs,
   prune, refreshLogs, rmObj, serviceAct, runToastAction, selectAll, sinceChange, stackAct, toggleSel,
 });
