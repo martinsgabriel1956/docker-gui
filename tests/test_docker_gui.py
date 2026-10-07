@@ -740,8 +740,9 @@ class ActionsTest(ServerTest):
         self.docker.assert_not_called()
 
 
-class ComposeTest(ServerTest):
-    """O cliente só escolhe o projeto (e o serviço); diretório, arquivos e serviços saem dos labels dos containers."""
+class ComposeTest(StreamTest):
+    """O cliente só escolhe o projeto (e o serviço); diretório, arquivos e serviços saem dos labels dos containers.
+    O ps e o config passam pelo mock; o compose em si é um script de verdade, porque a saída dele vem em stream."""
 
     # uma linha por container: projeto, pasta, arquivos e serviço
     PS = "\n".join(json.dumps(r) for r in (
@@ -756,33 +757,73 @@ class ComposeTest(ServerTest):
     def ps_call():
         return mock.call("ps", "-a", "--filter", "label=com.docker.compose.project", "--format", docker_gui.COMPOSE_FORMAT)
 
+    def compose(self, action, body, script="echo 'Container shop-api-1  Started' >&2"):
+        """POST da ação com o compose trocado por script: (status, linhas do stream já decodificadas, argv do compose)."""
+        self.fake_docker(script)
+        status, text = self.request("POST", f"/api/compose/{action}", body=body)
+        with open(os.path.join(self.dir, "args")) as f:
+            return status, [json.loads(line) for line in text.splitlines()], f.read().split()
+
     def test_each_action_builds_argv_from_labels(self):
         self.assertEqual(docker_gui.COMPOSE, {"up": ["up", "-d"], "rebuild": ["up", "-d", "--build"],
                                               "down": ["down"], "pull": ["pull"]})
         for action, args in docker_gui.COMPOSE.items():
             self.docker.reset_mock()
-            self.docker.side_effect = [ok(self.PS), ok(stderr="Container shop-api-1  Started\n")]
-            self.assertEqual(self.request("POST", f"/api/compose/{action}", body=self.SHOP),
-                             (200, "Container shop-api-1  Started"), action)
-            self.assertEqual(self.docker.call_args_list, [self.ps_call(), mock.call(
-                *self.BASE, *args, timeout=docker_gui.COMPOSE_TIMEOUT)])
+            self.docker.side_effect = [ok(self.PS)]
+            self.assertEqual(self.compose(action, self.SHOP),
+                             (200, ["Container shop-api-1  Started", {"code": 0}], [*self.BASE, *args]), action)
+            self.assertEqual(self.docker.call_args_list, [self.ps_call()])
 
     def test_restart_one_service(self):
         self.assertEqual(docker_gui.COMPOSE_SERVICE, {"restart": ["restart"], "build": ["up", "-d", "--build", "--no-deps"],
                                                       "svcup": ["up", "-d"]})
-        self.docker.side_effect = [ok(self.PS), ok(stderr="Container shop-db-1  Started\n")]
-        self.assertEqual(self.request("POST", "/api/compose/restart", body={**self.SHOP, "service": "db"}),
-                         (200, "Container shop-db-1  Started"))
-        self.assertEqual(self.docker.call_args_list, [self.ps_call(), mock.call(
-            *self.BASE, "restart", "--", "db", timeout=docker_gui.COMPOSE_TIMEOUT)])
+        self.docker.side_effect = [ok(self.PS)]
+        self.assertEqual(self.compose("restart", {**self.SHOP, "service": "db"}),
+                         (200, ["Container shop-api-1  Started", {"code": 0}], [*self.BASE, "restart", "--", "db"]))
 
     def test_build_one_service(self):
         # reconstrói e recria só o api: --no-deps deixa o db como está
-        self.docker.side_effect = [ok(self.PS), ok(stderr="Container shop-api-1  Started\n")]
-        self.assertEqual(self.request("POST", "/api/compose/build", body={**self.SHOP, "service": "api"}),
-                         (200, "Container shop-api-1  Started"))
-        self.assertEqual(self.docker.call_args_list, [self.ps_call(), mock.call(
-            *self.BASE, "up", "-d", "--build", "--no-deps", "--", "api", timeout=docker_gui.COMPOSE_TIMEOUT)])
+        self.docker.side_effect = [ok(self.PS)]
+        self.assertEqual(self.compose("build", {**self.SHOP, "service": "api"}),
+                         (200, ["Container shop-api-1  Started", {"code": 0}],
+                          [*self.BASE, "up", "-d", "--build", "--no-deps", "--", "api"]))
+
+    def test_output_streams_stdout_and_stderr_line_by_line(self):
+        # o build sai no stdout e o progresso no stderr, na ordem em que saem; o \r do fim e o UTF-8 sobrevivem
+        self.docker.side_effect = [ok(self.PS)]
+        status, lines, _ = self.compose("rebuild", self.SHOP, "printf '#1 [api] RUN npm ci\\r\\n'; printf 'ação\\n' >&2; "
+                                                              "printf 'sem quebra no fim'")
+        self.assertEqual((status, lines), (200, ["#1 [api] RUN npm ci", "ação", "sem quebra no fim", {"code": 0}]))
+
+    def test_compose_error_keeps_output_and_exit_code(self):
+        # o status já saiu (200) quando o compose começa: quem diz se falhou é o code do fim
+        self.docker.side_effect = [ok(self.PS)]
+        self.assertEqual(self.compose("pull", self.SHOP, "echo 'pull access denied' >&2; exit 18")[:2],
+                         (200, ["pull access denied", {"code": 18}]))
+
+    def test_compose_past_deadline_is_killed(self):
+        self.docker.side_effect = [ok(self.PS)]
+        with mock.patch.object(docker_gui, "COMPOSE_TIMEOUT", 0.3):
+            start = time.monotonic()
+            status, lines, _ = self.compose("up", self.SHOP, "echo baixando; exec sleep 30")
+        self.assertLess(time.monotonic() - start, 10)
+        self.assertEqual((status, lines[0], lines[-1]), (200, "baixando", {"code": 124}))
+        self.assertIn("não respondeu em 0.3s", lines[-2])
+
+    def test_compose_runs_to_the_end_when_the_page_closes(self):
+        # um down interrompido deixaria o projeto pela metade: fechar a aba não mata o compose
+        self.docker.side_effect = [ok(self.PS)]
+        self.fake_docker(f"echo começou; sleep 0.5; echo fim > {self.dir}/done")
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
+        conn.request("POST", "/api/compose/down", body=json.dumps(self.SHOP),
+                     headers={"Host": f"localhost:{self.port}", "X-Docker-GUI-Token": docker_gui.TOKEN})
+        conn.getresponse().readline()  # o compose já começou
+        conn.close()
+        for _ in range(50):
+            if os.path.exists(os.path.join(self.dir, "done")):
+                return
+            time.sleep(0.1)
+        self.fail("o compose morreu quando a página fechou")
 
     def test_services_come_from_the_compose_file(self):
         self.docker.side_effect = [ok(self.PS), ok("api\ndb\nworker\n")]
@@ -799,11 +840,10 @@ class ComposeTest(ServerTest):
 
     def test_up_one_service_without_container(self):
         # o worker não tem container (não está nos labels), mas está no arquivo do compose
-        self.docker.side_effect = [ok(self.PS), ok("api\ndb\nworker\n"), ok(stderr="Container shop-worker-1  Started\n")]
-        self.assertEqual(self.request("POST", "/api/compose/svcup", body={**self.SHOP, "service": "worker"}),
-                         (200, "Container shop-worker-1  Started"))
-        self.assertEqual(self.docker.call_args_list, [self.ps_call(), mock.call(*self.BASE, "config", "--services"), mock.call(
-            *self.BASE, "up", "-d", "--", "worker", timeout=docker_gui.COMPOSE_TIMEOUT)])
+        self.docker.side_effect = [ok(self.PS), ok("api\ndb\nworker\n")]
+        self.assertEqual(self.compose("svcup", {**self.SHOP, "service": "worker"}),
+                         (200, ["Container shop-api-1  Started", {"code": 0}], [*self.BASE, "up", "-d", "--", "worker"]))
+        self.assertEqual(self.docker.call_args_list, [self.ps_call(), mock.call(*self.BASE, "config", "--services")])
 
     def test_up_one_service_must_be_in_the_compose_file(self):
         for config in (ok("api\ndb\n"), fail("yaml: line 3: bad indentation\n")):
@@ -903,10 +943,6 @@ class ComposeTest(ServerTest):
         self.docker.assert_not_called()
         self.docker.side_effect = [ok(self.PS), fail("no such service\n")]
         self.assertEqual(self.request("GET", self.logs_path(**self.SHOP)), (500, "no such service"))
-
-    def test_compose_error_is_500_with_stderr(self):
-        self.docker.side_effect = [ok(self.PS), fail("pull access denied\n")]
-        self.assertEqual(self.request("POST", "/api/compose/pull", body=self.SHOP), (500, "pull access denied"))
 
     def test_ps_error_is_500(self):
         self.docker.return_value = fail("Cannot connect to the Docker daemon\n")

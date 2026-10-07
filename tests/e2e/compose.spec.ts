@@ -106,7 +106,7 @@ test('o compose down diz primeiro os containers da faixa de atenção', async ({
   await expect(page.locator('#armdock')).toContainText('Remove web, api, db e cache');
 });
 
-test('compose que falha mostra a última linha do stderr', async ({ page, gui }) => {
+test('compose que falha mostra a última linha do stderr e deixa a saída inteira aberta', async ({ page, gui }) => {
   await gui.open({
     containers: containers(),
     // um erro sem explicação conhecida (os conhecidos viram a causa traduzida: errHint)
@@ -116,6 +116,13 @@ test('compose que falha mostra a última linha do stderr', async ({ page, gui })
   await page.getByRole('button', { name: 'compose pull do projeto shop', exact: true }).click();
   await expect(page.locator('#toast')).toHaveText('shop: compose pull falhou. Error response from daemon: Get "https://registry.acme/v2/": net/http: TLS handshake timeout');
   expect(gui.read().compose_calls).toEqual([[...PREFIX, 'pull']]);
+  // a saída inteira fica aberta embaixo do projeto, com o código, até o ×
+  const out = page.locator('tr[data-key="o:shop"]');
+  await expect(out).toContainText('compose pull · falhou (código 1)');
+  await expect(out.locator('pre')).toHaveText(' api Pulling\nError response from daemon: Get "https://registry.acme/v2/": net/http: TLS handshake timeout\n');
+  await out.getByRole('button', { name: 'Fechar a saída do compose pull do projeto shop' }).click();
+  await expect(out).toHaveCount(0);
+  await expect(projectMenu(page)).toBeFocused();
 });
 
 test('compose up --build reconstrói o projeto', async ({ page, gui }) => {
@@ -123,6 +130,7 @@ test('compose up --build reconstrói o projeto', async ({ page, gui }) => {
   await projectMenu(page).click();
   await page.getByRole('button', { name: 'compose up --build do projeto shop', exact: true }).click();
   await expect(page.locator('#toast')).toHaveText('shop: compose up --build concluído.');
+  await expect(page.locator('tr[data-key="o:shop"]')).toHaveCount(0);  // deu certo: o aviso basta
   expect(gui.read().compose_calls).toEqual([[...PREFIX, 'up', '-d', '--build']]);
   expect(gui.container('api')!.State).toBe('running');
 });
