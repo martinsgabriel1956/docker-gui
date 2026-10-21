@@ -131,3 +131,8 @@ Nada novo. A rota segue a regra de log do projeto (sem argumentos nem dados de c
 ## Histórico
 
 **2026-10-21**. Documento criado.
+
+**2026-10-21**. Nota vinda da [dependência do compose](../prd-dependencia-compose/techspec.md), já implementada:
+- A entrada na faixa no `app.ts` passou a ser `attention(c)` (`isProblem` ou "Created" segurado), e o `newProblems` recebe esse critério.
+- O filtro e as contagens usam o `bucketOf`.
+- As causas deste techspec (`causes`, `alertKey`) precisam partir desse critério, não só do `isProblem`, e o `bucketOf` precisa contar o `mem`.

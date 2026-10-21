@@ -18,7 +18,8 @@ O compose grava as dependências de cada serviço nos labels do container, que a
 - Como dev, eu quero ir da `api` para o `db` com um clique, porque o próximo passo é ver os logs do `db`.
 - Como dev, eu quero ver o `db` antes da `api` na faixa, porque consertar o `db` conserta os dois.
 - **Borda:** dependência em cadeia (`web` → `api` → `db`). Cada dependente aponta para a dependência direta que está quebrada; seguir os links leva à raiz. A raiz vem primeiro.
-- **Borda:** a dependência não tem container (foi removida, ou está atrás de um profile). O dependente diz que a dependência não existe, usando a lista de serviços sem container que a página já tem.
+- **Borda:** a dependência não tem container (foi removida à mão). O dependente diz que ela não tem container; isso sai da própria lista de containers do projeto.
+- **Borda:** a espera normal de um `compose up`: o `db` ainda está "verificando saúde", ou um `migrate` ainda está rodando, e a `api` está em "Created". Nada acende: a espera não é quebra.
 - **Borda:** a dependência está de pé e saudável, e mesmo assim a `api` caiu. Nenhuma anotação: a causa é da própria `api`.
 - **Borda:** dependência com `condition: service_started` ou `service_completed_successfully`. A anotação considera a condição: um `migrate` que saiu com 0 não segura ninguém; um que saiu com erro segura.
 - **Borda:** container fora do compose. Nada muda.
@@ -27,10 +28,10 @@ O compose grava as dependências de cada serviço nos labels do container, que a
 
 ### 1. Anotar a causa no dependente
 
-1. **RF1.1** Um container de um serviço do compose que não está de pé (ou que está na faixa) e tem uma dependência direta que não cumpre a condição declarada no compose ganha a anotação "depende de `<serviço>`, que `<estado traduzido>`" (por exemplo, "que está com healthcheck falhando", "que saiu com código 1", "que está parado", "que não tem container").
-2. **RF1.2** O container que não sobe por causa de uma dependência ("Created" e nunca iniciado) entra na faixa de atenção com essa anotação, mesmo sem ter saído com erro.
+1. **RF1.1** Um container de um serviço do compose que não está de pé (ou que está na faixa) e tem uma dependência direta que não cumpre a condição declarada no compose ganha a anotação "depende de `<serviço>`, que `<estado traduzido>`" (por exemplo, "que está com healthcheck falhando", "que saiu com erro", "que está parado", "que não tem container").
+2. **RF1.2** O container que não sobe por causa de uma dependência ("Created" e nunca iniciado) entra na faixa de atenção com essa anotação, mesmo sem ter saído com erro. Ele conta como "com problema" no filtro, nas contagens e no título da aba, como a faixa.
 3. **RF1.3** A anotação aponta só para a dependência direta. Com mais de uma dependência quebrada, lista todas.
-4. **RF1.4** O nome da dependência na anotação leva aos logs dela.
+4. **RF1.4** Na linha, o nome da dependência na anotação leva aos logs dela. No modal de logs do dependente, a anotação aparece como texto.
 5. **RF1.5** Quando a dependência volta a cumprir a condição, a anotação some na próxima atualização da lista.
 
 ### 2. Causa-raiz primeiro
@@ -46,7 +47,7 @@ O compose grava as dependências de cada serviço nos labels do container, que a
 
 - A anotação aparece no status do dependente, abaixo da causa própria (se houver), no mesmo tom: o dependente continua com o seu estado, a anotação explica o motivo.
 - O link para a dependência é um botão com nome acessível ("Abrir logs de db"), alcançável pelo teclado.
-- No agrupamento por projeto, fora da faixa, nada muda; a anotação vive na faixa e no modal de logs do dependente.
+- A anotação aparece na linha do dependente onde ela estiver: na faixa (o "Created" segurado, o que caiu) ou no grupo do projeto (um container parado cuja dependência está quebrada). Aparece também no modal de logs do dependente.
 - Português e inglês.
 
 ## Restrições técnicas de alto nível
@@ -66,3 +67,11 @@ O compose grava as dependências de cada serviço nos labels do container, que a
 ## Histórico
 
 **2026-10-21**. Documento criado. Decisão: a causa é anotada no dependente, que continua na faixa; a raiz vem primeiro.
+
+**2026-10-21**. Reconciliação do sdd-review, com o que foi construído:
+- A dependência sem container vem da lista de containers (não da lista de serviços do compose).
+- A espera normal do `up` ("verificando saúde", `migrate` rodando) não acende a faixa.
+- O "Created" segurado conta como problema no filtro e nas contagens (RF1.2).
+- O exemplo do RF1.1 passa a ser "que saiu com erro", como a tela diz.
+- No modal, a anotação vem sem o link (RF1.4).
+- A anotação aparece também na linha do grupo do projeto, não só na faixa (Experiência do usuário).

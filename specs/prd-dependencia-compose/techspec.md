@@ -20,7 +20,10 @@ O resultado (`blockers`) entra na faixa de três formas: como anotação no stat
   - a ordenação da faixa (`render`, linha 658) põe primeiro quem segura algum container da faixa, depois o resto por nome;
   - o status da linha ganha "depende de `db`, que está com healthcheck falhando", com o nome como botão para os logs da dependência (`openLogs`);
   - quem segura outros ganha "segurando api, worker";
-  - o `notify()` ordena o corpo da notificação agrupada com as raízes primeiro.
+  - o `notify()` ordena o corpo da notificação agrupada com as raízes primeiro;
+  - o filtro, as contagens e o título usam `bucketOf(c)` (o `bucket` do `format.ts`, com o "Created" segurado como `problema`), para seguir a faixa;
+  - o `renderDlg` mostra a anotação no modal do dependente, como texto: `depHtml(bl, hd, false)`. Trocar de container com o modal aberto seria fechar e abrir de novo, e o `afterClose` roda depois, assíncrono.
+  - A assinatura do cache da linha (`row`) inclui `blockers` e `holds`, que vêm de outros containers.
 - **Dependência sem container**: vem da própria lista de containers (nenhum container do serviço no projeto), sem consultar o `compose/services`.
 
 ## Design de implementação
@@ -116,7 +119,9 @@ Nada novo.
 
 - `src/format.ts`: `tone`/`bucket`/`isProblem` (48 a 63) e `project`/`service`/`workingDir` (64 a 72).
 - `src/app.ts`:
-  - `inBand` (463) e `render` (654 a 689), além do status da linha (527);
+  - `attention`, `inBand`, `bucketOf` e `rootsFirst`, junto do `quiet`; `render` e `renderCount`;
+  - `row` (assinatura), `DEP_TXT`, `depHtml` e `rowHtml`, além do `renderDlg`;
+  - o `load()` (o `newProblems` com o critério `attention`);
   - `load` (149), `row` (441, assinatura do cache) e `notify` (210).
 - `tests/format.test.js`, `tests/e2e/fixtures.ts`, `tests/e2e/compose.spec.ts` e `tests/e2e/problems.spec.ts`.
 
@@ -129,3 +134,7 @@ Nada novo.
 - `health: starting` e um `service_completed_successfully` ainda rodando cumprem a condição. São a espera normal de um `compose up`, e não podem acender a faixa nem notificar.
 - O `newProblems` ganha o critério de entrada (`isProblem` ou "Created" segurado).
 - A assinatura do cache da linha passa a incluir as dependências, que vêm de outros containers.
+
+**2026-10-21**. Reconciliação do sdd-review:
+- Entraram o `bucketOf`, para o filtro e as contagens seguirem a faixa (achado no print da tela; antes o "Created" segurado contava como parado), e a anotação no modal de logs, como texto (o PRD já pedia o modal).
+- A anotação aparece também na linha do grupo do projeto, porque o `depHtml` está no `rowHtml`. O PRD foi atualizado nesse ponto.
