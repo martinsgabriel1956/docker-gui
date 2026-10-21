@@ -12,16 +12,16 @@ O resultado (`blockers`) entra na faixa de três formas: como anotação no stat
 
 - **`src/format.ts`**:
   - `dependsOn(c)` faz o parse do label;
-  - `depState(dep, project, cs, missing)` devolve o estado da dependência;
-  - `blockers(c, cs, missing)` devolve as dependências que não cumprem a condição;
-  - `holds(c, cs, missing)` devolve os dependentes que o container segura.
+  - `depState(dep, project, cs)` devolve por que a dependência não cumpre a condição, ou `null`;
+  - `blockers(c, cs)` devolve as dependências que não cumprem a condição;
+  - `held(c, cs)` diz se é um "Created" segurado; `holds(c, cs)` devolve os dependentes que o container segura.
 - **`src/app.ts`**:
-  - `inBand` passa a aceitar `isProblem(c) || (c.State === 'created' && blockers(...).length)`;
+  - `inBand` passa a aceitar `(isProblem(c) && !quiet(c)) || held(c, data)`;
   - a ordenação da faixa (`render`, linha 658) põe primeiro quem segura algum container da faixa, depois o resto por nome;
   - o status da linha ganha "depende de `db`, que está com healthcheck falhando", com o nome como botão para os logs da dependência (`openLogs`);
   - quem segura outros ganha "segurando api, worker";
   - o `notify()` ordena o corpo da notificação agrupada com as raízes primeiro.
-- **Serviços sem container**: o `svcs: Map<project, {key, list}>` já existe. Quando a faixa tem um container de projeto compose cuja dependência não aparece na lista de containers, a página pede `compose/services` daquele projeto (o `loadSvcs` que já existe) para distinguir "sem container" de "fora de um profile ativo".
+- **Dependência sem container**: vem da própria lista de containers (nenhum container do serviço no projeto), sem consultar o `compose/services`.
 
 ## Design de implementação
 
@@ -31,10 +31,12 @@ O resultado (`blockers`) entra na faixa de três formas: como anotação no stat
 export type Cond = 'service_started' | 'service_healthy' | 'service_completed_successfully';
 export type Dep = {service: string; cond: Cond};
 export function dependsOn(c: Pick<Container, 'Labels'>): Dep[];
-export type DepState = 'ok' | 'unhealthy' | 'starting' | 'exited' | 'stopped' | 'missing';
-export function depState(d: Dep, project: string, cs: Container[], missing: string[] | undefined): DepState;
-export function blockers(c: Container, cs: Container[], missing?: string[]): {dep: Dep; state: DepState; c?: Container}[];
-export function holds(c: Container, cs: Container[], missing?: string[]): Container[];
+export type DepState = 'unhealthy' | 'exited' | 'stopped' | 'missing';   // por que não cumpre
+export function depState(d: Dep, project: string, cs: Container[]): DepState | null;   // null = cumpre
+export type Blocker = {service: string; state: DepState; c?: Container};
+export function blockers(c: Container, cs: Container[]): Blocker[];
+export const held: (c: Container, cs: Container[]) => boolean;
+export function holds(c: Container, cs: Container[]): Container[];
 ```
 
 **Parse:** o valor do label vai até o próximo `,<chave>=`. Por isso a regex captura uma sequência de `nome:cond[:bool]` separados por vírgula (o terceiro campo é opcional, ver riscos): `com\.docker\.compose\.depends_on=((?:[^,=:]+:[^,=:]+(?::(?:true|false))?)(?:,[^,=:]+:[^,=:]+(?::(?:true|false))?)*)`. Uma condição desconhecida vale como `service_started`.
@@ -44,16 +46,16 @@ export function holds(c: Container, cs: Container[], missing?: string[]): Contai
 | cond | cumpre quando |
 |---|---|
 | `service_started` | `running` (qualquer saúde) |
-| `service_healthy` | `running` e `(healthy)`, ou sem healthcheck (o compose recusaria antes, mas não marcamos) |
+| `service_healthy` | `running` e não `(unhealthy)`: saudável, sem healthcheck ou ainda verificando (`health: starting` é a espera normal do `up`) |
 | `service_completed_successfully` | `exited` com código 0, ou `running` (ainda não terminou: não segura, só espera) |
 
 ### Modelos de dado
 
-Nenhum novo no backend. O `blockers` é calculado a cada render a partir de `data` e de `svcs`.
+Nenhum novo no backend. O `blockers` é calculado a cada render a partir de `data`.
 
 ### Endpoints de API
 
-Nenhum novo. Usa `GET /api/containers` e `GET /api/compose/services`.
+Nenhum novo. Usa `GET /api/containers`.
 
 ## Pontos de integração
 
@@ -65,7 +67,7 @@ Nenhum novo. Usa `GET /api/containers` e `GET /api/compose/services`.
 - **Unitário** (`tests/format.test.js`, que já tem labels com `depends_on` nas linhas 139 a 160):
   - parse com 1 e com 2 dependências e com outras labels depois;
   - cada linha da tabela condição × estado;
-  - dependência sem container, com e sem a lista `missing`;
+  - dependência sem container;
   - cadeia `web → api → db`, em que só a direta aparece;
   - `holds`;
   - container fora do compose.
@@ -79,7 +81,7 @@ Nenhum novo. Usa `GET /api/containers` e `GET /api/compose/services`.
 
 1. `dependsOn`, `depState`, `blockers` e `holds`, com os testes.
 2. `inBand`, a ordenação, o status e o botão no `app.ts`.
-3. A carga de `compose/services` quando a dependência não tem container.
+3. (sem passo: a dependência sem container vem da lista de containers)
 4. A ordem na notificação agrupada.
 5. E2E.
 
@@ -115,9 +117,15 @@ Nada novo.
 - `src/format.ts`: `tone`/`bucket`/`isProblem` (48 a 63) e `project`/`service`/`workingDir` (64 a 72).
 - `src/app.ts`:
   - `inBand` (463) e `render` (654 a 689), além do status da linha (527);
-  - `svcs`/`missingSvcs` (1014 a 1031) e `notify` (210).
+  - `load` (149), `row` (441, assinatura do cache) e `notify` (210).
 - `tests/format.test.js`, `tests/e2e/fixtures.ts`, `tests/e2e/compose.spec.ts` e `tests/e2e/problems.spec.ts`.
 
 ## Histórico
 
 **2026-10-21**. Documento criado.
+
+**2026-10-21**. Durante o sdd-tasks:
+- "Sem container" sai da própria lista de containers, sem consultar o `compose/services`. O compose cria as dependências junto no `up`, então uma dependência sem container foi removida à mão; o caso do profile inativo o compose recusa antes de criar o dependente.
+- `health: starting` e um `service_completed_successfully` ainda rodando cumprem a condição. São a espera normal de um `compose up`, e não podem acender a faixa nem notificar.
+- O `newProblems` ganha o critério de entrada (`isProblem` ou "Created" segurado).
+- A assinatura do cache da linha passa a incluir as dependências, que vêm de outros containers.
