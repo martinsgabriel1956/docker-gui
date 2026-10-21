@@ -52,8 +52,9 @@ export const ctr = (Names: string, rest: Partial<Container> = {}): Container => 
   ID: id(Names), Names, Image: `${Names}:latest`, State: 'running', Status: 'Up 5 minutes', Ports: '', Labels: '', ...rest,
 });
 
-export const compose = (project: string, service: string) =>
-  `com.docker.compose.project=${project},com.docker.compose.service=${service}`;
+// depends: o valor do com.docker.compose.depends_on ("db:service_healthy:false,…"), primeiro, como o docker ps ordena
+export const compose = (project: string, service: string, depends = '') =>
+  `${depends ? `com.docker.compose.depends_on=${depends},` : ''}com.docker.compose.project=${project},com.docker.compose.service=${service}`;
 
 export const row = (page: Page, name: string) => page.locator(`#rows tr[data-key="c:${id(name)}"]`);
 

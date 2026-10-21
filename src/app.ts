@@ -282,7 +282,7 @@ if (REMOTE) {
 }
 
 function renderCount() {
-  const n = (k: Bucket) => data.filter(c => bucket(c) === k).length;
+  const n = (k: Bucket) => data.filter(c => bucketOf(c) === k).length;
   const problemTxt = problemKind ? PROBLEM_TXT[problemKind] : '';
   // o favicon conta a faixa de atenção (a queda já vista sai dela); o título usa as mesmas palavras das contagens
   const band = data.filter(inBand).length;
@@ -474,6 +474,8 @@ const quiet = (c: Container) => (c.State === 'exited' || c.State === 'dead') && 
 // dependência quebrada segura. attention é o mesmo sem o "visto", para as notificações
 const attention = (c: Container) => isProblem(c) || held(c, data);
 const inBand = (c: Container) => (isProblem(c) && !quiet(c)) || held(c, data);
+// o filtro e as contagens seguem a faixa: o "Created" segurado conta como problema, não como parado
+const bucketOf = (c: Container): Bucket => held(c, data) ? 'problema' : bucket(c);
 // quem segura outros vem antes (consertar o db conserta a api); o sort é estável, então o resto segue por nome
 const rootsFirst = (cs: Container[]) => cs.sort((a, b) => +(holds(b, data).length > 0) - +(holds(a, data).length > 0));
 function saveSeen() {
@@ -681,7 +683,7 @@ function render() {
   const q = $<HTMLInputElement>('#q').value.trim().toLowerCase();
   // ordem alfabética estável: a linha não sai de baixo do cursor depois de uma ação;
   // a triagem fica na faixa "Precisa de atenção", o resto agrupado por projeto compose
-  const rows = data.filter(c => (!only || bucket(c) === only) && [c.Names, c.Image, project(c)].join(' ').toLowerCase().includes(q))
+  const rows = data.filter(c => (!only || bucketOf(c) === only) && [c.Names, c.Image, project(c)].join(' ').toLowerCase().includes(q))
                    .sort((a, b) => a.Names.localeCompare(b.Names));
   visible = rows.map(c => c.ID);
   const attn = rootsFirst(rows.filter(inBand)), groups = new Map<string, Container[]>();

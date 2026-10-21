@@ -11186,7 +11186,7 @@ ${h2.join(`
     $2("#run-ports-hint").innerHTML = t`portaDoHost:portaDoContainer, separadas por vírgula ou espaço. Ficam em ${code("127.0.0.1")} do daemon remoto ${esc(CTX)}: só aquela máquina acessa, não esta.`;
   }
   function renderCount() {
-    const n = (k) => data.filter((c) => bucket(c) === k).length;
+    const n = (k) => data.filter((c) => bucketOf(c) === k).length;
     const problemTxt = problemKind ? PROBLEM_TXT[problemKind] : "";
     const band = data.filter(inBand).length;
     setIcon(problem ? "!" : band > 9 ? "9+" : String(band || ""));
@@ -11373,6 +11373,7 @@ ${h2.join(`
   var quiet = (c) => (c.State === "exited" || c.State === "dead") && seenFails.has(fallKey(c));
   var attention = (c) => isProblem(c) || held(c, data);
   var inBand = (c) => isProblem(c) && !quiet(c) || held(c, data);
+  var bucketOf = (c) => held(c, data) ? "problema" : bucket(c);
   var rootsFirst = (cs2) => cs2.sort((a, b2) => +(holds(b2, data).length > 0) - +(holds(a, data).length > 0));
   function saveSeen() {
     try {
@@ -11562,7 +11563,7 @@ ${WIDE.matches ? "" : `
   }
   function render() {
     const q2 = $2("#q").value.trim().toLowerCase();
-    const rows = data.filter((c) => (!only || bucket(c) === only) && [c.Names, c.Image, project(c)].join(" ").toLowerCase().includes(q2)).sort((a, b2) => a.Names.localeCompare(b2.Names));
+    const rows = data.filter((c) => (!only || bucketOf(c) === only) && [c.Names, c.Image, project(c)].join(" ").toLowerCase().includes(q2)).sort((a, b2) => a.Names.localeCompare(b2.Names));
     visible = rows.map((c) => c.ID);
     const attn = rootsFirst(rows.filter(inBand)), groups = /* @__PURE__ */ new Map();
     for (const c of rows) if (!inBand(c)) groups.set(project(c), [...groups.get(project(c)) || [], c]);
