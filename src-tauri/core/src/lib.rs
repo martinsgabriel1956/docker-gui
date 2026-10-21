@@ -10,6 +10,8 @@ pub mod normalize;
 pub mod page;
 pub mod pyfmt;
 pub mod router;
+pub mod streams;
+pub mod terminal;
 pub mod validate;
 
 pub use cli::{Ctx, Output, RunError, Runner};

@@ -8,9 +8,6 @@ use std::time::Duration;
 use serde_json::Value;
 use stivo_core::{Ctx, Lang, Method, Output, Reply, Request, RunError, Runner, handle};
 
-// grupos de tests/contract/ que o núcleo já implementa: cada task do core liga o seu; None, todos valem
-const IMPLEMENTED: Option<&[&str]> = Some(&["lists", "reads", "writes", "en"]);
-
 struct Fake {
     calls: Mutex<VecDeque<Value>>,
     errors: Mutex<Vec<String>>,
@@ -57,9 +54,6 @@ async fn contract() {
     let mut ran = 0;
     for path in &paths {
         let name = path.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
-        if IMPLEMENTED.is_some_and(|gs| !gs.iter().any(|g| name.starts_with(&format!("{g}/")))) {
-            continue;
-        }
         ran += 1;
         let case: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         let fake = Arc::new(Fake {
@@ -92,6 +86,6 @@ async fn contract() {
             failures.push(format!("{name}: {}", errs.join("; ")));
         }
     }
-    assert!(ran > 0 || IMPLEMENTED.is_some_and(|g| g.is_empty()), "nenhum caso rodou");
+    assert!(ran > 100, "só {ran} casos de contrato: a pasta tests/contract/ mudou de lugar?");
     assert!(failures.is_empty(), "{} de {ran} casos falharam:\n{}", failures.len(), failures.join("\n"));
 }

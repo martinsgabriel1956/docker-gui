@@ -66,7 +66,7 @@ fn not_found() -> Response {
     reply(404, "not found")
 }
 
-fn caps(re: &str, s: &str) -> Option<Vec<String>> {
+pub(crate) fn caps(re: &str, s: &str) -> Option<Vec<String>> {
     static CACHE: LazyLock<std::sync::Mutex<Vec<(String, Regex)>>> = LazyLock::new(Default::default);
     let mut cache = CACHE.lock().unwrap();
     let re = match cache.iter().find(|(k, _)| k == re) {
@@ -300,7 +300,7 @@ async fn compose(ctx: &Ctx, action: &str, body: Option<&Value>) -> Step<Vec<Stri
     Ok([base, rest].concat())
 }
 
-fn strs(a: &[&str]) -> Vec<String> {
+pub(crate) fn strs(a: &[&str]) -> Vec<String> {
     a.iter().map(|s| s.to_string()).collect()
 }
 
@@ -380,7 +380,7 @@ async fn volume_sizes(ctx: &Ctx) -> serde_json::Map<String, Value> {
 }
 
 /// ?tail= (padrão 500) -> as flags da lista fixa; fora dela, 400
-fn log_tail(ctx: &Ctx, qs: &[(String, Vec<String>)]) -> Step<&'static [&'static str]> {
+pub(crate) fn log_tail(ctx: &Ctx, qs: &[(String, Vec<String>)]) -> Step<&'static [&'static str]> {
     let default = vec!["500".to_string()];
     let tail = qs_get(qs, "tail").unwrap_or(&default);
     match (tail.len(), tail.first().and_then(|t| v::log_tail(t))) {
@@ -390,7 +390,7 @@ fn log_tail(ctx: &Ctx, qs: &[(String, Vec<String>)]) -> Step<&'static [&'static 
 }
 
 /// ?since= (padrão: o log inteiro) -> as flags da lista fixa, ou o --since com o início atual do container (start)
-async fn log_since(ctx: &Ctx, qs: &[(String, Vec<String>)], cid: Option<&str>) -> Step<Vec<String>> {
+pub(crate) async fn log_since(ctx: &Ctx, qs: &[(String, Vec<String>)], cid: Option<&str>) -> Step<Vec<String>> {
     let Some(since) = qs_get(qs, "since") else { return Ok(vec![]) };
     if since.len() == 1
         && let Some(flags) = v::log_since(&since[0])
@@ -415,7 +415,7 @@ async fn log_since(ctx: &Ctx, qs: &[(String, Vec<String>)], cid: Option<&str>) -
 }
 
 /// {project, dir} na query das rotas GET (os logs do projeto) -> compose_base
-async fn compose_query(ctx: &Ctx, query: &str) -> Step<Vec<String>> {
+pub(crate) async fn compose_query(ctx: &Ctx, query: &str) -> Step<Vec<String>> {
     let qs = parse_qs(query, false);
     let get = |k| qs_get(&qs, k).and_then(|v| v.first()).cloned().unwrap_or_default();
     let (project, dir) = (get("project"), get("dir"));

@@ -8,13 +8,16 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::State;
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, rejection::WebSocketUpgradeRejection};
+use axum::extract::{Path as AxPath, State};
 use axum::http::{HeaderMap, HeaderValue, Method as HttpMethod, StatusCode, Uri, header};
 use axum::response::Response;
+use axum::routing::get;
 use futures_util::StreamExt;
 use serde_json::Value;
 use stivo_core::i18n::trf;
-use stivo_core::{Ctx, Lang, Method, Reply, Request};
+use stivo_core::streams::StreamMsg;
+use stivo_core::{Ctx, Lang, Method, Reply, Request, terminal};
 
 const MAX_BODY: usize = 64 * 1024;
 
@@ -83,6 +86,34 @@ async fn dispatch(
         r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
         return r;
     }
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    if method == HttpMethod::GET
+        && (path == "/api/events/stream"
+            || path == "/api/compose/logs/stream"
+            || path.starts_with("/api/logs/") && path.ends_with("/stream"))
+    {
+        // EventSource não manda header custom: só estas rotas (GET, só leitura) aceitam o token na query
+        let qs = stivo_core::pyfmt::parse_qs(query, true);
+        if stivo_core::pyfmt::qs_get(&qs, "t").and_then(|t| t.first()).map(String::as_str) != Some(&app.token) {
+            return send(401, &Value::from(stivo_core::i18n::tr(app.ctx.lang, "token ausente ou inválido")));
+        }
+        return match stivo_core::streams::open(&app.ctx, path, query).await {
+            Err(r) => send(r.status, &r.body),
+            Ok(s) => {
+                let body = s.map(|m| {
+                    Ok::<_, std::convert::Infallible>(match m {
+                        StreamMsg::Data(d) => format!("data: {d}\n\n"),
+                        StreamMsg::End => "event: end\ndata:\n\n".to_string(),
+                    })
+                });
+                let mut r = Response::new(Body::from_stream(body));
+                r.headers_mut()
+                    .insert(header::CONTENT_TYPE, HeaderValue::from_static("text/event-stream; charset=utf-8"));
+                r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+                r
+            }
+        };
+    }
     let token = headers.get("x-docker-gui-token").and_then(|h| h.to_str().ok()).unwrap_or("");
     if token != app.token {
         return send(401, &Value::from(stivo_core::i18n::tr(app.ctx.lang, "token ausente ou inválido")));
@@ -101,6 +132,71 @@ async fn dispatch(
             r
         }
     }
+}
+
+/// Terminal: WebSocket <-> docker exec num PTY. Mesmo protocolo do Python: a primeira mensagem (texto) é o tamanho,
+/// depois texto é o tamanho novo e binário é o que foi digitado; a saída vai em binário, e o close quando o exec acaba
+async fn exec(
+    State(app): State<Arc<App>>,
+    AxPath(id): AxPath<String>,
+    uri: Uri,
+    headers: HeaderMap,
+    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+) -> Response {
+    let header = |k| headers.get(k).and_then(|h: &HeaderValue| h.to_str().ok()).unwrap_or("").to_string();
+    let host = header(header::HOST);
+    if host != format!("127.0.0.1:{}", app.port) && host != format!("localhost:{}", app.port) {
+        return send(403, &Value::from("forbidden"));
+    }
+    let tr = |s| Value::from(stivo_core::i18n::tr(app.ctx.lang, s));
+    if !stivo_core::validate::ID_RE.is_match(&id) {
+        return send(404, &Value::from("not found"));
+    }
+    // WebSocket não passa por CORS: sem conferir o Origin, qualquer site aberto no navegador conectaria aqui
+    let origin = header(header::ORIGIN);
+    if origin != format!("http://127.0.0.1:{}", app.port) && origin != format!("http://localhost:{}", app.port) {
+        return send(403, &tr("origem não permitida"));
+    }
+    let qs = stivo_core::pyfmt::parse_qs(uri.query().unwrap_or(""), false);
+    if stivo_core::pyfmt::qs_get(&qs, "t").and_then(|t| t.first()).map(String::as_str) != Some(&app.token) {
+        return send(401, &tr("token ausente ou inválido"));
+    }
+    let Ok(ws) = ws else { return send(400, &tr("esperava um WebSocket")) };
+    ws.on_upgrade(move |socket| session(app, id, socket))
+}
+
+async fn session(app: Arc<App>, id: String, mut socket: WebSocket) {
+    // a página manda o tamanho logo ao abrir, e o docker só sobe depois dele
+    let Some(Ok(Message::Text(first))) = socket.recv().await else { return };
+    let Some((cols, rows)) = terminal::parse_size(&first) else { return };
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Option<Vec<u8>>>();
+    let tx2 = tx.clone();
+    let Ok(term) =
+        terminal::open(&app.ctx.cli, &id, cols, rows, move |b| drop(tx.send(Some(b))), move || drop(tx2.send(None)))
+    else {
+        return;
+    };
+    loop {
+        tokio::select! {
+            out = rx.recv() => match out {
+                Some(Some(b)) => if socket.send(Message::Binary(b.into())).await.is_err() { break },
+                _ => {
+                    let _ = socket.send(Message::Close(Some(CloseFrame { code: 1000, reason: "".into() }))).await;
+                    break;
+                }
+            },
+            msg = socket.recv() => match msg {
+                Some(Ok(Message::Text(t))) => match terminal::parse_size(&t) {
+                    Some((c, r)) => { let _ = term.resize(c, r); }
+                    None => break, // mensagem inválida: encerra
+                },
+                Some(Ok(Message::Binary(b))) => if term.write(&b).is_err() { break },
+                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+                _ => break, // close ou conexão caiu
+            },
+        }
+    }
+    term.close(); // o shell dentro do container pode sobreviver (moby#9098)
 }
 
 fn arg(args: &[String], name: &str) -> Option<String> {
@@ -123,6 +219,6 @@ async fn main() {
     let app = Arc::new(App { ctx: Ctx::new(cli, lang), token: token(), port, page: web_page() });
     let url = format!("http://localhost:{port}/#t={}", app.token);
     println!("{}", trf(lang, "Stivo em {url}  (Ctrl+C para sair)", &[("url", &url)]));
-    let router = Router::new().fallback(dispatch).with_state(app);
+    let router = Router::new().route("/api/exec/{id}", get(exec)).fallback(dispatch).with_state(app);
     axum::serve(listener, router).await.unwrap();
 }
