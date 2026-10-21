@@ -101,7 +101,7 @@ Nada novo. A rota segue a regra de log do projeto (sem argumentos nem dados de c
 
 ### Riscos conhecidos
 
-- **Memória e CPU do desktop em segundo plano:** o `docker stats --no-stream` roda a cada ~5 s com a janela fechada (é um processo curto, mas leva ~2 s medindo). A meta de 150 MB precisa ser medida de novo (etapa 5). Se estourar, a saída é espaçar o stats em segundo plano para 10 s, o que leva a entrada na faixa para uns 25 s; isso exigiria mudar a meta de 15 s do PRD.
+- **Memória e CPU do desktop em segundo plano** (medido na T5): com o `docker stats --no-stream` a cada ~5 s e a janela fechada, o `scripts/memory.sh --idle` (binário de release, 6 containers com stats, um perto do limite, 2 min na bandeja) deu **138,2 MB** de PSS, dentro do teto de 150 MB. A medição anterior, sem o stats em segundo plano, deu 140,8 MB: o stats não pesa na memória do app, porque é um processo curto do docker, que o script deixa fora da conta. O `--idle` passa a dar stats aos containers; num computador com um Stivo aberto, roda dentro de um `dbus-run-session` (senão o single-instance repassa para o Stivo aberto e a janela de teste não abre).
 - **Podman sem `--no-stream` estável em versões antigas:** já é tratado hoje pelo stats; nada novo.
 - **cgroup v1 sem limite** pode reportar um limite enorme (maior que a RAM). A regra `limit >= 0.95 * memTotal` cobre o caso.
 
@@ -142,3 +142,5 @@ Nada novo. A rota segue a regra de log do projeto (sem argumentos nem dados de c
 - `causes`/`alertKey` viram o critério que já existe depois da dependência do compose: `attention` (grave ou memória), a chave `ID` ou `ID:mem`, e o `newProblems` com o parâmetro da chave.
 - A primeira leitura do stats com a RAM total é a base. Quem já está em 90% ou mais fica quente na hora e não notifica.
 - Entram também a T6 (README, inclusive das duas features anteriores, que ficaram sem ele) e a medição do desktop (T5).
+
+**2026-10-21**. T5: medida a memória do desktop com o stats em segundo plano (138,2 MB de PSS, dentro do teto). O `memory.sh --idle` ganhou stats nos containers do docker falso, para medir o custo novo.

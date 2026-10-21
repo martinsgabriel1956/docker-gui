@@ -47,8 +47,12 @@ Xvfb "$display" -screen 0 1400x900x24 >/dev/null 2>&1 & procs+=($!)
 python3 - "$work/state.json" <<'PY'
 import json, sys
 names = ["api", "web", "worker", "db", "cache", "proxy"]
+# com stats: o stats roda em segundo plano (alerta de memória) e entra na conta; o api perto do limite de 512 MiB
+stats = lambda n: {"CPUPerc": "1.20%", "MemUsage": "480MiB / 512MiB" if n == "api" else "120MiB / 15.6GiB",
+                   "MemPerc": "93.75%" if n == "api" else "0.75%", "NetIO": "1.2kB / 648B", "BlockIO": "0B / 4.1kB"}
 json.dump({"containers": [{"ID": f"{i:012x}", "Names": n, "Image": f"{n}:latest", "State": "running",
-                           "Status": "Up 5 minutes", "Ports": "", "Labels": "com.docker.compose.project=loja"}
+                           "Status": "Up 5 minutes", "Ports": "", "Labels": "com.docker.compose.project=loja",
+                           "stats": stats(n)}
                           for i, n in enumerate(names, 1)]}, open(sys.argv[1], "w"))
 PY
 sleep 1
