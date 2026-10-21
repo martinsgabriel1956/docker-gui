@@ -13,6 +13,8 @@
     "allow-term-resize",
     "allow-term-close",
     "allow-attention",
-    "allow-notify"
+    "allow-notify",
+    "allow-prefs-get",
+    "allow-prefs-set"
   ]
 }

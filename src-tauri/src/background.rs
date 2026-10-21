@@ -21,10 +21,22 @@ pub fn show_main<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
-pub fn tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+fn menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let open = MenuItem::with_id(app, "open", t(app, "Abrir o Stivo", "Open Stivo"), true, None::<&str>)?;
+    let prefs = MenuItem::with_id(app, "prefs", t(app, "Preferências…", "Preferences…"), true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", t(app, "Sair", "Quit"), true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &PredefinedMenuItem::separator(app)?, &quit])?;
+    Menu::with_items(app, &[&open, &prefs, &PredefinedMenuItem::separator(app)?, &quit])
+}
+
+/// depois de trocar o idioma: o menu da bandeja na língua nova
+pub fn refresh_tray<R: Runtime>(app: &AppHandle<R>) {
+    if let (Some(tray), Ok(m)) = (app.tray_by_id("main"), menu(app)) {
+        let _ = tray.set_menu(Some(m));
+    }
+}
+
+pub fn tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    let menu = menu(app)?;
     TrayIconBuilder::with_id("main")
         .icon(app.default_window_icon().cloned().expect("ícone do app"))
         .tooltip("Stivo")
@@ -32,6 +44,10 @@ pub fn tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, e| match e.id.as_ref() {
             "open" => show_main(app),
+            "prefs" => {
+                show_main(app);
+                let _ = app.emit("open-prefs", ());
+            }
             "quit" => app.exit(0),
             _ => {}
         })

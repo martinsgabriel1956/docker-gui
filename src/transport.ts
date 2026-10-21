@@ -12,6 +12,13 @@ export interface StreamHandlers { open?(): void; data(line: string): void; end()
 export interface TermHandlers { open(): void; data(b: Uint8Array): void; notice(text: string): void; close(): void }
 export interface Term { send(data: string): void; resize(cols: number, rows: number): void; close(): void }
 export interface NdjsonResult { status: number; code: number; error?: unknown }
+// preferências do app desktop (a versão web usa as flags e as variáveis de ambiente). null = o padrão de hoje
+export interface Prefs { cli: string | null; context: string | null; lang: string | null; notifications: boolean }
+export interface DesktopPrefs {
+  get(): Promise<Prefs & {contexts: string[]}>;
+  set(p: Prefs): Promise<string | null>;  // a mensagem de erro, ou null (a janela recarrega)
+  onOpen(open: () => void): void;  // o "Preferências…" do menu da bandeja
+}
 
 export interface Transport {
   desktop: boolean;
@@ -25,4 +32,5 @@ export interface Transport {
   // contagem da faixa de atenção ("", "3", "9+", "!") e o ícone já desenhado: web vira favicon, desktop vira bandeja
   attention(badge: string, svg: string): void;
   notify(title: string, body: string, onClick: () => void): void;
+  prefs?: DesktopPrefs;
 }

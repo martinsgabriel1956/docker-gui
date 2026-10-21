@@ -3,7 +3,7 @@
 import {Channel, invoke} from '@tauri-apps/api/core';
 import {listen} from '@tauri-apps/api/event';
 import {t} from './i18n.ts';
-import type {ApiResponse, Closer, NdjsonResult, StreamHandlers, Term, TermHandlers, Transport} from './transport';
+import type {ApiResponse, Closer, NdjsonResult, Prefs, StreamHandlers, Term, TermHandlers, Transport} from './transport';
 
 type Reply = {status: number; body: unknown};
 type StreamMsg = {data?: string; line?: unknown; end?: true};
@@ -95,5 +95,10 @@ export const T: Transport = {
   notify(title, body, onClick) {
     onNotificationClick = onClick;
     void invoke('notify', {title, body});
+  },
+  prefs: {
+    get: () => invoke<Prefs & {contexts: string[]}>('prefs_get'),
+    set: prefs => invoke('prefs_set', {prefs}).then(() => null, e => String(e)),
+    onOpen: open => void listen('open-prefs', open),
   },
 };

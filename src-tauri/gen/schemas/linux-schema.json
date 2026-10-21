@@ -195,6 +195,18 @@
           "markdownDescription": "Enables the notify command without any pre-configured scope."
         },
         {
+          "description": "Enables the prefs_get command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-prefs-get",
+          "markdownDescription": "Enables the prefs_get command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the prefs_set command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-prefs-set",
+          "markdownDescription": "Enables the prefs_set command without any pre-configured scope."
+        },
+        {
           "description": "Enables the stream_close command without any pre-configured scope.",
           "type": "string",
           "const": "allow-stream-close",
@@ -247,6 +259,18 @@
           "type": "string",
           "const": "deny-notify",
           "markdownDescription": "Denies the notify command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the prefs_get command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-prefs-get",
+          "markdownDescription": "Denies the prefs_get command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the prefs_set command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-prefs-set",
+          "markdownDescription": "Denies the prefs_set command without any pre-configured scope."
         },
         {
           "description": "Denies the stream_close command without any pre-configured scope.",

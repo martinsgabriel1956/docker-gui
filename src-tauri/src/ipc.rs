@@ -7,8 +7,8 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use stivo_core::streams::StreamMsg;
 use stivo_core::{Method, Reply, Request, terminal, validate};
-use tauri::State;
 use tauri::ipc::{Channel, InvokeResponseBody};
+use tauri::{Manager, State};
 
 use crate::AppState;
 
@@ -135,4 +135,72 @@ pub fn term_close(state: State<'_, AppState>, term: u32) {
     if let Some(t) = state.terms.lock().unwrap().remove(&term) {
         t.close(); // o shell dentro do container pode sobreviver (moby#9098)
     }
+}
+
+#[derive(Serialize)]
+pub struct PrefsView {
+    cli: Option<String>,
+    context: Option<String>,
+    lang: Option<String>,
+    notifications: bool,
+    contexts: Vec<String>,
+}
+
+/// os contextos do docker (docker context ls), para a tela escolher; sem o docker, nenhum
+async fn contexts() -> Vec<String> {
+    let ctx = stivo_core::Ctx::new(vec!["docker".into()], stivo_core::Lang::Pt);
+    let r = ctx.docker(&["context", "ls", "--format", "{{.Name}}"], std::time::Duration::from_secs(5)).await;
+    if r.code != 0 { vec![] } else { r.stdout.split_whitespace().map(String::from).collect() }
+}
+
+#[tauri::command]
+pub async fn prefs_get(state: State<'_, AppState>) -> Result<PrefsView, String> {
+    let p = state.prefs.lock().unwrap().clone();
+    Ok(PrefsView {
+        cli: p.cli.clone(),
+        context: p.context.clone(),
+        lang: p.lang.clone(),
+        notifications: p.notifications(),
+        contexts: contexts().await,
+    })
+}
+
+/// Valida, salva e aplica: o núcleo passa a usar o CLI e o contexto novos, os streams e terminais abertos fecham e a
+/// janela recarrega (a página relê os data-* com onde age e em que língua)
+#[tauri::command]
+pub async fn prefs_set(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    prefs: crate::prefs::Choice,
+) -> Result<(), String> {
+    let en = state.ctx().lang == stivo_core::Lang::En;
+    crate::prefs::validate(&prefs, &contexts().await, en)?;
+    let saved = {
+        let mut p = state.prefs.lock().unwrap();
+        p.cli = prefs.cli;
+        p.context = prefs.context;
+        p.lang = prefs.lang;
+        p.notifications = Some(prefs.notifications);
+        p.clone()
+    };
+    if let Ok(dir) = app.path().app_config_dir() {
+        saved.save(&dir).map_err(|e| e.to_string())?;
+    }
+    let env = |k: &str| std::env::var(k).ok();
+    {
+        let mut ctx = state.ctx.write().unwrap();
+        ctx.cli = saved.cli(env);
+        ctx.lang = saved.lang(env);
+    }
+    for (_, t) in state.streams.lock().unwrap().drain() {
+        t.abort();
+    }
+    for (_, t) in state.terms.lock().unwrap().drain() {
+        t.close();
+    }
+    crate::background::refresh_tray(&app);
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.reload();
+    }
+    Ok(())
 }

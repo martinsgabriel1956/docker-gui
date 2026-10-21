@@ -59,6 +59,45 @@ impl Prefs {
     }
 }
 
+/// O que a tela de preferências manda (o close_hint_shown não é dela)
+#[derive(Clone, Debug, Deserialize)]
+pub struct Choice {
+    pub cli: Option<String>,
+    pub context: Option<String>,
+    pub lang: Option<String>,
+    pub notifications: bool,
+}
+
+/// Confere o que veio da página antes de virar argv: CLI só docker ou podman, contexto só um que o `docker context ls`
+/// listou (e só com o docker), idioma pt ou en. Erro: a mensagem para a tela
+pub fn validate(c: &Choice, contexts: &[String], en: bool) -> Result<(), String> {
+    let msg = |pt: &str, e: &str| Err(if en { e } else { pt }.to_string());
+    if let Some(cli) = &c.cli
+        && cli != "docker"
+        && cli != "podman"
+    {
+        return msg("CLI inválida: use docker ou podman", "invalid CLI: use docker or podman");
+    }
+    if let Some(ctx) = &c.context {
+        if c.cli.as_deref() == Some("podman") {
+            return msg(
+                "o contexto é do docker: com o podman, deixe no padrão",
+                "contexts are a docker thing: leave it on default with podman",
+            );
+        }
+        if !contexts.contains(ctx) {
+            return msg("contexto que o docker context ls não lista", "context not listed by docker context ls");
+        }
+    }
+    if let Some(l) = &c.lang
+        && l != "pt"
+        && l != "en"
+    {
+        return msg("idioma inválido: use pt ou en", "invalid language: use pt or en");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,6 +114,27 @@ mod tests {
         assert!(p.notifications());
         let p = Prefs { cli: Some("podman".into()), context: Some("prod".into()), ..Default::default() };
         assert_eq!(p.cli(none), vec!["podman", "--context", "prod"]);
+    }
+
+    #[test]
+    fn validate_only_what_the_screen_offers() {
+        let ok = |cli: Option<&str>, ctx: Option<&str>, lang: Option<&str>| {
+            let c = Choice {
+                cli: cli.map(Into::into),
+                context: ctx.map(Into::into),
+                lang: lang.map(Into::into),
+                notifications: true,
+            };
+            validate(&c, &["default".into(), "prod".into()], false)
+        };
+        assert!(ok(None, None, None).is_ok());
+        assert!(ok(Some("podman"), None, Some("en")).is_ok());
+        assert!(ok(Some("docker"), Some("prod"), Some("pt")).is_ok());
+        assert!(ok(Some("/bin/sh"), None, None).is_err());
+        assert!(ok(Some("docker --host=tcp://x"), None, None).is_err());
+        assert!(ok(None, Some("--host=tcp://x"), None).is_err());
+        assert!(ok(Some("podman"), Some("prod"), None).is_err());
+        assert!(ok(None, None, Some("fr")).is_err());
     }
 
     #[test]

@@ -23,6 +23,8 @@
     <div class="flex flex-wrap items-center gap-x-4">
       <button popovertarget="hint" aria-keyshortcuts="?" class="coarse:hidden text-xs text-muted hover:text-fg rounded focus-visible:outline-2 focus-visible:outline-accent">
         <kbd class="font-mono px-1 rounded ring-1 ring-line-strong text-fg-soft">?</kbd> Atalhos</button>
+      <!-- só no app desktop (o transporte do Tauri tem preferências): CLI, contexto, idioma e notificações -->
+      <button id="prefs-open" hidden onclick="openPrefs()" class="coarse:py-3 text-xs text-muted hover:text-fg rounded focus-visible:outline-2 focus-visible:outline-accent">Preferências</button>
       <button id="notify" hidden onclick="askNotify()" class="coarse:py-3 text-xs text-accent-fg underline underline-offset-4 hover:text-accent-soft rounded focus-visible:outline-2 focus-visible:outline-accent">Notificar quando algo der problema</button>
       <!-- popover nativo: fecha com Esc e com clique fora -->
       <div id="hint" popover class="m-auto w-[min(26rem,calc(100vw-2rem))] rounded-lg bg-raised ring-1 ring-line-strong p-4 text-sm text-fg-soft shadow-lg shadow-black/40 backdrop:bg-black/40">
@@ -274,6 +276,53 @@
   </form>
 </dialog>
 
+<dialog id="prefs" aria-labelledby="prefs-title" aria-describedby="prefs-desc" class="m-auto w-[min(520px,95vw)] rounded-lg bg-raised text-fg-soft ring-1 ring-line-strong backdrop:bg-black/70 p-0">
+  <form id="prefs-form" novalidate>
+    <div class="px-4 py-3 border-b border-line flex items-start gap-3">
+      <div class="mr-auto min-w-0">
+        <h2 id="prefs-title" class="text-lg font-semibold text-fg-strong">Preferências</h2>
+        <p id="prefs-desc" class="text-sm mt-0.5 text-muted">Valem na hora: a janela recarrega com o que você escolher.</p>
+      </div>
+      <button type="button" onclick="prefs.close()" aria-label="Fechar" class="shrink-0 grid place-items-center size-8 coarse:size-11 rounded text-muted hover:text-fg-strong hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent">
+        <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="size-4"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
+    </div>
+    <div class="px-4 py-4 space-y-4 text-sm">
+      <div>
+        <label for="pref-cli" class="block font-medium text-fg-strong">CLI de containers</label>
+        <select id="pref-cli" class="mt-1 w-full rounded bg-canvas ring-1 ring-line px-3 py-2 coarse:py-3 text-fg-strong focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+          <option value="">Padrão (docker, ou o DOCKER_GUI_CLI)</option>
+          <option value="docker">docker</option>
+          <option value="podman">podman</option>
+        </select>
+      </div>
+      <div id="pref-context-row">
+        <label for="pref-context" class="block font-medium text-fg-strong">Contexto do docker</label>
+        <select id="pref-context" aria-describedby="pref-context-hint" class="mt-1 w-full rounded bg-canvas ring-1 ring-line px-3 py-2 coarse:py-3 text-fg-strong focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+          <option value="">Padrão (o que o docker escolher)</option>
+        </select>
+        <p id="pref-context-hint" class="mt-1 max-w-[70ch] text-xs text-muted">Os de <code class="font-mono">docker context ls</code>. O padrão segue o <code class="font-mono">DOCKER_CONTEXT</code> e o <code class="font-mono">docker context use</code>.</p>
+      </div>
+      <div>
+        <label for="pref-lang" class="block font-medium text-fg-strong">Idioma</label>
+        <select id="pref-lang" class="mt-1 w-full rounded bg-canvas ring-1 ring-line px-3 py-2 coarse:py-3 text-fg-strong focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+          <option value="">Automático (o do sistema)</option>
+          <option value="pt">Português</option>
+          <option value="en">English</option>
+        </select>
+      </div>
+      <label class="flex items-start gap-2 w-fit coarse:py-2 cursor-pointer">
+        <input id="pref-notify" type="checkbox" class="mt-0.5 size-4 accent-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+        <span>Notificar quando um container entrar na faixa de atenção</span>
+      </label>
+    </div>
+    <div id="prefs-msg" role="alert" class="empty:hidden mx-4 mb-3 rounded-lg ring-1 ring-bad/40 bg-bad/10 px-3 py-2 text-sm text-bad-soft"></div>
+    <div class="px-4 py-3 border-t border-line flex justify-end gap-2">
+      <button type="button" onclick="prefs.close()" class="px-3 py-1.5 coarse:min-h-11 coarse:px-4 rounded text-sm font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Cancelar</button>
+      <button id="prefs-go" type="submit" class="px-3 py-1.5 coarse:min-h-11 coarse:px-4 rounded text-sm font-medium ring-1 ring-accent/40 bg-accent/15 text-accent-fg hover:bg-accent/25 aria-disabled:opacity-60 aria-disabled:cursor-wait focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Salvar</button>
+    </div>
+  </form>
+</dialog>
+
 <div id="toast" role="status" aria-live="polite" class="fixed bottom-[calc(1rem+var(--dock,0px))] left-1/2 -translate-x-1/2 w-max max-w-[min(28rem,calc(100vw-2rem))] z-40"></div>
 
 <script>
@@ -299,6 +348,7 @@
     ", de {0}": ", from {0}",
     ", rede e PID do host, devices e comando ou entrypoint próprio. Para isso, use o terminal.": ", host network and PID, devices and a custom command or entrypoint. For those, use the terminal.",
     ", {0} fora do filtro": ", {0} outside the filter",
+    ". O padrão segue o": ". The default follows",
     ". Se a imagem faltar, ela é baixada antes.": ". If the image is missing, it is pulled first.",
     "0 containers": "0 containers",
     ": só esta máquina acessa.": ": only this machine can reach them.",
@@ -328,12 +378,14 @@
     "Atalhos do teclado": "Keyboard shortcuts",
     "Atenção: qualquer máquina que alcance a sua (Wi-Fi, VPN, rede do escritório) passa a acessar essas portas, e o Docker abre as portas por cima do firewall do sistema (ufw, firewalld). Só marque se precisar mesmo.": "Warning: any machine that can reach yours (Wi-Fi, VPN, office network) can then access these ports, and Docker opens them past the system firewall (ufw, firewalld). Only check this if you really need it.",
     Atualizar: "Refresh",
+    "Automático (o do sistema)": "Automatic (the system's)",
     "Avisos e erros": "Warnings and errors",
     Ações: "Actions",
     "Ações em lote": "Bulk actions",
     "Baixando…": "Pulling…",
     "Baixar .log": "Download .log",
     "Build cache": "Build cache",
+    "CLI de containers": "Container CLI",
     "Cancela sozinho em 8 s.": "Cancels by itself in 8 s.",
     "Cancela sozinho em 8 segundos.": "Cancels by itself in 8 seconds.",
     Cancelar: "Cancel",
@@ -357,6 +409,7 @@
     "Confirmação cancelada: passaram 8 s sem o segundo clique. Nada foi apagado.": "Confirmation canceled: 8 s went by without the second click. Nothing was deleted.",
     Containers: "Containers",
     "Containers parados": "Stopped containers",
+    "Contexto do docker": "Docker context",
     "Copiado: {0}": "Copied: {0}",
     Copiar: "Copy",
     "Copiar docker exec": "Copy docker exec",
@@ -389,6 +442,7 @@
     "Em uso por {0}: pare o container antes": "In use by {0}: stop the container first",
     "Em uso por {0}: remova o container antes": "In use by {0}: remove the container first",
     "Em uso: remova o container que usa (ou tire ele da rede) antes.": "In use: remove the container using it (or take it off the network) first.",
+    English: "English",
     "Erro sem mensagem.": "Error without a message.",
     "Esc cancela.": "Esc cancels.",
     "Escolha uma das opções da lista.": "Pick one of the options in the list.",
@@ -409,6 +463,7 @@
     "Filtrar por estado": "Filter by state",
     "Filtrar por nome, imagem ou projeto…": "Filter by name, image or project…",
     "Histórico: quando subiu, caiu ou mudou de saúde": "History: when it started, crashed or changed health",
+    Idioma: "Language",
     Imagem: "Image",
     "Imagem inválida: use repo[:tag] ou repo@sha256:…, com o caminho em minúsculas.": "Invalid image: use repo[:tag] or repo@sha256:…, with the path in lowercase.",
     "Imagem:": "Image:",
@@ -463,6 +518,7 @@
     Nome: "Name",
     "Nome inválido: 2 a 128 caracteres entre letras, números, _ . e -, começando por letra ou número.": "Invalid name: 2 to 128 characters among letters, digits, _ . and -, starting with a letter or digit.",
     "Notificar quando algo der problema": "Notify me when something breaks",
+    "Notificar quando um container entrar na faixa de atenção": "Notify me when a container needs attention",
     "Novo container": "New container",
     "Não consegui carregar os logs. O servidor do Stivo está rodando?": "Could not load the logs. Is the Stivo server running?",
     "Não consegui conectar ao servidor do Stivo.": "Could not connect to the Stivo server.",
@@ -500,10 +556,13 @@
     "Ocultar valores": "Hide values",
     "Os dados dele se perdem.": "Its data is lost.",
     "Os dados deles se perdem.": "Their data is lost.",
+    "Os de": "The ones from",
     "Os logs deles se perdem; os volumes ficam.": "Their logs are lost; volumes stay.",
     "Os volumes não são afetados.": "Volumes are not affected.",
     "Os {0} containers estão de pé.": "All {0} containers are up.",
     "Outras imagens foram construídas sobre esta.": "Other images were built on top of this one.",
+    "Padrão (docker, ou o DOCKER_GUI_CLI)": "Default (docker, or DOCKER_GUI_CLI)",
+    "Padrão (o que o docker escolher)": "Default (whatever docker picks)",
     "Parado há {0}": "Stopped {0} ago",
     "Parando…": "Stopping…",
     Parar: "Stop",
@@ -514,7 +573,9 @@
     Pausar: "Pause",
     Período: "Period",
     Portas: "Ports",
+    Português: "Português",
     "Precisa de atenção · {0}": "Needs attention · {0}",
+    Preferências: "Preferences",
     "Processos (docker top)": "Processes (docker top)",
     "Projeto compose · {0} de {1} rodando · todos os serviços": "Compose project · {0} of {1} running · all services",
     "Pronto: aviso quando um container entrar na faixa de atenção, mesmo com a aba em segundo plano.": "Done: you'll be notified when a container enters the attention band, even with the tab in the background.",
@@ -551,6 +612,7 @@
     "Rode {0} de novo; a página volta sozinha.": "Run {0} again; the page comes back by itself.",
     "Rode {0} e entre de novo na sessão.": "Run {0} and log in again.",
     "Saiu com código {0} há {1}": "Exited with code {0} {1} ago",
+    Salvar: "Save",
     "Saída do {0}": "{0} output",
     "Saída dos logs": "Log output",
     "Selecionar todos os visíveis": "Select all visible",
@@ -580,6 +642,7 @@
     "Use nome:/caminho/no/container, ex.: dados:/var/lib/postgresql/data. Pasta do host (bind mount) não é aceita.": "Use name:/path/in/container, e.g. data:/var/lib/postgresql/data. Host folders (bind mounts) are not accepted.",
     "Vai apagar {0}: {1}{2}. Os dados deles se perdem.": "Will delete {0}: {1}{2}. Their data is lost.",
     "Vai remover {0}. {1}": "Will remove {0}. {1}",
+    "Valem na hora: a janela recarrega com o que você escolher.": "They apply right away: the window reloads with your choices.",
     "Variáveis de ambiente": "Environment variables",
     "Ver logs": "View logs",
     "Ver último healthcheck": "See last healthcheck",
@@ -613,8 +676,10 @@
     "das últimas 24 h": "from the last 24 h",
     "desde que o container subiu": "since the container started",
     "desfaz a última ação (Iniciar de novo, Retomar)": "undoes the last action (Start again, Resume)",
+    docker: "docker",
     "dos últimos 15 min": "from the last 15 min",
     "dos últimos 5 min": "from the last 5 min",
+    "e o": "and",
     "encerrado por SIGTERM": "terminated by SIGTERM",
     "erro da aplicação (veja o log)": "application error (see the log)",
     "erro sem mensagem": "error without a message",
@@ -673,6 +738,7 @@
     parou: "stopped",
     pausado: "paused",
     pausados: "paused",
+    podman: "podman",
     "portaDoHost:portaDoContainer, separadas por vírgula ou espaço. Ficam em {0} do daemon remoto {1}: só aquela máquina acessa, não esta.": "hostPort:containerPort, separated by commas or spaces. Bound to {0} of the remote daemon {1}: only that machine can reach them, not this one.",
     "portaDoHost:portaDoContainer, separadas por vírgula ou espaço. Ficam só em": "hostPort:containerPort, separated by commas or spaces. Bound only to",
     reconstruído: "rebuilt",
@@ -1313,6 +1379,11 @@
     notify(title, body, onClick) {
       onNotificationClick = onClick;
       void invoke("notify", { title, body });
+    },
+    prefs: {
+      get: () => invoke("prefs_get"),
+      set: (prefs) => invoke("prefs_set", { prefs }).then(() => null, (e) => String(e)),
+      onOpen: (open) => void listen("open-prefs", open)
     }
   };
 
@@ -12535,6 +12606,42 @@ ${WIDE.matches ? "" : `
     await loadTab();
     if (ok) (document.querySelector(`[data-id="${near}"][data-a="rm"]`) || $2("#tab-" + k)).focus();
   }
+  async function openPrefs() {
+    const p = await T.prefs.get(), sel2 = (k) => $2(`#pref-${k}`);
+    const ctx = sel2("context");
+    ctx.replaceChildren(ctx.options[0], ...p.contexts.map((c) => Object.assign(document.createElement("option"), { value: c, textContent: c })));
+    sel2("cli").value = p.cli ?? "";
+    ctx.value = p.context && p.contexts.includes(p.context) ? p.context : "";
+    sel2("lang").value = p.lang ?? "";
+    $2("#pref-notify").checked = p.notifications;
+    prefsContext();
+    $2("#prefs-msg").textContent = "";
+    $2("#prefs").showModal();
+    sel2("cli").focus();
+  }
+  function prefsContext() {
+    $2("#pref-context-row").hidden = $2("#pref-cli").value === "podman";
+  }
+  async function savePrefs(e) {
+    e.preventDefault();
+    const v2 = (k) => $2(`#pref-${k}`).value || null, go2 = $2("#prefs-go");
+    if (go2.getAttribute("aria-disabled") === "true") return;
+    go2.setAttribute("aria-disabled", "true");
+    const err = await T.prefs.set({
+      cli: v2("cli"),
+      context: v2("cli") === "podman" ? null : v2("context"),
+      lang: v2("lang"),
+      notifications: $2("#pref-notify").checked
+    });
+    go2.removeAttribute("aria-disabled");
+    if (err) $2("#prefs-msg").textContent = err;
+  }
+  if (T.prefs) {
+    $2("#prefs-open").hidden = false;
+    T.prefs.onOpen(() => void openPrefs());
+    $2("#prefs-form").addEventListener("submit", savePrefs);
+    $2("#pref-cli").addEventListener("change", prefsContext);
+  }
   Object.assign(window, {
     ackFail,
     act,
@@ -12561,6 +12668,7 @@ ${WIDE.matches ? "" : `
     logPick,
     menuPick,
     openCreate,
+    openPrefs,
     openShell,
     pickTab,
     placeMenu,

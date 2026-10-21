@@ -84,6 +84,8 @@ pub fn run() {
             ipc::term_close,
             background::attention,
             background::notify,
+            ipc::prefs_get,
+            ipc::prefs_set,
         ])
         .setup(|app| {
             let prefs = app.path().app_config_dir().map(|d| Prefs::load(&d)).unwrap_or_default();

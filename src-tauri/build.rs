@@ -9,6 +9,8 @@ const COMMANDS: &[&str] = &[
     "term_close",
     "attention",
     "notify",
+    "prefs_get",
+    "prefs_set",
 ];
 
 fn main() {

@@ -1882,9 +1882,42 @@ async function rmObj(k: ObjKind, r: string, sure = false): Promise<unknown> {
 
 // o HTML gerado chama estas funções pelo nome (onclick="act(...)"); com módulos nada é global, então
 // esta lista é a interface completa entre o HTML e o código
+// preferências (só no desktop): salvar recarrega a janela com o CLI, o contexto e o idioma novos
+async function openPrefs() {
+  const p = await T.prefs!.get(), sel = (k: string) => $<HTMLSelectElement>(`#pref-${k}`);
+  const ctx = sel('context');
+  ctx.replaceChildren(ctx.options[0], ...p.contexts.map(c => Object.assign(document.createElement('option'), {value: c, textContent: c})));
+  sel('cli').value = p.cli ?? '';
+  ctx.value = p.context && p.contexts.includes(p.context) ? p.context : '';
+  sel('lang').value = p.lang ?? '';
+  $<HTMLInputElement>('#pref-notify').checked = p.notifications;
+  prefsContext();
+  $('#prefs-msg').textContent = '';
+  $<HTMLDialogElement>('#prefs').showModal();
+  sel('cli').focus();
+}
+// o contexto é do docker: com o podman, a linha some
+function prefsContext() { $('#pref-context-row').hidden = $<HTMLSelectElement>('#pref-cli').value === 'podman'; }
+async function savePrefs(e: SubmitEvent) {
+  e.preventDefault();
+  const v = (k: string) => $<HTMLSelectElement>(`#pref-${k}`).value || null, go = $('#prefs-go');
+  if (go.getAttribute('aria-disabled') === 'true') return;
+  go.setAttribute('aria-disabled', 'true');
+  const err = await T.prefs!.set({cli: v('cli'), context: v('cli') === 'podman' ? null : v('context'), lang: v('lang'),
+                                  notifications: $<HTMLInputElement>('#pref-notify').checked});
+  go.removeAttribute('aria-disabled');
+  if (err) $('#prefs-msg').textContent = err;
+}
+if (T.prefs) {
+  $('#prefs-open').hidden = false;
+  T.prefs.onOpen(() => void openPrefs());
+  $('#prefs-form').addEventListener('submit', savePrefs);
+  $('#pref-cli').addEventListener('change', prefsContext);
+}
+
 Object.assign(window, {
   ackFail, act, afterClose, askNotify, confirmArm, bulkAct, clearFilters, clearSel, closeOut, composeAct, copyAddr, copyExec, copyLogs, disarm, downloadLogs,
-  filterBy, followClick, loadHealth, loadHistory, loadInspect, loadMore, loadTop, logPick, menuPick, openCreate, openShell, pickTab, placeMenu, projectLogs,
+  filterBy, followClick, loadHealth, loadHistory, loadInspect, loadMore, loadTop, logPick, menuPick, openCreate, openPrefs, openShell, pickTab, placeMenu, projectLogs,
   prune, refreshLogs, rmObj, serviceAct, runToastAction, selectAll, sinceChange, stackAct, toggleSel,
 });
 
