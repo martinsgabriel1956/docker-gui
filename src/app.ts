@@ -1,7 +1,7 @@
 import {
-  type Blocker, type Bucket, type Container, type ContainerState, type DepState, type DiskUsage, type Facts, type HistoryEvent, type Image, type LogLevel,
+  type Blocker, type Bucket, type Container, type ContainerState, type DepState, type DiskUsage, type Facts, type HistoryEvent, type Image, type LogLevel, type MemState,
   type Network, type Port, type Probe, type RunErrors, type RunField, type Sample, type Stats, type Tone, type Volume, HISTORY, age, anonVolume,
-  blockers, bucket, bulkSummary, bytes, continues, errHint, esc, eventText, fmtBytes, hasHealth, healthChanges, healthSummary, held, historySummary, holds, io, isProblem,
+  blockers, bucket, bulkSummary, bytes, continues, errHint, esc, eventText, fmtBytes, hasHealth, healthChanges, healthSummary, held, historySummary, holds, io, memHot, memText, memWatch, isProblem,
   logFilter, logLevel, logServices, newProblems, percent, ports, probeDuration, probeResult, probeTime, project, prunedVolumes, pushSample,
   reclaimShare, runSpec, service, shortImage, sparkPoints, status, tone, topTable, trend, usage, workingDir,
 } from './format';
@@ -146,8 +146,7 @@ async function load() {
       for (const id of sel) if (!data.some(c => c.ID === id)) sel.delete(id);
       if (selectingRows()) dirty = true; else render();
     }
-    notify(newProblems(seen, data, attention));
-    seen = new Set(data.filter(attention).map(c => c.ID));
+    checkAttention();
     showProblem(null);
   } catch (e) {
     showProblem([lastOk ? t`O servidor do Stivo parou de responder.` : t`Não consegui conectar ao servidor do Stivo.`,
@@ -209,10 +208,10 @@ async function askNotify() {
 }
 function notify(cs: Container[]) {
   if (!cs.length || !notifying() || (!document.hidden && document.hasFocus())) return;
-  cs = rootsFirst([...cs]);
+  cs = attnSort([...cs]);
   T.notify(cs.length === 1 ? t`${cs[0].Names} precisa de atenção` : t`${cs.length} containers precisam de atenção`,
     // o clique traz a página e põe o foco no Logs de quem caiu (a linha dele na faixa de atenção, que vem primeiro)
-    cs.length === 1 ? status(cs[0])[0] : cs.map(c => c.Names).join(', '),
+    cs.length === 1 ? (severe(cs[0]) ? status(cs[0])[0] : memLine(cs[0])) : cs.map(c => c.Names).join(', '),
     () => { focus(); document.querySelector<HTMLElement>(`[data-id="${cs[0].ID}"][data-a="logs"]`)?.focus(); });
 }
 
@@ -231,6 +230,15 @@ function setIcon(badge: string) {
 let stats: Record<string, Stats> = {};
 const series = new Map<string, Sample[]>();  // últimas leituras de cada container, para o sparkline
 const sid = (id: string) => id.slice(0, 12);
+// memória perto do limite: a RAM total do daemon (sem limite, o stats a reporta como limite) e quem está quente.
+// memBase: a próxima leitura com a RAM total é a base (quem já estava no alto ao abrir não vira notificação)
+let memTotal: number | null = null, memSt: MemState = new Map(), memBase = true;
+async function loadMemTotal() {
+  try {
+    const r = await api('/api/info');
+    if (r.ok) memTotal = (await r.json() as {MemTotal: number}).MemTotal;
+  } catch { /* tenta de novo na próxima leitura do stats */ }
+}
 async function loadStats() {
   let next: Record<string, Stats> = {};
   try {
@@ -243,13 +251,19 @@ async function loadStats() {
     const cpu = percent(s.CPUPerc), mem = bytes(s.MemUsage.split(' / ')[0]);
     if (cpu !== null && mem !== null) series.set(k, pushSample(series.get(k) ?? [], {t, cpu, mem}));
   }
+  if (memTotal === null) await loadMemTotal();
+  const first = memBase && memTotal !== null;
+  memSt = memWatch(memSt, next, memTotal, first);
   // sempre redesenha: mesmo com os números iguais, o sparkline andou uma amostra
   stats = next;
+  if (first) { memBase = false; for (const c of data) if (memOn(c)) seen?.add(alertKey(c)); }
+  checkAttention();
   if (selectingRows()) dirty = true; else render();
 }
 
 // setTimeout encadeado em vez de setInterval: um docker lento não empilha consultas
-async function statsLoop() { if (!document.hidden) await loadStats(); setTimeout(statsLoop, 5000); }
+// com a aba escondida, só se a página vigia (notificações ligadas, ou o desktop na bandeja): o alerta de memória precisa
+async function statsLoop() { if (watching()) await loadStats(); setTimeout(statsLoop, 5000); }
 
 // sparkline em SVG inline, sem animação e sem linha de base: a série ocupa a largura toda (estica até a janela de
 // HISTORY leituras encher). Para leitor de tela e no hover, um texto com mín, máx e o valor atual. O CPU tem piso de 10% na escala: 0,8% fica baixo e 80% no topo (com 1%, qualquer carga enchia a altura)
@@ -444,7 +458,7 @@ function row(c: Container, withProject = false) {
   // a anotação da dependência vem de outros containers: entra na assinatura, senão a linha não muda quando o db muda
   const bl = blockers(c, data), hd = holds(c, data);
   const sig = JSON.stringify([c, withProject, bl.map(b => [b.service, b.state, b.c?.ID]), hd.map(x => x.ID), tails[tailKey(c)], facts[tailKey(c)], busy.get(c.ID), arming?.id === c.ID, errors.get(c.ID), health[c.ID + c.Status], stats[sid(c.ID)],
-                              series.get(sid(c.ID))?.at(-1)?.t, composing.has(project(c)), TOUCH, WIDE.matches, sel.has(c.ID), quiet(c), fallKey(c)]);
+                              series.get(sid(c.ID))?.at(-1)?.t, composing.has(project(c)), TOUCH, WIDE.matches, sel.has(c.ID), quiet(c), fallKey(c), memOn(c)]);
   const hit = rowCache.get(c.ID);
   if (hit?.sig === sig) return hit.html;
   const html = rowHtml(c, withProject, bl, hd);
@@ -470,14 +484,27 @@ const SEEN_KEY = 'docker-gui-seen';
 let seenFails = new Set<string>((() => { try { return JSON.parse(localStorage.getItem(SEEN_KEY) || '[]'); } catch { return []; } })());
 const fallKey = (c: Container) => { const f = facts[tailKey(c)]; return f?.FinishedAt ? `${c.ID}@${f.FinishedAt}` : ''; };
 const quiet = (c: Container) => (c.State === 'exited' || c.State === 'dead') && seenFails.has(fallKey(c));
-// na faixa de atenção: o que está com problema (menos a queda antiga que alguém marcou como vista) e o "Created" que uma
-// dependência quebrada segura. attention é o mesmo sem o "visto", para as notificações
-const attention = (c: Container) => isProblem(c) || held(c, data);
-const inBand = (c: Container) => (isProblem(c) && !quiet(c)) || held(c, data);
-// o filtro e as contagens seguem a faixa: o "Created" segurado conta como problema, não como parado
-const bucketOf = (c: Container): Bucket => held(c, data) ? 'problema' : bucket(c);
-// quem segura outros vem antes (consertar o db conserta a api); o sort é estável, então o resto segue por nome
-const rootsFirst = (cs: Container[]) => cs.sort((a, b) => +(holds(b, data).length > 0) - +(holds(a, data).length > 0));
+// na faixa de atenção: o que está com problema (menos a queda antiga que alguém marcou como vista), o "Created" que uma
+// dependência quebrada segura e quem está perto do limite de memória. attention é o mesmo sem o "visto", para as
+// notificações. severe: o que quebrou (ou não sobe); só a memória é aviso, com chave própria na notificação, para a
+// queda de quem estava perto do limite notificar de novo
+const memOn = (c: Container) => c.State === 'running' && memHot(memSt, sid(c.ID));
+const severe = (c: Container) => isProblem(c) || held(c, data);
+const attention = (c: Container) => severe(c) || memOn(c);
+const inBand = (c: Container) => (isProblem(c) && !quiet(c)) || held(c, data) || memOn(c);
+const alertKey = (c: Container) => severe(c) ? c.ID : `${c.ID}:mem`;
+// o filtro e as contagens seguem a faixa: o "Created" segurado e a memória contam como problema
+const bucketOf = (c: Container): Bucket => held(c, data) || memOn(c) ? 'problema' : bucket(c);
+// raiz de dependência (consertar o db conserta a api), depois quem quebrou, depois quem só está perto do limite; o sort
+// é estável, então dentro de cada grupo segue por nome
+const rank = (c: Container) => holds(c, data).length ? 0 : severe(c) ? 1 : 2;
+const attnSort = (cs: Container[]) => cs.sort((a, b) => rank(a) - rank(b));
+const memLine = (c: Container) => memOn(c) && stats[sid(c.ID)] ? memText(stats[sid(c.ID)]) : '';
+// quem entrou na faixa desde a última vez (da lista ou do stats) vira notificação
+function checkAttention() {
+  notify(newProblems(seen, data, attention, alertKey));
+  seen = new Set(data.filter(attention).map(alertKey));
+}
 function saveSeen() {
   try { localStorage.setItem(SEEN_KEY, JSON.stringify([...seenFails].slice(-200))); } catch { /* aba privada: vale só agora */ }
   render();
@@ -500,6 +527,18 @@ function depHtml(bl: Blocker[], hd: Container[], link = true) {
         class="font-mono underline underline-offset-4 rounded hover:text-fg-strong focus-visible:outline-2 focus-visible:outline-accent">${esc(b.service)}</button>`
     : mono(esc(b.service)))}</span>`).join('')
     + (hd.length ? `<span class="block text-xs text-fg-soft">${t`segurando ${mono(esc(names(hd)))}`}</span>` : '');
+}
+// "Memória em 93% do limite (…)", no tom de aviso; na linha, com o atalho para os Processos (a pergunta seguinte é
+// "qual processo?"); no modal, os Processos já estão logo abaixo
+function memHtml(c: Container, procs: boolean) {
+  const m = memLine(c);
+  return !m ? '' : `<span class="block text-xs text-warn-fg">${esc(m)}${procs ? ` <button data-id="${c.ID}" data-a="procs" onclick="openProcs('${c.ID}')"
+    aria-label="${t`Ver os processos de ${esc(c.Names)}`}" class="font-sans underline underline-offset-4 rounded hover:text-fg-strong focus-visible:outline-2 focus-visible:outline-accent">${t`Processos`}</button>` : ''}</span>`;
+}
+function openProcs(id: string) {
+  logs(id);
+  const d = $<HTMLDetailsElement>('#procs');
+  if (!d.hidden) d.open = true;  // o ontoggle chama o loadTop
 }
 function rowHtml(c: Container, withProject: boolean, bl: Blocker[], hd: Container[]) {
   const b = busy.get(c.ID), tn = TONE[b ? 'busy' : tone(c)], st = status(c, facts[tailKey(c)]), pp = ports(c.Ports), p = project(c), bt = b && busyText(c, b);
@@ -554,7 +593,7 @@ ${WIDE.matches ? '' : `
         chips ? `<div class="mt-0.5 flex flex-wrap gap-1 -ml-1 coarse:gap-x-2 coarse:-ml-2">${chips}</div>` : ''}`}</div></div></th>
     <td role="cell" class="${cell} font-mono text-xs text-muted pr-4 max-xl:hidden">${WIDE.matches ? `<div class="truncate [direction:rtl] text-left" title="${esc(c.Image)}">${image}</div>` : ''}</td>
     <td role="cell" class="${cell} font-mono text-data pr-4 sm:min-w-[20ch] max-sm:block max-sm:p-0 max-sm:pl-12 max-sm:coarse:pl-14" title="${esc(c.Status)}">
-      <span id="st-${c.ID}" class="${tn[1]}">${bt || esc(st[0])}${st[1] && !b ? `<span class="block text-xs text-muted">${st[1]}</span>` : ''}</span>${tailBtn}${b ? '' : depHtml(bl, hd)}${
+      <span id="st-${c.ID}" class="${tn[1]}">${bt || esc(st[0])}${st[1] && !b ? `<span class="block text-xs text-muted">${st[1]}</span>` : ''}</span>${tailBtn}${b ? '' : depHtml(bl, hd) + memHtml(c, true)}${
       u ? `<span id="us-${c.ID}" class="block text-xs font-mono text-muted" title="${esc(u[2])}"><span class="whitespace-nowrap">${esc(u[0])} ${spark(h, 'cpu')}</span> <span class="whitespace-nowrap max-xl:block"><span class="max-xl:hidden">· </span>${esc(u[1])} ${spark(h, 'mem')}</span></span>` : ''}${b ? '' : errHtml(c) + healthBox}${seenBtn}</td>
     <td role="cell" class="${cell} pr-4 max-xl:hidden">${WIDE.matches && chips ? `<div class="flex flex-wrap gap-1">${chips}</div>` : ''}</td>
     <td role="cell" class="py-2.5 align-top pr-4 max-sm:block max-sm:p-0 max-sm:pt-2"><div class="flex justify-end max-sm:justify-start items-center gap-1.5 coarse:gap-2">
@@ -602,7 +641,7 @@ function closeMenus(except?: Element | null) {
 document.addEventListener('click', e => closeMenus(e.target instanceof Element ? e.target.closest('details[data-keep="menu"]') : null));
 
 const bandHead = (text: string, cls: string) => `<tr data-key="h:attn" role="row" class="max-sm:block"><th role="columnheader" colspan="5" scope="colgroup"
-  class="max-sm:block px-4 pt-4 pb-2 text-left font-mono text-xs font-semibold uppercase border-t border-line ${cls}">${text}<span class="ml-3 font-sans font-normal normal-case text-bad-soft/80">${t`healthcheck falhando, loop de reinício, saída com erro ou dependência quebrada`}</span></th></tr>`;
+  class="max-sm:block px-4 pt-4 pb-2 text-left font-mono text-xs font-semibold uppercase border-t border-line ${cls}">${text}<span class="ml-3 font-sans font-normal normal-case text-bad-soft/80">${t`healthcheck falhando, loop de reinício, saída com erro, dependência quebrada ou memória perto do limite`}</span></th></tr>`;
 
 // cabeçalho do projeto compose: contagem e ações para o stack inteiro (sempre sobre todos os containers do projeto).
 // Como na linha: uma ação principal (Iniciar tudo se algo está parado, senão Parar tudo), Logs e o resto no "⋯"
@@ -687,7 +726,7 @@ function render() {
   const rows = data.filter(c => (!only || bucketOf(c) === only) && [c.Names, c.Image, project(c)].join(' ').toLowerCase().includes(q))
                    .sort((a, b) => a.Names.localeCompare(b.Names));
   visible = rows.map(c => c.ID);
-  const attn = rootsFirst(rows.filter(inBand)), groups = new Map<string, Container[]>();
+  const attn = attnSort(rows.filter(inBand)), groups = new Map<string, Container[]>();
   for (const c of rows) if (!inBand(c)) groups.set(project(c), [...(groups.get(project(c)) || []), c]);
   // projeto com todos os containers na faixa ainda precisa do cabeçalho (e das ações do stack)
   for (const c of attn) if (project(c) && !groups.has(project(c))) groups.set(project(c), []);
@@ -1170,7 +1209,7 @@ function renderDlg() {
   // uma linha para cada coisa: status, último healthcheck (inteiro no title) e uso, com rede e disco no fim (fora do celular)
   // depois de reiniciar daqui, o status diz quando foi: a marca no log só aparece se o container escrever algo novo
   const again = mark && c.State === 'running' && !b ? `<span class="text-muted"> · ${esc(mark.label)}</span>` : '';
-  $('#dlg-status').innerHTML = `<span class="${tn[1]}">${b ? busyText(c, b) : esc(st[0])}</span>${st[1] && !b ? `<span class="text-muted"> · ${st[1]}</span>` : ''}${again}${b ? '' : errHtml(c) + depHtml(blockers(c, data), holds(c, data), false)}${
+  $('#dlg-status').innerHTML = `<span class="${tn[1]}">${b ? busyText(c, b) : esc(st[0])}</span>${st[1] && !b ? `<span class="text-muted"> · ${st[1]}</span>` : ''}${again}${b ? '' : errHtml(c) + depHtml(blockers(c, data), holds(c, data), false) + memHtml(c, false)}${
     h ? `<div id="dlg-health" class="mt-2 text-xs">${healthHtml(c.ID, h)}</div>` : ''}${
     s && u ? `<div id="dlg-usage" class="mt-1 text-xs text-muted">${usageLine(s, u, hs)}</div>` : ''}`;
   // Reiniciar à vista e primeiro (é o ciclo: reiniciar e ver o log novo), depois a ação principal; o resto no "⋯"
@@ -1986,7 +2025,7 @@ if (T.prefs) {
 
 Object.assign(window, {
   ackFail, act, afterClose, askNotify, confirmArm, bulkAct, clearFilters, clearSel, closeOut, composeAct, copyAddr, copyExec, copyLogs, copyProbe, disarm, downloadLogs,
-  filterBy, followClick, loadHealth, loadHistory, loadInspect, loadMore, loadTop, logPick, menuPick, openCreate, openPrefs, openShell, pickTab, placeMenu, projectLogs,
+  filterBy, followClick, loadHealth, loadHistory, loadInspect, loadMore, loadTop, logPick, menuPick, openCreate, openPrefs, openProcs, openShell, pickTab, placeMenu, projectLogs,
   prune, refreshLogs, reloadHealth, rmObj, serviceAct, runToastAction, selectAll, sinceChange, stackAct, toggleSel,
 });
 

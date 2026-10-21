@@ -1812,6 +1812,7 @@ PAGE = r"""<!doctype html>
     Português: "Português",
     "Precisa de atenção · {0}": "Needs attention · {0}",
     Preferências: "Preferences",
+    Processos: "Processes",
     "Processos (docker top)": "Processes (docker top)",
     "Projeto compose · {0} de {1} rodando · todos os serviços": "Compose project · {0} of {1} running · all services",
     "Pronto: aviso quando um container entrar na faixa de atenção, mesmo com a aba em segundo plano.": "Done: you'll be notified when a container enters the attention band, even with the tab in the background.",
@@ -1883,6 +1884,7 @@ PAGE = r"""<!doctype html>
     "Valem na hora: a janela recarrega com o que você escolher.": "They apply right away: the window reloads with your choices.",
     "Variáveis de ambiente": "Environment variables",
     "Ver logs": "View logs",
+    "Ver os processos de {0}": "See the processes of {0}",
     "Ver último healthcheck": "See last healthcheck",
     Volume: "Volume",
     "Volume nomeado (criado se não existir): nome:/caminho/no/container.": "Named volume (created if missing): name:/path/in/container.",
@@ -1938,7 +1940,7 @@ PAGE = r"""<!doctype html>
     "falhou (código {0})": "failed (exit code {0})",
     "ficou sem memória (OOM)": "ran out of memory (OOM)",
     "healthcheck começou a falhar": "healthcheck started failing",
-    "healthcheck falhando, loop de reinício, saída com erro ou dependência quebrada": "failing healthcheck, restart loop, exit with an error or a broken dependency",
+    "healthcheck falhando, loop de reinício, saída com erro, dependência quebrada ou memória perto do limite": "failing healthcheck, restart loop, exit with an error, broken dependency or memory near the limit",
     "healthcheck voltou a passar": "healthcheck passing again",
     "healthcheck: {0}": "healthcheck: {0}",
     "há {0}": "{0} ago",
@@ -2246,6 +2248,34 @@ PAGE = r"""<!doctype html>
     for (; n >= 1024 && i < u.length - 1; i++) n /= 1024;
     return `${i && n < 100 ? n.toFixed(1) : Math.round(n)} ${u[i]}`;
   }
+  function memLimit(s15) {
+    const [u, l] = s15.MemUsage.split(" / ").map((x) => bytes(x ?? ""));
+    return u !== null && l ? { used: u, limit: l } : null;
+  }
+  var memPct = (s15) => {
+    const m = memLimit(s15);
+    return percent(s15.MemPerc) ?? (m && m.used / m.limit * 100);
+  };
+  var MEM_IN = 90;
+  var MEM_OUT = 85;
+  var MEM_READS = 2;
+  var NO_LIMIT = 0.95;
+  function memWatch(prev, stats2, memTotal2, first = false) {
+    const next = /* @__PURE__ */ new Map();
+    if (!memTotal2) return next;
+    for (const [id, s15] of Object.entries(stats2)) {
+      const m = memLimit(s15), pct = memPct(s15), was = prev.get(id) ?? { n: 0, on: false };
+      if (!m || pct === null || m.limit >= NO_LIMIT * memTotal2) continue;
+      if (pct >= MEM_IN) next.set(id, { n: was.n + 1, on: was.on || first || was.n + 1 >= MEM_READS });
+      else if (pct >= MEM_OUT && was.on) next.set(id, { n: 0, on: true });
+    }
+    return next;
+  }
+  var memHot = (st2, id) => !!st2.get(id)?.on;
+  var memText = (s15) => {
+    const m = memLimit(s15);
+    return t`Memória em ${Math.round(memPct(s15))}% do limite (${fmtBytes(m.used)} de ${fmtBytes(m.limit)})`;
+  };
   function pair(s15) {
     const m = s15?.match(/^\s*(\S+)\s*\/\s*(\S+)\s*$/);
     return m && bytes(m[1]) !== null && bytes(m[2]) !== null ? [m[1], m[2]] : null;
@@ -12074,8 +12104,7 @@ ${h2.join(`
         if (selectingRows()) dirty = true;
         else render();
       }
-      notify(newProblems(seen, data, attention));
-      seen = new Set(data.filter(attention).map((c) => c.ID));
+      checkAttention();
       showProblem(null);
     } catch (e) {
       showProblem([
@@ -12160,11 +12189,11 @@ ${h2.join(`
   }
   function notify(cs2) {
     if (!cs2.length || !notifying() || !document.hidden && document.hasFocus()) return;
-    cs2 = rootsFirst([...cs2]);
+    cs2 = attnSort([...cs2]);
     T.notify(
       cs2.length === 1 ? t`${cs2[0].Names} precisa de atenção` : t`${cs2.length} containers precisam de atenção`,
       // o clique traz a página e põe o foco no Logs de quem caiu (a linha dele na faixa de atenção, que vem primeiro)
-      cs2.length === 1 ? status(cs2[0])[0] : cs2.map((c) => c.Names).join(", "),
+      cs2.length === 1 ? severe(cs2[0]) ? status(cs2[0])[0] : memLine(cs2[0]) : cs2.map((c) => c.Names).join(", "),
       () => {
         focus();
         document.querySelector(`[data-id="${cs2[0].ID}"][data-a="logs"]`)?.focus();
@@ -12178,6 +12207,16 @@ ${h2.join(`
   var stats = {};
   var series = /* @__PURE__ */ new Map();
   var sid = (id) => id.slice(0, 12);
+  var memTotal = null;
+  var memSt = /* @__PURE__ */ new Map();
+  var memBase = true;
+  async function loadMemTotal() {
+    try {
+      const r = await api("/api/info");
+      if (r.ok) memTotal = (await r.json()).MemTotal;
+    } catch {
+    }
+  }
   async function loadStats() {
     let next = {};
     try {
@@ -12191,12 +12230,20 @@ ${h2.join(`
       const cpu = percent(s15.CPUPerc), mem = bytes(s15.MemUsage.split(" / ")[0]);
       if (cpu !== null && mem !== null) series.set(k, pushSample(series.get(k) ?? [], { t: t2, cpu, mem }));
     }
+    if (memTotal === null) await loadMemTotal();
+    const first = memBase && memTotal !== null;
+    memSt = memWatch(memSt, next, memTotal, first);
     stats = next;
+    if (first) {
+      memBase = false;
+      for (const c of data) if (memOn(c)) seen?.add(alertKey(c));
+    }
+    checkAttention();
     if (selectingRows()) dirty = true;
     else render();
   }
   async function statsLoop() {
-    if (!document.hidden) await loadStats();
+    if (watching()) await loadStats();
     setTimeout(statsLoop, 5e3);
   }
   var CPU_FMT = (n) => `${n.toFixed(2)}%`;
@@ -12388,7 +12435,8 @@ ${h2.join(`
       WIDE.matches,
       sel.has(c.ID),
       quiet(c),
-      fallKey(c)
+      fallKey(c),
+      memOn(c)
     ]);
     const hit = rowCache.get(c.ID);
     if (hit?.sig === sig) return hit.html;
@@ -12415,10 +12463,19 @@ ${h2.join(`
     return f?.FinishedAt ? `${c.ID}@${f.FinishedAt}` : "";
   };
   var quiet = (c) => (c.State === "exited" || c.State === "dead") && seenFails.has(fallKey(c));
-  var attention = (c) => isProblem(c) || held(c, data);
-  var inBand = (c) => isProblem(c) && !quiet(c) || held(c, data);
-  var bucketOf = (c) => held(c, data) ? "problema" : bucket(c);
-  var rootsFirst = (cs2) => cs2.sort((a, b2) => +(holds(b2, data).length > 0) - +(holds(a, data).length > 0));
+  var memOn = (c) => c.State === "running" && memHot(memSt, sid(c.ID));
+  var severe = (c) => isProblem(c) || held(c, data);
+  var attention = (c) => severe(c) || memOn(c);
+  var inBand = (c) => isProblem(c) && !quiet(c) || held(c, data) || memOn(c);
+  var alertKey = (c) => severe(c) ? c.ID : `${c.ID}:mem`;
+  var bucketOf = (c) => held(c, data) || memOn(c) ? "problema" : bucket(c);
+  var rank = (c) => holds(c, data).length ? 0 : severe(c) ? 1 : 2;
+  var attnSort = (cs2) => cs2.sort((a, b2) => rank(a) - rank(b2));
+  var memLine = (c) => memOn(c) && stats[sid(c.ID)] ? memText(stats[sid(c.ID)]) : "";
+  function checkAttention() {
+    notify(newProblems(seen, data, attention, alertKey));
+    seen = new Set(data.filter(attention).map(alertKey));
+  }
   function saveSeen() {
     try {
       localStorage.setItem(SEEN_KEY, JSON.stringify([...seenFails].slice(-200)));
@@ -12446,6 +12503,16 @@ ${h2.join(`
   function depHtml(bl2, hd, link = true) {
     return bl2.map((b2) => `<span class="block text-xs text-fg-soft">${DEP_TXT[b2.state](b2.c && link ? `<button data-id="${b2.c.ID}" data-a="dep" onclick="act('logs','${b2.c.ID}')" aria-label="${t`Abrir logs de ${esc(b2.service)}`}"
         class="font-mono underline underline-offset-4 rounded hover:text-fg-strong focus-visible:outline-2 focus-visible:outline-accent">${esc(b2.service)}</button>` : mono(esc(b2.service)))}</span>`).join("") + (hd.length ? `<span class="block text-xs text-fg-soft">${t`segurando ${mono(esc(names(hd)))}`}</span>` : "");
+  }
+  function memHtml(c, procs) {
+    const m = memLine(c);
+    return !m ? "" : `<span class="block text-xs text-warn-fg">${esc(m)}${procs ? ` <button data-id="${c.ID}" data-a="procs" onclick="openProcs('${c.ID}')"
+    aria-label="${t`Ver os processos de ${esc(c.Names)}`}" class="font-sans underline underline-offset-4 rounded hover:text-fg-strong focus-visible:outline-2 focus-visible:outline-accent">${t`Processos`}</button>` : ""}</span>`;
+  }
+  function openProcs(id) {
+    logs(id);
+    const d = $2("#procs");
+    if (!d.hidden) d.open = true;
   }
   function rowHtml(c, withProject, bl2, hd) {
     const b2 = busy.get(c.ID), tn2 = TONE[b2 ? "busy" : tone(c)], st2 = status(c, facts[tailKey(c)]), pp = ports(c.Ports), p = project(c), bt2 = b2 && busyText(c, b2);
@@ -12496,7 +12563,7 @@ ${WIDE.matches ? "" : `
         <div class="font-mono text-xs text-muted sm:truncate sm:max-w-[28ch] sm:[direction:rtl] sm:text-left [overflow-wrap:anywhere]" title="${esc(c.Image)}"><span class="sr-only">${t`Imagem:`} </span>${image}</div>${chips ? `<div class="mt-0.5 flex flex-wrap gap-1 -ml-1 coarse:gap-x-2 coarse:-ml-2">${chips}</div>` : ""}`}</div></div></th>
     <td role="cell" class="${cell} font-mono text-xs text-muted pr-4 max-xl:hidden">${WIDE.matches ? `<div class="truncate [direction:rtl] text-left" title="${esc(c.Image)}">${image}</div>` : ""}</td>
     <td role="cell" class="${cell} font-mono text-data pr-4 sm:min-w-[20ch] max-sm:block max-sm:p-0 max-sm:pl-12 max-sm:coarse:pl-14" title="${esc(c.Status)}">
-      <span id="st-${c.ID}" class="${tn2[1]}">${bt2 || esc(st2[0])}${st2[1] && !b2 ? `<span class="block text-xs text-muted">${st2[1]}</span>` : ""}</span>${tailBtn}${b2 ? "" : depHtml(bl2, hd)}${u ? `<span id="us-${c.ID}" class="block text-xs font-mono text-muted" title="${esc(u[2])}"><span class="whitespace-nowrap">${esc(u[0])} ${spark(h2, "cpu")}</span> <span class="whitespace-nowrap max-xl:block"><span class="max-xl:hidden">· </span>${esc(u[1])} ${spark(h2, "mem")}</span></span>` : ""}${b2 ? "" : errHtml(c) + healthBox}${seenBtn}</td>
+      <span id="st-${c.ID}" class="${tn2[1]}">${bt2 || esc(st2[0])}${st2[1] && !b2 ? `<span class="block text-xs text-muted">${st2[1]}</span>` : ""}</span>${tailBtn}${b2 ? "" : depHtml(bl2, hd) + memHtml(c, true)}${u ? `<span id="us-${c.ID}" class="block text-xs font-mono text-muted" title="${esc(u[2])}"><span class="whitespace-nowrap">${esc(u[0])} ${spark(h2, "cpu")}</span> <span class="whitespace-nowrap max-xl:block"><span class="max-xl:hidden">· </span>${esc(u[1])} ${spark(h2, "mem")}</span></span>` : ""}${b2 ? "" : errHtml(c) + healthBox}${seenBtn}</td>
     <td role="cell" class="${cell} pr-4 max-xl:hidden">${WIDE.matches && chips ? `<div class="flex flex-wrap gap-1">${chips}</div>` : ""}</td>
     <td role="cell" class="py-2.5 align-top pr-4 max-sm:block max-sm:p-0 max-sm:pt-2"><div class="flex justify-end max-sm:justify-start items-center gap-1.5 coarse:gap-2">
       ${prim ? btn(prim, prim === "start" ? "text-ok-fg hover:bg-ok/10" : void 0) : slot()}${restart}${logsBtn}
@@ -12533,7 +12600,7 @@ ${WIDE.matches ? "" : `
   }
   document.addEventListener("click", (e) => closeMenus(e.target instanceof Element ? e.target.closest('details[data-keep="menu"]') : null));
   var bandHead = (text, cls) => `<tr data-key="h:attn" role="row" class="max-sm:block"><th role="columnheader" colspan="5" scope="colgroup"
-  class="max-sm:block px-4 pt-4 pb-2 text-left font-mono text-xs font-semibold uppercase border-t border-line ${cls}">${text}<span class="ml-3 font-sans font-normal normal-case text-bad-soft/80">${t`healthcheck falhando, loop de reinício, saída com erro ou dependência quebrada`}</span></th></tr>`;
+  class="max-sm:block px-4 pt-4 pb-2 text-left font-mono text-xs font-semibold uppercase border-t border-line ${cls}">${text}<span class="ml-3 font-sans font-normal normal-case text-bad-soft/80">${t`healthcheck falhando, loop de reinício, saída com erro, dependência quebrada ou memória perto do limite`}</span></th></tr>`;
   function groupHead(k, label) {
     const all = data.filter((c) => project(c) === k), on2 = all.filter((c) => c.State === "running").length;
     const anyBusy = composing.has(k) || all.some((c) => busy.has(c.ID)), dir = k && workingDir(all[0]), armed = arming?.id === `stack-${k}`;
@@ -12609,7 +12676,7 @@ ${WIDE.matches ? "" : `
     const q2 = $2("#q").value.trim().toLowerCase();
     const rows = data.filter((c) => (!only || bucketOf(c) === only) && [c.Names, c.Image, project(c)].join(" ").toLowerCase().includes(q2)).sort((a, b2) => a.Names.localeCompare(b2.Names));
     visible = rows.map((c) => c.ID);
-    const attn = rootsFirst(rows.filter(inBand)), groups = /* @__PURE__ */ new Map();
+    const attn = attnSort(rows.filter(inBand)), groups = /* @__PURE__ */ new Map();
     for (const c of rows) if (!inBand(c)) groups.set(project(c), [...groups.get(project(c)) || [], c]);
     for (const c of attn) if (project(c) && !groups.has(project(c))) groups.set(project(c), []);
     const keys = [...groups.keys()].sort((a, b2) => Number(a === "") - Number(b2 === "") || a.localeCompare(b2));
@@ -13039,7 +13106,7 @@ ${WIDE.matches ? "" : `
     if (hasHealth(c) && !h2) loadHealth(c.ID);
     const s15 = c.State === "running" && !b2 ? stats[sid(c.ID)] : void 0, u = s15 && usage(s15), hs2 = series.get(sid(c.ID)) ?? [];
     const again2 = mark && c.State === "running" && !b2 ? `<span class="text-muted"> · ${esc(mark.label)}</span>` : "";
-    $2("#dlg-status").innerHTML = `<span class="${tn2[1]}">${b2 ? busyText(c, b2) : esc(st2[0])}</span>${st2[1] && !b2 ? `<span class="text-muted"> · ${st2[1]}</span>` : ""}${again2}${b2 ? "" : errHtml(c) + depHtml(blockers(c, data), holds(c, data), false)}${h2 ? `<div id="dlg-health" class="mt-2 text-xs">${healthHtml(c.ID, h2)}</div>` : ""}${s15 && u ? `<div id="dlg-usage" class="mt-1 text-xs text-muted">${usageLine(s15, u, hs2)}</div>` : ""}`;
+    $2("#dlg-status").innerHTML = `<span class="${tn2[1]}">${b2 ? busyText(c, b2) : esc(st2[0])}</span>${st2[1] && !b2 ? `<span class="text-muted"> · ${st2[1]}</span>` : ""}${again2}${b2 ? "" : errHtml(c) + depHtml(blockers(c, data), holds(c, data), false) + memHtml(c, false)}${h2 ? `<div id="dlg-health" class="mt-2 text-xs">${healthHtml(c.ID, h2)}</div>` : ""}${s15 && u ? `<div id="dlg-usage" class="mt-1 text-xs text-muted">${usageLine(s15, u, hs2)}</div>` : ""}`;
     const prim = PRIMARY[c.State], sec = SECONDARY[c.State];
     const more = [sec && sec !== "restart" && [sec, LABEL[sec]], c.State === "running" && ["exec", t`Copiar docker exec`]].filter((x) => !!x);
     $2("#dlg-acts").innerHTML = (sec === "restart" ? `<button data-id="dlg" data-a="restart" ${b2 ? 'aria-disabled="true"' : ""} aria-label="${t`Reiniciar ${esc(c.Names)}`}" title="${t`Reiniciar (r)`}"
@@ -13832,6 +13899,7 @@ ${WIDE.matches ? "" : `
     menuPick,
     openCreate,
     openPrefs,
+    openProcs,
     openShell,
     pickTab,
     placeMenu,
