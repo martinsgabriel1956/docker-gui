@@ -7,7 +7,7 @@ use futures_util::stream::BoxStream;
 use regex::Regex;
 use serde_json::{Value, json};
 
-use crate::cli::{ACTION_TIMEOUT, Ctx, READ_TIMEOUT};
+use crate::cli::{ACTION_TIMEOUT, Ctx, READ_TIMEOUT, RUN_TIMEOUT};
 use crate::i18n::{tr, trf};
 use crate::normalize::{self as n, Use};
 use crate::pyfmt::{parse_qs, qs_get};
@@ -192,9 +192,112 @@ async fn get(ctx: &Ctx, req: &Request) -> Step<Response> {
     Ok(not_found())
 }
 
-async fn post(ctx: &Ctx, _req: &Request) -> Reply {
-    let _ = ctx;
-    Reply::Json(not_found())
+async fn post(ctx: &Ctx, req: &Request) -> Reply {
+    let full = req.full();
+    if let Some(m) = caps(r"/api/compose/(\w+)", &full)
+        && (v::compose_project(&m[1]).is_some() || v::compose_service(&m[1]).is_some())
+    {
+        return match compose(ctx, &m[1], req.body.as_ref()).await {
+            Ok(args) => Reply::Ndjson(crate::compose::stream(ctx, args)),
+            Err(e) => Reply::Json(e),
+        };
+    }
+    Reply::Json(post_json(ctx, req, &full).await)
+}
+
+async fn post_json(ctx: &Ctx, req: &Request, full: &str) -> Response {
+    if full == "/api/run" {
+        let Some(body) = &req.body else {
+            return reply(400, trf(ctx.lang, "corpo inválido: esperado JSON de até {n} KiB", &[("n", "64")]));
+        };
+        let args = match v::run_argv(ctx.lang, body) {
+            Ok(a) => a,
+            Err(e) => return reply(400, e),
+        };
+        let r = ctx.docker_owned(&args, RUN_TIMEOUT).await;
+        // o container pode ter sido criado e não ter subido (porta ocupada): ele aparece na lista
+        if r.code != 0 {
+            return reply(500, r.stderr.trim());
+        }
+        // o progresso do pull vai para o stderr; a última palavra do stdout é o ID
+        return reply(200, r.stdout.split_whitespace().last().unwrap_or(""));
+    }
+    if let Some(m) = caps(r"/api/prune/(\w+)", full)
+        && let Some(argv) = v::prune(&m[1])
+    {
+        // devolve o stdout: a última linha diz quanto espaço foi liberado
+        let r = ctx.docker(argv, ACTION_TIMEOUT).await;
+        return out(&r);
+    }
+    if let Some(m) = caps(r"/api/rm/(\w+)/([^/]+)", full)
+        && let Some(argv) = v::remove(&m[1], &m[2])
+    {
+        if m[1] == "network" {
+            // o nome vem do docker, não da página: rede padrão nunca chega ao rm
+            let r = ctx.docker(&["network", "inspect", "--format", "{{.Name}}", &m[2]], READ_TIMEOUT).await;
+            if r.code != 0 {
+                return reply(500, r.stderr.trim());
+            }
+            let name = r.stdout.trim();
+            if v::BUILTIN_NETWORKS.contains(&name) {
+                return reply(
+                    403,
+                    trf(ctx.lang, "{name} é uma rede padrão e não pode ser removida", &[("name", name)]),
+                );
+            }
+        }
+        let r = ctx.docker(&[argv, &[m[2].as_str()]].concat(), ACTION_TIMEOUT).await;
+        return out(&r);
+    }
+    if let Some(m) = caps(r"/api/(\w+)/([0-9a-f]{12,64})", full)
+        && let Some(argv) = v::action(&m[1])
+    {
+        let r = ctx.docker(&[argv, &[m[2].as_str()]].concat(), ACTION_TIMEOUT).await;
+        return reply(if r.code != 0 { 500 } else { 200 }, r.stderr.trim());
+    }
+    not_found()
+}
+
+/// status pelo código, e o stderr (erro) ou o stdout (ok)
+fn out(r: &crate::cli::Output) -> Response {
+    reply(if r.code != 0 { 500 } else { 200 }, if r.code != 0 { r.stderr.trim() } else { r.stdout.trim() })
+}
+
+/// Corpo {project, dir}, mais o service nas ações por serviço -> o argv inteiro do compose (base + ação)
+async fn compose(ctx: &Ctx, action: &str, body: Option<&Value>) -> Step<Vec<String>> {
+    let service = v::compose_service(action).is_some();
+    let field =
+        |k: &str| body.and_then(|b| b.get(k)).and_then(Value::as_str).filter(|s| !s.is_empty()).map(String::from);
+    let key: Option<Vec<String>> = if service {
+        [field("project"), field("dir"), field("service")].into_iter().collect()
+    } else {
+        [field("project"), field("dir")].into_iter().collect()
+    };
+    let Some(key) = key.filter(|_| body.is_some_and(Value::is_object)) else {
+        return Err(reply(
+            400,
+            tr(
+                ctx.lang,
+                if service {
+                    "corpo inválido: esperado {project, dir, service}"
+                } else {
+                    "corpo inválido: esperado {project, dir}"
+                },
+            ),
+        ));
+    };
+    // svcup é de um serviço sem container: ele não está nos labels, e sim no arquivo do compose
+    let up = action == "svcup";
+    let base = compose_base(ctx, &key[0], &key[1], if service && !up { Some(&key[2]) } else { None }).await?;
+    if up && !compose_services(ctx, &base).await?.contains(&key[2]) {
+        return Err(reply(404, tr(ctx.lang, "serviço não encontrado no projeto")));
+    }
+    // o "--" encerra as flags: mesmo vindo de um label, o nome do serviço nunca vira opção do compose
+    let rest: Vec<String> = match v::compose_service(action) {
+        Some(a) => [strs(a), vec!["--".into(), key[2].clone()]].concat(),
+        None => strs(v::compose_project(action).unwrap()),
+    };
+    Ok([base, rest].concat())
 }
 
 fn strs(a: &[&str]) -> Vec<String> {

@@ -3,6 +3,7 @@
 //! O contrato com o Python está em tests/contract/ (raiz do repositório), lido pelo tests/contract.rs.
 
 pub mod cli;
+pub mod compose;
 pub mod i18n;
 mod i18n_en;
 pub mod normalize;

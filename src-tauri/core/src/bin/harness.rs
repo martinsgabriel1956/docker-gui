@@ -11,6 +11,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, Method as HttpMethod, StatusCode, Uri, header};
 use axum::response::Response;
+use futures_util::StreamExt;
 use serde_json::Value;
 use stivo_core::i18n::trf;
 use stivo_core::{Ctx, Lang, Method, Reply, Request};
@@ -91,7 +92,14 @@ async fn dispatch(
     let json = (!body.is_empty() && body.len() <= MAX_BODY).then(|| serde_json::from_slice(&body).ok()).flatten();
     match stivo_core::handle(&app.ctx, Request::new(method, target, json)).await {
         Reply::Json(r) => send(r.status, &r.body),
-        Reply::Ndjson(_) => send(500, &Value::from("NDJSON ainda não suportado")),
+        Reply::Ndjson(lines) => {
+            let body = lines.map(|v| Ok::<_, std::convert::Infallible>(format!("{v}\n")));
+            let mut r = Response::new(Body::from_stream(body));
+            r.headers_mut()
+                .insert(header::CONTENT_TYPE, HeaderValue::from_static("application/x-ndjson; charset=utf-8"));
+            r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+            r
+        }
     }
 }
 

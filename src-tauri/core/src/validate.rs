@@ -3,6 +3,10 @@
 use std::sync::LazyLock;
 
 use regex::Regex;
+use serde_json::Value;
+
+use crate::i18n::{Lang, trf};
+use crate::pyfmt::{head, repr};
 
 fn full(re: &str) -> Regex {
     Regex::new(&format!("^(?:{re})$")).unwrap()
@@ -113,6 +117,126 @@ pub fn compose_service(a: &str) -> Option<&'static [&'static str]> {
 pub const COMPOSE_LOGS: [&str; 3] = ["logs", "--no-color", "--timestamps"];
 /// .Label (um por vez) e não .Labels: este junta tudo com vírgula, e config_files já tem vírgula
 pub const COMPOSE_FORMAT: &str = "[{{json (.Label \"com.docker.compose.project\")}},{{json (.Label \"com.docker.compose.project.working_dir\")}},{{json (.Label \"com.docker.compose.project.config_files\")}},{{json (.Label \"com.docker.compose.service\")}}]";
+
+const RUN_FIELDS: [&str; 7] = ["image", "name", "ports", "all_interfaces", "env", "restart", "volume"];
+const RESTART: [&str; 4] = ["no", "on-failure", "unless-stopped", "always"];
+const MAX_IMAGE: usize = 512;
+const MAX_ENV_VALUE: usize = 4096;
+const MAX_ITEMS: usize = 64;
+
+/// Corpo do POST /api/run -> argv do `docker run -d`, ou a mensagem para a página. Cada valor é conferido por regex ou
+/// lista fixa e vai num item só do argv: nada passa por shell, e nenhum começa com "-". O "--" antes da imagem fecha
+/// as opções de vez. Fica de fora tudo que amplia o acesso ao host (bind mount, --privileged, rede/PID do host...)
+pub fn run_argv(lang: Lang, body: &Value) -> Result<Vec<String>, String> {
+    let f = |s: &str, a: &[(&str, &str)]| trf(lang, s, a);
+    let Some(obj) = body.as_object() else { return Err(f("corpo inválido: esperado um objeto JSON", &[])) };
+    let mut extra: Vec<&str> = obj.keys().map(String::as_str).filter(|k| !RUN_FIELDS.contains(k)).collect();
+    extra.sort();
+    if !extra.is_empty() {
+        // --privileged, command... não são ignorados em silêncio: o pedido inteiro é recusado
+        return Err(f("campo não suportado: {fields}", &[("fields", &extra.join(", "))]));
+    }
+    let bad_type = |key: &str| f("{key}: tipo inválido", &[("key", key)]);
+    let string = |key: &str, default: &'static str| -> Result<String, String> {
+        match obj.get(key) {
+            None => Ok(default.to_string()),
+            Some(Value::String(s)) => Ok(s.clone()),
+            Some(_) => Err(bad_type(key)),
+        }
+    };
+    let list = |key: &str| -> Result<Vec<String>, String> {
+        let items = match obj.get(key) {
+            None => return Ok(vec![]),
+            Some(Value::Array(a)) => a,
+            Some(_) => return Err(bad_type(key)),
+        };
+        let items: Vec<String> =
+            items.iter().map(|x| x.as_str().map(String::from)).collect::<Option<_>>().ok_or_else(|| bad_type(key))?;
+        if items.len() > MAX_ITEMS {
+            return Err(f("{key}: no máximo {n} itens", &[("key", key), ("n", &MAX_ITEMS.to_string())]));
+        }
+        Ok(items)
+    };
+    let (image, name, volume) = (string("image", "")?, string("name", "")?, string("volume", "")?);
+    let restart = string("restart", "no")?;
+    let public = match obj.get("all_interfaces") {
+        None => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err(bad_type("all_interfaces")),
+    };
+    if image.chars().count() > MAX_IMAGE || !IMAGE_RE.is_match(&image) {
+        return Err(f("imagem inválida: use repo[:tag] ou repo@sha256:…", &[]));
+    }
+    if !name.is_empty() && !NAME_RE.is_match(&name) {
+        return Err(f(
+            "nome inválido: 2 a 128 caracteres entre letras, números, _ . e -, começando por letra ou número",
+            &[],
+        ));
+    }
+    if !RESTART.contains(&restart.as_str()) {
+        return Err(f("restart inválido: use {options}", &[("options", &RESTART.join(", "))]));
+    }
+    let mut args = vec!["run".to_string(), "-d".into(), format!("--restart={restart}")];
+    if !name.is_empty() {
+        args.push(format!("--name={name}"));
+    }
+
+    // sem o IP na frente, o docker publica em 0.0.0.0 (a rede toda, passando por cima do ufw/firewalld)
+    let ip = if public { "0.0.0.0" } else { "127.0.0.1" };
+    let mut seen = Vec::new();
+    for p in list("ports")? {
+        let m = PORT_RE.captures(&p);
+        let nums = m.as_ref().map(|m| (m[1].parse::<u32>().unwrap(), m[2].parse::<u32>().unwrap()));
+        let Some((host, ctr)) = nums.filter(|(h, c)| (1..=65535).contains(h) && (1..=65535).contains(c)) else {
+            return Err(f(
+                "porta inválida: {port} (use portaDoHost:portaDoContainer[/tcp|udp], de 1 a 65535)",
+                &[("port", &repr(&head(&p, 40)))],
+            ));
+        };
+        let proto = m.unwrap().get(3).map_or("tcp", |x| x.as_str()).to_string();
+        if seen.contains(&(host, proto.clone())) {
+            return Err(f("porta do host repetida: {port}", &[("port", &format!("{host}/{proto}"))]));
+        }
+        args.extend(["-p".into(), format!("{ip}:{host}:{ctr}/{proto}")]);
+        seen.push((host, proto));
+    }
+
+    let mut keys: Vec<String> = Vec::new();
+    for e in list("env")? {
+        // sem "=", o docker copiaria a variável do ambiente dele mesmo para o container
+        let Some((k, v)) = e.split_once('=').filter(|(k, _)| ENV_RE.is_match(k)) else {
+            return Err(f(
+                "variável inválida: {var} (use CHAVE=valor; a chave com letras, números e _)",
+                &[("var", &repr(&head(&e, 60)))],
+            ));
+        };
+        if v.contains('\0') || v.chars().count() > MAX_ENV_VALUE {
+            return Err(f(
+                "{key}: valor com NUL ou maior que {n} caracteres",
+                &[("key", k), ("n", &MAX_ENV_VALUE.to_string())],
+            ));
+        }
+        if keys.iter().any(|x| x == k) {
+            return Err(f("variável repetida: {key}", &[("key", k)]));
+        }
+        keys.push(k.to_string());
+        args.extend(["-e".into(), format!("{k}={v}")]);
+    }
+
+    if !volume.is_empty() {
+        let m = (volume.chars().count() <= 1024).then(|| VOLUME_RE.captures(&volume)).flatten();
+        let Some(m) = m.filter(|m| !m[2].split('/').any(|s| s == "." || s == "..")) else {
+            return Err(f(
+                "volume inválido: use nome:/caminho/no/container (só volume nomeado, nunca pasta do host)",
+                &[],
+            ));
+        };
+        // --mount com type=volume em vez de -v: o tipo fica explícito e nunca é interpretado como bind mount
+        args.push(format!("--mount=type=volume,source={},target={}", &m[1], &m[2]));
+    }
+    args.extend(["--".into(), image]);
+    Ok(args)
+}
 
 #[cfg(test)]
 mod tests {

@@ -9,7 +9,7 @@ use serde_json::Value;
 use stivo_core::{Ctx, Lang, Method, Output, Reply, Request, RunError, Runner, handle};
 
 // grupos de tests/contract/ que o núcleo já implementa: cada task do core liga o seu; None, todos valem
-const IMPLEMENTED: Option<&[&str]> = Some(&["lists", "reads"]);
+const IMPLEMENTED: Option<&[&str]> = Some(&["lists", "reads", "writes", "en"]);
 
 struct Fake {
     calls: Mutex<VecDeque<Value>>,
