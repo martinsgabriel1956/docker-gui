@@ -86,3 +86,11 @@ test('terminal: o primeiro resize abre, os outros redimensionam; bytes viram Uin
   await tick();
   assert.deepEqual(calls.at(-1), ['term_close', {term: 9}]);
 });
+
+test('openDir chama o open_dir e devolve null, ou a mensagem de erro', async () => {
+  onInvoke = () => undefined;
+  assert.equal(await T.openDir('shop', '/srv/shop'), null);
+  assert.deepEqual(calls.at(-1), ['open_dir', {project: 'shop', dir: '/srv/shop'}]);
+  onInvoke = () => { throw 'A pasta não existe mais: /srv/shop'; };
+  assert.equal(await T.openDir('shop', '/srv/shop'), 'A pasta não existe mais: /srv/shop');
+});

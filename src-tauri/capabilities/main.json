@@ -15,6 +15,7 @@
     "allow-attention",
     "allow-notify",
     "allow-prefs-get",
-    "allow-prefs-set"
+    "allow-prefs-set",
+    "allow-open-dir"
   ]
 }

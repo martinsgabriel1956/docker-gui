@@ -33,4 +33,6 @@ export interface Transport {
   attention(badge: string, svg: string): void;
   notify(title: string, body: string, onClick: () => void): void;
   prefs?: DesktopPrefs;
+  // "Abrir pasta" do projeto compose: só no desktop (a web copia o caminho). A mensagem de erro, ou null
+  openDir?(project: string, dir: string): Promise<string | null>;
 }

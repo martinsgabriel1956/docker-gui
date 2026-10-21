@@ -204,3 +204,34 @@ pub async fn prefs_set(
     }
     Ok(())
 }
+
+/// "Abrir pasta" do projeto compose: só a pasta que os labels declaram (a mesma conferência do up e do down), só com
+/// daemon local (com o remoto, a pasta está na outra máquina) e só pasta: o gerenciador de arquivos abre, nada executa.
+/// Err: o texto para o aviso
+#[tauri::command]
+pub async fn open_dir(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    project: String,
+    dir: String,
+) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let ctx = state.ctx();
+    let say = |pt: &str, en: &str| if ctx.lang == stivo_core::Lang::En { en } else { pt }.to_string();
+    if stivo_core::page::where_(&ctx).await.2 {
+        return Err(say(
+            "O daemon é remoto: a pasta fica na outra máquina.",
+            "The daemon is remote: the folder is on the other machine.",
+        ));
+    }
+    stivo_core::router::compose_project(&ctx, &project, &dir)
+        .await
+        .map_err(|r| r.body.as_str().unwrap_or_default().to_string())?;
+    if !std::path::Path::new(&dir).is_dir() {
+        return Err(format!("{} {dir}", say("A pasta não existe mais:", "The folder no longer exists:")));
+    }
+    app.opener().open_path(&dir, None::<&str>).map_err(|e| {
+        log::warn!("abrir a pasta do projeto: {e}");
+        format!("{} {dir}", say("Não consegui abrir a pasta:", "Could not open the folder:"))
+    })
+}

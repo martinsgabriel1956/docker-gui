@@ -19,6 +19,8 @@ tauri = { version = "=2.12.4", features = ["tray-icon", "image-png"] }
 tauri-plugin-single-instance = "=2.5.4"
 tauri-plugin-window-state = "=2.5.0"
 tauri-plugin-log = "=2.10.1"
+# o "Abrir pasta" do projeto compose: chamado só pelo Rust (ipc::open_dir); nenhuma permissão dele vai para a página
+tauri-plugin-opener = "=2.7.2"
 notify-rust = "=4.18.2"
 stivo-core = { path = "core" }
 serde = { version = "=1.0.229", features = ["derive"] }

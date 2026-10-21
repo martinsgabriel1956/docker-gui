@@ -101,4 +101,5 @@ export const T: Transport = {
     set: prefs => invoke('prefs_set', {prefs}).then(() => null, e => String(e)),
     onOpen: open => void listen('open-prefs', open),
   },
+  openDir: (project, dir) => invoke('open_dir', {project, dir}).then(() => null, e => String(e)),
 };

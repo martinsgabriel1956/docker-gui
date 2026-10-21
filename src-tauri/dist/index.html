@@ -1546,7 +1546,8 @@
       get: () => invoke("prefs_get"),
       set: (prefs) => invoke("prefs_set", { prefs }).then(() => null, (e) => String(e)),
       onOpen: (open) => void listen("open-prefs", open)
-    }
+    },
+    openDir: (project2, dir) => invoke("open_dir", { project: project2, dir }).then(() => null, (e) => String(e))
   };
 
   // node_modules/@xterm/xterm/lib/xterm.mjs

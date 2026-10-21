@@ -66,6 +66,7 @@ pub fn run() {
         // abrir o Stivo de novo traz a janela que já existe (e o clique no toast do Windows também passa por aqui)
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| background::show_main(app)))
         .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(tauri_plugin_opener::init())
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Warn)
@@ -86,6 +87,7 @@ pub fn run() {
             background::notify,
             ipc::prefs_get,
             ipc::prefs_set,
+            ipc::open_dir,
         ])
         .setup(|app| {
             let prefs = app.path().app_config_dir().map(|d| Prefs::load(&d)).unwrap_or_default();
