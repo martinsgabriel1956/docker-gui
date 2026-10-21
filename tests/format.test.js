@@ -492,3 +492,25 @@ test('logServices: o prefixo do compose logs vira o serviço pelo nome do contai
   // nome que só parece o padrão (o resto não é número): é container_name, vai inteiro
   assert.deepEqual(Object.fromEntries(f.logServices('shop', [ctr('shop-api-x', 'api')])), {'shop-api-x': 'api'});
 });
+
+const probe = (ExitCode, Start = '', End = '', Output = '') => ({ExitCode, Start, End, Output});
+
+test('probeResult separa passou, falhou e não rodou', () => {
+  assert.equal(f.probeResult(probe(0)), 'ok');
+  assert.equal(f.probeResult(probe(1)), 'fail');
+  assert.equal(f.probeResult(probe(-1)), 'error');  // timeout ou não conseguiu rodar
+  assert.equal(f.probeResult(probe(2)), 'error');
+});
+
+test('probeDuration lê o RFC 3339 do docker com nanossegundos', () => {
+  assert.equal(f.probeDuration(probe(0, '2026-10-21T13:00:00.123456789Z', '2026-10-21T13:00:00.456789012Z')), 333);
+  assert.equal(f.probeDuration(probe(0, '2026-10-21T10:00:00.1-03:00', '2026-10-21T13:00:01.1Z')), 1000);
+  assert.equal(f.probeDuration(probe(0, '2026-10-21T13:00:00Z', '')), null);
+  assert.equal(f.probeDuration(probe(0, '2026-10-21T13:00:01Z', '2026-10-21T13:00:00Z')), null);  // fim antes do início
+});
+
+test('healthSummary conta as falhas', () => {
+  assert.equal(f.healthSummary([probe(1), probe(0), probe(1), probe(-1), probe(0)]), '3 de 5 falharam');
+  assert.equal(f.healthSummary([probe(0), probe(0)]), 'as 2 passaram');
+  assert.equal(f.healthSummary([]), '');
+});

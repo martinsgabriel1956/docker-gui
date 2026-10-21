@@ -292,6 +292,21 @@ export function topTable(text: string): string[][] {
   return [head, ...lines.map(c => [...c.slice(0, head.length - 1), c.slice(head.length - 1).join('  ')])];
 }
 
+// um probe do healthcheck, como o `inspect` guarda (as 5 últimas execuções, a mais velha primeiro)
+export type Probe = {Start: string; End: string; ExitCode: number; Output: string};
+// o docker usa 1 para "falhou" e -1 para timeout ou probe que nem rodou; outro código também é "não rodou como esperado"
+export const probeResult = (p: Probe): 'ok' | 'fail' | 'error' => p.ExitCode === 0 ? 'ok' : p.ExitCode === 1 ? 'fail' : 'error';
+// o Date.parse não garante mais de 3 casas na fração: corta os nanossegundos do docker
+export const probeTime = (s: string): number => Date.parse(s.replace(/(\.\d{3})\d+/, '$1'));
+export function probeDuration(p: Probe): number | null {
+  const d = probeTime(p.End) - probeTime(p.Start);
+  return Number.isFinite(d) && d >= 0 ? d : null;
+}
+export function healthSummary(log: Probe[]): string {
+  const bad = log.filter(p => probeResult(p) !== 'ok').length;
+  return !log.length ? '' : bad ? t`${bad} de ${log.length} falharam` : t`as ${log.length} passaram`;
+}
+
 // criar container: as mesmas regras do run_argv do servidor, para apontar o erro no campo antes de enviar.
 // Quem decide é o servidor, que confere tudo de novo
 export const RESTART = ['no', 'on-failure', 'unless-stopped', 'always'] as const;
