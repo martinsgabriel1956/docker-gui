@@ -8,6 +8,8 @@ import { fileURLToPath } from 'node:url';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '../..');
 const FAKE_BIN = path.join(HERE, 'fake-docker');
+export const BACKEND = process.env.GUI_BACKEND === 'rust' ? 'rust' : 'python';
+const HARNESS = path.join(ROOT, 'src-tauri', 'target', 'debug', process.platform === 'win32' ? 'harness.exe' : 'harness');
 
 type Action = 'start' | 'stop' | 'restart' | 'pause' | 'unpause' | 'remove';
 
@@ -93,7 +95,9 @@ export class Gui {
   // env: variáveis extras para o docker_gui.py (ex.: DOCKER_GUI_TERMINAL=pipe, o terminal do Windows)
   async start(state: DockerState, env: Record<string, string> = {}) {
     this.write(state);
-    const proc = spawn('python3', ['-u', 'docker_gui.py', '--port', '0'], {
+    // GUI_BACKEND=rust: o núcleo do desktop servido pelo harness (npm run build:harness), com o mesmo contrato
+    const [cmd, args] = BACKEND === 'rust' ? [HARNESS, ['--port', '0']] : ['python3', ['-u', 'docker_gui.py', '--port', '0']];
+    const proc = spawn(cmd, args, {
       cwd: ROOT,
       env: { ...process.env, PATH: FAKE_BIN + path.delimiter + process.env.PATH, FAKE_DOCKER_STATE: this.file, BROWSER: 'true',
              DOCKER_GUI_LANG: 'pt', ...env },

@@ -1,0 +1,11 @@
+[workspace]
+# core: o equivalente ao backend do docker_gui.py, sem Tauri (cargo test e o harness dos testes não precisam do WebKit)
+members = ["core"]
+resolver = "3"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
