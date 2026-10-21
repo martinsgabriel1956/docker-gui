@@ -5,6 +5,8 @@ on:
     branches: [main, develop]
   pull_request:
   workflow_dispatch:
+  # a release (release.yml) só sai com tudo isto verde
+  workflow_call:
 
 permissions:
   contents: read
