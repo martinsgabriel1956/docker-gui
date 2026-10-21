@@ -1,0 +1,17 @@
+{
+  "desc": "since=start não vale para o projeto: 400",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [],
+  "request": {
+    "method": "GET",
+    "path": "/api/compose/logs?project=loja&dir=%2Fsrv%2Floja&since=start",
+    "body": null
+  },
+  "response": {
+    "status": 400,
+    "body": "since inválido"
+  }
+}

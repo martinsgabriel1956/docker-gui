@@ -1,0 +1,49 @@
+{
+  "desc": "podman: died vira die, Time em RFC 3339, código e saúde em campos à parte",
+  "lang": "pt",
+  "cli": [
+    "podman"
+  ],
+  "calls": [
+    {
+      "stdout": "{\"Status\": \"died\", \"Time\": \"2026-10-01T10:00:00.123456789-03:00\", \"ContainerExitCode\": 1}\n{\"Status\": \"health_status\", \"Time\": \"2026-10-01T10:00:05Z\", \"HealthStatus\": \"unhealthy\"}\n{\"Status\": \"start\", \"Time\": \"sem data\"}\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "events",
+        "--since",
+        "24h",
+        "--until",
+        "1700000001",
+        "--filter",
+        "container=0123456789ab",
+        "--filter",
+        "type=container",
+        "--format",
+        "json"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/history/0123456789ab",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": [
+      {
+        "t": 1790859600.0,
+        "a": "die",
+        "code": 1,
+        "health": ""
+      },
+      {
+        "t": 1790848805.0,
+        "a": "health_status",
+        "code": null,
+        "health": "unhealthy"
+      }
+    ]
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "desc": "logs que falha: 500 com stdout e stderr juntos",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "parcial\n",
+      "stderr": "Error: No such container\n",
+      "code": 1,
+      "args": [
+        "logs",
+        "--timestamps",
+        "--tail",
+        "500",
+        "0123456789ab"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/logs/0123456789ab",
+    "body": null
+  },
+  "response": {
+    "status": 500,
+    "body": "parcial\nError: No such container\n"
+  }
+}

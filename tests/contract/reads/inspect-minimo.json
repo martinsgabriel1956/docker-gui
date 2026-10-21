@@ -1,0 +1,37 @@
+{
+  "desc": "inspect sem os campos opcionais",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "{}\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "inspect",
+        "--format",
+        "{{json .}}",
+        "0123456789ab"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/inspect/0123456789ab",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "Restart": "no",
+      "Networks": {},
+      "Mounts": [],
+      "Env": [],
+      "OOMKilled": false,
+      "RestartCount": 0,
+      "FinishedAt": ""
+    }
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "desc": "events que falha: 500",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "",
+      "stderr": "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n",
+      "code": 1,
+      "args": [
+        "events",
+        "--since",
+        "24h",
+        "--until",
+        "1700000001",
+        "--filter",
+        "container=0123456789ab",
+        "--filter",
+        "type=container",
+        "--format",
+        "{{json .}}"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/history/0123456789ab",
+    "body": null
+  },
+  "response": {
+    "status": 500,
+    "body": "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"
+  }
+}

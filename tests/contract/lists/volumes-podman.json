@@ -1,0 +1,47 @@
+{
+  "desc": "podman: sem system df -v (não junta --verbose e --format)",
+  "lang": "pt",
+  "cli": [
+    "podman"
+  ],
+  "calls": [
+    {
+      "stdout": "[{\"Name\": \"dados\", \"Driver\": \"local\"}]",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "volume",
+        "ls",
+        "--format",
+        "json"
+      ]
+    },
+    {
+      "stdout": "",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "ps",
+        "-a",
+        "-q",
+        "--no-trunc"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/volumes",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": [
+      {
+        "Name": "dados",
+        "Driver": "local",
+        "Size": "",
+        "Containers": []
+      }
+    ]
+  }
+}

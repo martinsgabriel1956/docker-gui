@@ -1,0 +1,34 @@
+{
+  "desc": "ps dos labels que falha: 500",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "",
+      "stderr": "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n",
+      "code": 1,
+      "args": [
+        "ps",
+        "-a",
+        "--filter",
+        "label=com.docker.compose.project",
+        "--format",
+        "[{{json (.Label \"com.docker.compose.project\")}},{{json (.Label \"com.docker.compose.project.working_dir\")}},{{json (.Label \"com.docker.compose.project.config_files\")}},{{json (.Label \"com.docker.compose.service\")}}]"
+      ]
+    }
+  ],
+  "request": {
+    "method": "POST",
+    "path": "/api/compose/down",
+    "body": {
+      "project": "loja",
+      "dir": "/srv/loja"
+    }
+  },
+  "response": {
+    "status": 500,
+    "body": "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "desc": "limpeza que falha: 500",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "",
+      "stderr": "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n",
+      "code": 1,
+      "args": [
+        "image",
+        "prune",
+        "-a",
+        "-f"
+      ]
+    }
+  ],
+  "request": {
+    "method": "POST",
+    "path": "/api/prune/images",
+    "body": null
+  },
+  "response": {
+    "status": 500,
+    "body": "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "desc": "nenhum container: lista vazia",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "ps",
+        "-a",
+        "--format",
+        "{{json .}}"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/containers",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": []
+  }
+}

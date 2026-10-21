@@ -1,0 +1,48 @@
+{
+  "desc": "docker ps: um JSON por linha passa como veio",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "{\"ID\": \"0123456789ab\", \"Names\": \"web\", \"Image\": \"nginx:1.27\", \"State\": \"running\", \"Status\": \"Up 5 minutes\", \"Ports\": \"127.0.0.1:8080->80/tcp\", \"Labels\": \"\"}\n{\"ID\": \"abcdef012345\", \"Names\": \"db\", \"Image\": \"postgres:16\", \"State\": \"exited\", \"Status\": \"Exited (137) 2 minutes ago\", \"Ports\": \"\", \"Labels\": \"com.docker.compose.project=loja,com.docker.compose.service=db\"}\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "ps",
+        "-a",
+        "--format",
+        "{{json .}}"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/containers",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": [
+      {
+        "ID": "0123456789ab",
+        "Names": "web",
+        "Image": "nginx:1.27",
+        "State": "running",
+        "Status": "Up 5 minutes",
+        "Ports": "127.0.0.1:8080->80/tcp",
+        "Labels": ""
+      },
+      {
+        "ID": "abcdef012345",
+        "Names": "db",
+        "Image": "postgres:16",
+        "State": "exited",
+        "Status": "Exited (137) 2 minutes ago",
+        "Ports": "",
+        "Labels": "com.docker.compose.project=loja,com.docker.compose.service=db"
+      }
+    ]
+  }
+}

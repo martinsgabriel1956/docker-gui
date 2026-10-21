@@ -1,0 +1,41 @@
+{
+  "desc": "o ps de quem usa falha: 500",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "{\"ID\": \"sha256:f00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafebeef\", \"Repository\": \"nginx\", \"Tag\": \"1.27\", \"Size\": \"187MB\", \"CreatedAt\": \"2026-09-18 00:00:00 +0000 UTC\"}\n{\"ID\": \"sha256:f00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafebeef\", \"Repository\": \"nginx\", \"Tag\": \"latest\", \"Size\": \"187MB\", \"CreatedAt\": \"2026-09-18 00:00:00 +0000 UTC\"}\n{\"ID\": \"sha256:1111111111111111111111111111111111111111111111111111111111111111\", \"Repository\": \"<none>\", \"Tag\": \"<none>\", \"Size\": \"5MB\", \"CreatedAt\": \"data estranha\"}\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "image",
+        "ls",
+        "--no-trunc",
+        "--format",
+        "{{json .}}"
+      ]
+    },
+    {
+      "stdout": "",
+      "stderr": "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n",
+      "code": 1,
+      "args": [
+        "ps",
+        "-a",
+        "-q",
+        "--no-trunc"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/images",
+    "body": null
+  },
+  "response": {
+    "status": 500,
+    "body": "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"
+  }
+}

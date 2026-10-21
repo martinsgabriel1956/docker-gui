@@ -1,0 +1,27 @@
+{
+  "desc": "top de container parado: 500 com o stderr",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "",
+      "stderr": "Error response from daemon: container is not running\n",
+      "code": 1,
+      "args": [
+        "top",
+        "0123456789ab"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/top/0123456789ab",
+    "body": null
+  },
+  "response": {
+    "status": 500,
+    "body": "Error response from daemon: container is not running"
+  }
+}

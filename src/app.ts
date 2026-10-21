@@ -6,6 +6,8 @@ import {
   sparkPoints, status, tone, topTable, trend, usage, workingDir,
 } from './format';
 import {LOCALE, t, translatePage} from './i18n';
+import {T} from '#transport';
+import type {Closer, Term} from './transport';
 import {Terminal} from '@xterm/xterm';
 import {FitAddon} from '@xterm/addon-fit';
 import XTERM_CSS from '@xterm/xterm/css/xterm.css';  // string (build.py usa --loader:.css=text): nada de CDN
@@ -13,15 +15,8 @@ import XTERM_CSS from '@xterm/xterm/css/xterm.css';  // string (build.py usa --l
 // a página é estática: todo seletor usado aqui existe no page.html
 const $ = <T extends HTMLElement = HTMLElement>(s: string): T => document.querySelector(s) as T;
 
-// token da execução: chega no #t=... do link que o servidor abre/imprime. Fica no localStorage desta origem
-// (que inclui a porta, ao contrário de cookie) para novas abas funcionarem, e sai da URL no primeiro render.
-const TOKEN = (() => {
-  const t = new URLSearchParams(location.hash.slice(1)).get('t');
-  try { if (t) localStorage.setItem('docker-gui-token', t); return t || localStorage.getItem('docker-gui-token') || ''; }
-  catch { return t || ''; }
-})();
-const api = (path: string, opts: RequestInit = {}) =>
-  fetch(path, {...opts, headers: {...opts.headers, 'X-Docker-GUI-Token': TOKEN}});
+// leitura simples (GET): o resto passa por T.request com o método e o corpo
+const api = (path: string) => T.request('GET', path);
 
 type Action = 'start' | 'stop' | 'restart' | 'pause' | 'unpause' | 'remove';
 type RowAction = Action | 'logs';
@@ -83,7 +78,7 @@ const ghost = () => BTN.replace(' ring-1 ring-line-strong/80', '');
 const BTN = 'px-2.5 py-1 coarse:min-h-11 coarse:px-4 coarse:text-sm rounded text-xs font-medium ring-1 ring-line-strong/80 transition-[background-color] motion-reduce:transition-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent aria-disabled:opacity-40 aria-disabled:cursor-wait';
 let data: Container[] = [], busy = new Map<string, Action>(), composing = new Map<string, ComposeAction>(), errors = new Map<string, RowError>(), lastOk: Date | null = null,
     problem = '', problemKind: ProblemKind | '' = '', only: Bucket | '' = '',
-    toastTimer: number | undefined, logId: string | null = null, stream: EventSource | null = null, pending: string[] = [],
+    toastTimer: number | undefined, logId: string | null = null, stream: Closer | null = null, pending: string[] = [],
     arming: Arming | null = null, lastSay = '', dirty = false, seen: Set<string> | null = null,
     // modal de logs com o projeto compose inteiro (logId fica null); a pasta vai junto para o servidor conferir
     logProject: {project: string; dir: string} | null = null;
@@ -135,7 +130,7 @@ async function load() {
   lastLoad = Date.now();
   try {
     const r = await api('/api/containers'), j: unknown = await r.json();
-    if (r.status === 401) return showProblem([t`Esta aba não tem o token do Docker GUI.`,
+    if (r.status === 401) return showProblem([t`Esta aba não tem o token do Stivo.`,
       t`Abra o link com ${code('#t=…')} que aparece no terminal onde você rodou ${code('python3 docker_gui.py')}. O token muda a cada execução.`, j, 'auth']);
     if (!r.ok) return showProblem(/permission denied/i.test(String(j))
       ? [t`Seu usuário não tem acesso ao Docker.`, t`Rode ${code('sudo usermod -aG docker $USER')} e entre de novo na sessão.`, j, 'perm']
@@ -155,8 +150,9 @@ async function load() {
     seen = new Set(data.filter(isProblem).map(c => c.ID));
     showProblem(null);
   } catch (e) {
-    showProblem([lastOk ? t`O servidor do Docker GUI parou de responder.` : t`Não consegui conectar ao servidor do Docker GUI.`,
-      t`Rode ${code('python3 docker_gui.py')} de novo; a página volta sozinha.`, (e as Error).message, 'server']);
+    showProblem([lastOk ? t`O servidor do Stivo parou de responder.` : t`Não consegui conectar ao servidor do Stivo.`,
+      T.desktop ? t`Saia do Stivo pelo menu da bandeja e abra de novo.` : t`Rode ${code('python3 docker_gui.py')} de novo; a página volta sozinha.`,
+      (e as Error).message, 'server']);
   }
 }
 
@@ -164,7 +160,7 @@ async function load() {
 // rede de segurança (o docker não avisa a passagem do tempo: "Up 5 minutes" -> "Up 6 minutes"). Sem o stream
 // (recusado, caiu, podman sem events), poll de 2 s
 const POLL = 2000, POLL_LIVE = 30000, COALESCE = 200;
-let events: EventSource | null = null, live = false, lastLoad = 0, evTimer: number | undefined, evRetry: number | undefined,
+let events: Closer | null = null, live = false, lastLoad = 0, evTimer: number | undefined, evRetry: number | undefined,
     loading: Promise<void> | null = null, again = false;
 // aba escondida não consulta o docker (a não ser com as notificações ligadas: é para elas que serve)
 const watching = () => !document.hidden || notifying();
@@ -178,19 +174,19 @@ function refresh() {
 function connectEvents() {
   clearTimeout(evRetry); evRetry = undefined;
   if (events || !watching()) return;
-  // EventSource não manda header: o token vai na query, como no ao vivo dos logs
-  const es = events = new EventSource(`/api/events/stream?t=${encodeURIComponent(TOKEN)}`);
-  es.onopen = () => { live = true; showLive(); refresh(); };  // o que mudou antes de o docker events começar a ouvir
-  // uma rajada (compose up: create, start... de cada serviço) vira uma consulta só, no máximo COALESCE ms depois
-  es.onmessage = () => {
-    if (watching() && evTimer === undefined) evTimer = setTimeout(() => { evTimer = undefined; refresh(); }, COALESCE);
-  };
   // desiste por um tempo e volta ao poll de 2 s (que mostra o erro, se houver); "end" é o docker events que
   // terminou (daemon fora do ar, podman sem events...)
   const drop = () => { closeEvents(); evRetry = setTimeout(connectEvents, POLL_LIVE); };
-  es.addEventListener('end', drop);
-  // queda: o EventSource reconecta sozinho, com o poll de 2 s enquanto isso; CLOSED é recusa (token, limite, erro)
-  es.onerror = () => { live = false; showLive(); if (es.readyState === EventSource.CLOSED) drop(); };
+  events = T.stream('/api/events/stream', {}, {
+    open: () => { live = true; showLive(); refresh(); },  // o que mudou antes de o docker events começar a ouvir
+    // uma rajada (compose up: create, start... de cada serviço) vira uma consulta só, no máximo COALESCE ms depois
+    data: () => {
+      if (watching() && evTimer === undefined) evTimer = setTimeout(() => { evTimer = undefined; refresh(); }, COALESCE);
+    },
+    end: drop,
+    // queda: reconecta sozinho, com o poll de 2 s enquanto isso; closed é recusa (token, limite, erro)
+    error: closed => { live = false; showLive(); if (closed) drop(); },
+  });
 }
 function closeEvents() { events?.close(); events = null; live = false; showLive(); }
 // no cabeçalho: a lista vem dos eventos do docker (muda na hora) ou do poll de 2 s (o docker events caiu ou não existe)
@@ -202,8 +198,9 @@ function showLive() {
 
 // notificação do sistema só por pedido explícito (botão no cabeçalho) e só para quem acabou de entrar na faixa
 // de atenção; com a página em foco ela não aparece, a lista e o favicon já mostram
-const canAsk = () => isSecureContext && 'Notification' in window && Notification.permission === 'default';
-const notifying = () => 'Notification' in window && Notification.permission === 'granted';
+const canAsk = () => !T.desktop && isSecureContext && 'Notification' in window && Notification.permission === 'default';
+// no desktop a notificação é do sistema, sem pedir permissão (PRD RF2.4)
+const notifying = () => T.desktop || ('Notification' in window && Notification.permission === 'granted');
 async function askNotify() {
   const ok = await Notification.requestPermission() === 'granted';
   $('#notify').hidden = !canAsk();
@@ -212,19 +209,20 @@ async function askNotify() {
 }
 function notify(cs: Container[]) {
   if (!cs.length || !notifying() || (!document.hidden && document.hasFocus())) return;
-  try {
-    const n = new Notification(cs.length === 1 ? t`${cs[0].Names} precisa de atenção` : t`${cs.length} containers precisam de atenção`,
-      {body: cs.length === 1 ? status(cs[0])[0] : cs.map(c => c.Names).join(', ')});
-    n.onclick = () => { focus(); n.close(); };
-  } catch { /* Chrome no Android só notifica via service worker; o favicon continua avisando */ }
+  T.notify(cs.length === 1 ? t`${cs[0].Names} precisa de atenção` : t`${cs.length} containers precisam de atenção`,
+    // o clique traz a página e põe o foco no Logs de quem caiu (a linha dele na faixa de atenção, que vem primeiro)
+    cs.length === 1 ? status(cs[0])[0] : cs.map(c => c.Names).join(', '),
+    () => { focus(); document.querySelector<HTMLElement>(`[data-id="${cs[0].ID}"][data-a="logs"]`)?.focus(); });
 }
 
-// favicon: o prompt (>_) no ciano do acento, com a contagem da faixa de atenção por cima ("!" quando os dados estão velhos)
-const icon = document.head.appendChild(Object.assign(document.createElement('link'), {rel: 'icon'}));
+// ícone do Stivo (src-tauri/icons/stivo.svg: a pilha de contêineres com o cursor na última linha), com a contagem da
+// faixa de atenção por cima ("!" quando os dados estão velhos). Na web vira o favicon; no desktop, a bandeja
+const ICON = '<rect x="1" y="1" width="22" height="22" rx="5" fill="#141a22"/><rect x="5" y="5.4" width="14" height="3.6" rx="1" fill="#3fd0dc"/>'
+  + '<rect x="5" y="10.2" width="14" height="3.6" rx="1" fill="#566273"/><rect x="5" y="15" width="8.6" height="3.6" rx="1" fill="#566273"/>'
+  + '<rect x="15.2" y="15" width="2.6" height="3.6" rx="0.6" fill="#3fd0dc"/>';
 function setIcon(badge: string) {
-  const href = 'data:image/svg+xml,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"><rect x="1" y="2.5" width="22" height="19" rx="3" fill="#141a22"/><path d="M5.5 8.5 9.5 12l-4 3.5M11.5 16h6" stroke="#3fd0dc" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>${badge
+  T.attention(badge, `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none">${ICON}${badge
     ? `<circle cx="16.5" cy="16.5" r="7.5" fill="#dc2626" stroke="none"/><text x="16.5" y="20" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="700" fill="#fff" stroke="none">${badge}</text>` : ''}</svg>`);
-  if (icon.getAttribute('href') !== href) icon.href = href;  // trocar o href a cada poll faz a aba piscar
 }
 
 // CPU e memória vêm à parte e mais devagar que a lista: o docker stats leva ~2 s para medir. Tudo indexado
@@ -272,7 +270,7 @@ if (REMOTE) {
   $('#where').classList.replace('text-muted', 'text-warn-fg');
   $('#where').classList.replace('ring-line-strong', 'ring-warn/60');
 }
-const TITLE = CTX && CTX !== 'default' ? `Docker GUI · ${CTX}` : 'Docker GUI';
+const TITLE = CTX && CTX !== 'default' ? `Stivo · ${CTX}` : 'Stivo';
 // endereço das portas: localhost, ou o host do daemon remoto (tcp://10.0.0.5:2376, ssh://eu@servidor -> 10.0.0.5, servidor)
 const PORT_HOST = (() => { try { return REMOTE && new URL(WHERE.host!).hostname || 'localhost'; } catch { return 'localhost'; } })();
 // remoto: a faixa âmbar fica no topo o tempo todo, e o "só esta máquina" do Novo container passa a ser a de lá
@@ -751,12 +749,12 @@ document.addEventListener('selectionchange', () => { if (dirty && !selectingRows
 async function run(a: Action, c: Container): Promise<boolean> {
   errors.delete(c.ID); busy.set(c.ID, a); render();
   try {
-    const r = await api(`/api/${a}/${c.ID}`, {method: 'POST'});
+    const r = await T.request('POST', `/api/${a}/${c.ID}`);
     const msg: string = await r.json();
     if (!r.ok) errors.set(c.ID, {msg: msg || t`erro sem mensagem`, state: c.State, what: LABEL[a]});
     return r.ok;
   } catch {
-    errors.set(c.ID, {msg: t`Sem resposta do servidor do Docker GUI.`, state: c.State, what: LABEL[a]});
+    errors.set(c.ID, {msg: t`Sem resposta do servidor do Stivo.`, state: c.State, what: LABEL[a]});
     return false;
   } finally { busy.delete(c.ID); render(); }
 }
@@ -932,23 +930,6 @@ function confirmArm() {
   run();
 }
 
-// a saída do compose chega um JSON por linha: cada linha da saída é uma string, e o fim é {code}. Sem o fim (o
-// servidor caiu no meio), -1
-async function readOut(r: Response, p: string, o: Out): Promise<number> {
-  const reader = r.body!.pipeThrough(new TextDecoderStream()).getReader();
-  let rest = '', code = -1;
-  for (;;) {
-    const {value, done} = await reader.read();
-    if (done) return code;
-    const lines = (rest + value).split('\n');
-    rest = lines.pop()!;
-    for (const l of lines) {
-      const v: string | {code: number} = JSON.parse(l);
-      if (typeof v === 'string') addOut(p, o, v + '\n'); else code = v.code;
-    }
-  }
-}
-
 // ponytail: guarda só o fim de um build enorme (OUT_MAX caracteres); o motivo da falha fica nas últimas linhas
 const OUT_MAX = 200_000;
 const outs = new Map<string, Out>();
@@ -997,17 +978,18 @@ async function composeAct(a: ComposeAction, p: string, svc = '', sure = false): 
   composing.set(p, a); outs.set(p, o); ids.forEach(id => busy.set(id, 'restart')); render();
   $('#shown').textContent = `${COMPOSE_VERB[a]} ${svc || p}`;
   try {
-    const r = await api(`/api/compose/${a}`, {method: 'POST', headers: {'Content-Type': 'application/json'},
-                                              body: JSON.stringify({project: p, dir: workingDir(c), ...(svc ? {service: svc} : {})})});
+    // a saída chega linha a linha (NDJSON) e o fim traz o código de saída
+    const r = await T.ndjson(`/api/compose/${a}`, {project: p, dir: workingDir(c), ...(svc ? {service: svc} : {})}, l => addOut(p, o, l + '\n'));
     // erro antes do compose rodar (projeto ou serviço que não existe): JSON com a mensagem, sem saída para mostrar
-    const msg: string = r.ok ? (o.code = await readOut(r, p, o), o.text) : (outs.delete(p), await r.json());
-    ok = r.ok && o.code === 0;
+    const okStatus = r.status < 400;
+    const msg = okStatus ? (o.code = r.code, o.text) : (outs.delete(p), String(r.error));
+    ok = okStatus && o.code === 0;
     // o compose escreve o progresso no stderr: no erro, a última linha é a que explica (a saída inteira fica na tela)
     toast(ok ? ids.length ? t`${p}: ${what} concluído, conferindo se ficou de pé…` : t`${p}: ${what} concluído.`
              : t`${p}: ${what} falhou. ${errHint(msg) || msg.trim().split('\n').at(-1) || t`Erro sem mensagem.`}`, ok);
   } catch {
     o.code = -1;
-    toast(t`${p}: sem resposta do servidor do Docker GUI.`);
+    toast(t`${p}: sem resposta do servidor do Stivo.`);
   }
   // deu certo: o aviso basta. Falhou: a saída fica aberta até o ×, com o motivo
   if (ok || !o.text) outs.delete(p);
@@ -1372,7 +1354,7 @@ async function fetchLogs(more = false) {
     if (buf.length) paint();
     else { lb.textContent = r.ok ? since ? t`Nada no log nesse período.` : t`(sem logs)` : t`Não consegui ler os logs: ${j}`; renderHits(); }
     $('#lmeta').textContent = t`${hist().replace(/^./, c => c.toUpperCase())} · atualizado às ${new Date().toLocaleTimeString(LOCALE)}`;
-  } catch { buf = []; lb.textContent = t`Não consegui carregar os logs. O servidor do Docker GUI está rodando?`; }
+  } catch { buf = []; lb.textContent = t`Não consegui carregar os logs. O servidor do Stivo está rodando?`; }
   renderMore();
   if (more) lb.scrollTop = lb.scrollHeight - fromEnd;
   else if (atEnd) lb.scrollTop = lb.scrollHeight;
@@ -1446,26 +1428,26 @@ function flushLogs() {
   if (atEnd) lb.scrollTop = lb.scrollHeight;
 }
 
-// ao vivo: Server-Sent Events com o docker logs -f. Fechar o EventSource derruba a conexão e o servidor mata o processo
+// ao vivo: o docker logs -f em stream (SSE na web, Channel no desktop). Fechar o stream mata o processo no servidor
 function toggleFollow(on = !stream, why = '') {
   const was = !!stream;
   stream?.close(); stream = null; streamOpen = false;
   if (was) flushLogs();  // o que já chegou entra antes de parar
   if (on) {
     tailAt = Math.min(tailAt, LIVE_TAILS - 1); complete = false;
-    // EventSource não manda header: o token vai na query, só nestas rotas
-    const q = new URLSearchParams({...logProject, t: TOKEN, tail: TAILS[tailAt], ...(since ? {since} : {})});
-    const es = stream = new EventSource(logProject ? `/api/compose/logs/stream?${q}` : `/api/logs/${logId}/stream?${q}`);
-    // cada conexão (inclusive a reconexão automática) recomeça do histórico pedido: limpa para não duplicar
-    es.onopen = () => {
-      streamOpen = true;
-      pending = []; buf = []; shown = []; prevLv = new Map(); hits = hitLines = 0; marked = false; $('#lb').textContent = ''; renderHits();
-      $('#lmeta').textContent = t`Ao vivo · ${hist()} e as novas`;
-    };
-    es.onmessage = e => { if (pending.push(JSON.parse(e.data)) === 1) setTimeout(flushLogs, 50); };
-    es.addEventListener('end', () => toggleFollow(false, logProject ? t`os containers pararam` : t`o container parou`));
-    // queda de rede: o EventSource reconecta sozinho; CLOSED é recusa do servidor (token, erro)
-    es.onerror = () => { if (es.readyState === EventSource.CLOSED) toggleFollow(false, t`falhou`); else $('#lmeta').textContent = t`Ao vivo · reconectando…`; };
+    const q = {...logProject, tail: TAILS[tailAt], ...(since ? {since} : {})};
+    stream = T.stream(logProject ? '/api/compose/logs/stream' : `/api/logs/${logId}/stream`, q, {
+      // cada conexão (inclusive a reconexão automática) recomeça do histórico pedido: limpa para não duplicar
+      open: () => {
+        streamOpen = true;
+        pending = []; buf = []; shown = []; prevLv = new Map(); hits = hitLines = 0; marked = false; $('#lb').textContent = ''; renderHits();
+        $('#lmeta').textContent = t`Ao vivo · ${hist()} e as novas`;
+      },
+      data: line => { if (pending.push(JSON.parse(line)) === 1) setTimeout(flushLogs, 50); },
+      end: () => toggleFollow(false, logProject ? t`os containers pararam` : t`o container parou`),
+      // queda de rede: reconecta sozinho; closed é recusa do servidor (token, erro)
+      error: closed => { if (closed) toggleFollow(false, t`falhou`); else $('#lmeta').textContent = t`Ao vivo · reconectando…`; },
+    });
   } else if (was) $('#lmeta').textContent = t`Ao vivo parado às ${new Date().toLocaleTimeString(LOCALE)}${why ? ` · ${why}` : ''}`;
   $('#follow').setAttribute('aria-pressed', String(on));
   $('#refresh').setAttribute('aria-disabled', String(on));  // com o ao vivo ligado, Atualizar é redundante (mas continua no Tab)
@@ -1582,12 +1564,12 @@ function afterClose() {
                                                  : `[data-id="${logId}"][data-a="logs"]`)?.focus();
 }
 
-// terminal no navegador: xterm.js <-> WebSocket <-> `docker exec` com TTY (num PTY do servidor ou, no Windows,
+// terminal no navegador: xterm.js <-> transporte (WebSocket ou IPC) <-> `docker exec` com TTY (num PTY do servidor ou, no Windows,
 // aberto dentro do container)
 const xtermCss = document.createElement('style');
 xtermCss.textContent = XTERM_CSS;
 document.head.append(xtermCss);
-let sess: {id: string; term: Terminal; ws: WebSocket; ro: ResizeObserver} | null = null;
+let sess: {id: string; term: Terminal; ws: Term; ro: ResizeObserver} | null = null;
 
 function openShell(id: string) {
   const c = data.find(c => c.ID === id);
@@ -1596,23 +1578,20 @@ function openShell(id: string) {
   $('#shell-status').textContent = t`Conectando…`;
   $<HTMLDialogElement>('#shell').showModal();
   const term = new Terminal({cursorBlink: true, fontSize: 13, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace'});
-  const fit = new FitAddon(), enc = new TextEncoder();
+  const fit = new FitAddon();
   term.loadAddon(fit);
   term.open($('#shell-box'));
   fit.fit();
-  // o WebSocket do navegador não manda header custom: o token vai na query
-  const ws = new WebSocket(`ws://${location.host}/api/exec/${id}?t=${encodeURIComponent(TOKEN)}`);
-  ws.binaryType = 'arraybuffer';
   // a primeira mensagem tem que ser o tamanho: o servidor só sobe o docker exec depois dela
-  const size = () => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({cols: term.cols, rows: term.rows})); };
-  ws.onopen = () => { size(); $('#shell-status').textContent = t`Conectado. Esc vai para o terminal; feche pelo ×.`; term.focus(); };
-  // binário é a saída do terminal; texto é um aviso do servidor (no Windows, imagem sem TTY), que vai para o status
-  ws.onmessage = e => {
-    if (typeof e.data === 'string') $('#shell-status').textContent = e.data;
-    else term.write(new Uint8Array(e.data));
-  };
-  ws.onclose = () => { $('#shell-status').textContent = t`Sessão encerrada.`; };
-  term.onData(d => { if (ws.readyState === WebSocket.OPEN) ws.send(enc.encode(d)); });
+  const size = () => ws.resize(term.cols, term.rows);
+  const ws = T.terminal(id, {
+    open: () => { size(); $('#shell-status').textContent = t`Conectado. Esc vai para o terminal; feche pelo ×.`; term.focus(); },
+    data: b => term.write(b),
+    // aviso do servidor (no Windows, imagem sem TTY), que vai para o status
+    notice: text => { $('#shell-status').textContent = text; },
+    close: () => { $('#shell-status').textContent = t`Sessão encerrada.`; },
+  });
+  term.onData(d => ws.send(d));
   term.onResize(size);
   const ro = new ResizeObserver(() => fit.fit());
   ro.observe($('#shell-box'));
@@ -1623,7 +1602,6 @@ function closeShell() {
   if (!sess) return;
   const {id, term, ws, ro} = sess;
   sess = null;
-  ws.onclose = ws.onmessage = null;  // a sessão já foi: nada de escrever num terminal descartado
   ws.close();
   ro.disconnect();
   term.dispose();
@@ -1674,9 +1652,9 @@ async function createContainer(e: SubmitEvent) {
   $('#shown').textContent = t`Criando ${label}…`;
   let ok = false, msg: string;
   try {
-    const r = await api('/api/run', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(spec)});
+    const r = await T.request('POST', '/api/run', spec);
     msg = await r.json(); ok = r.ok;
-  } catch { msg = t`Sem resposta do servidor do Docker GUI.`; }
+  } catch { msg = t`Sem resposta do servidor do Stivo.`; }
   creating = false;
   go.removeAttribute('aria-disabled');
   $<HTMLFieldSetElement>('#create-fields').disabled = false;
@@ -1746,7 +1724,7 @@ async function loadDf() {
   try {
     const r = await api('/api/df'), j: unknown = await r.json();
     disk = r.ok ? j as DiskUsage[] : t`Não consegui ler o uso de disco: ${j}`;
-  } catch { disk = t`Não consegui ler o uso de disco. O servidor do Docker GUI está rodando?`; }
+  } catch { disk = t`Não consegui ler o uso de disco. O servidor do Stivo está rodando?`; }
   render();
 }
 
@@ -1782,12 +1760,12 @@ async function prune(k: DiskKind, sure = false): Promise<unknown> {
   diskBusy = k; render();
   $('#shown').textContent = t`Limpando ${label.toLowerCase()}…`;
   try {
-    const r = await api('/api/prune/' + k, {method: 'POST'}), msg: string = await r.json();
+    const r = await T.request('POST', '/api/prune/' + k), msg: string = await r.json();
     // image/volume prune terminam em "Total reclaimed space: 1.2GB"; builder prune, em "Total: 1.2GB"
     const freed = msg.match(/Total(?: reclaimed space)?:\s*(\S+)/)?.[1];
     if (r.ok) toast(`${label}: ${freed ? t`${freed} liberados` : t`limpeza feita`}.`, true);
     else toast(t`Não deu para limpar ${label.toLowerCase()}: ${msg || t`erro sem mensagem`}`);
-  } catch { toast(t`Sem resposta do servidor do Docker GUI.`); }
+  } catch { toast(t`Sem resposta do servidor do Stivo.`); }
   diskBusy = '';
   await Promise.all([loadTab(), k === 'containers' && load()]);
 }
@@ -1815,7 +1793,7 @@ async function loadObjects(k: ObjKind) {
   try {
     const r = await api('/api/' + k), j: unknown = await r.json();
     objs[k] = r.ok ? j as Obj[] : t`Não consegui ler a lista: ${j}`;
-  } catch { objs[k] = t`Não consegui ler a lista. O servidor do Docker GUI está rodando?`; }
+  } catch { objs[k] = t`Não consegui ler a lista. O servidor do Stivo está rodando?`; }
   render();
 }
 
@@ -1892,14 +1870,14 @@ async function rmObj(k: ObjKind, r: string, sure = false): Promise<unknown> {
   $('#shown').textContent = t`Removendo ${one} ${name}…`;
   let ok = false;
   try {
-    const res = await api(`/api/rm/${rm}/${encodeURIComponent(r)}`, {method: 'POST'}), msg: string = await res.json();
+    const res = await T.request('POST', `/api/rm/${rm}/${encodeURIComponent(r)}`), msg: string = await res.json();
     ok = res.ok;
     if (ok) toast(`${label} ${name} ${done}.`, true);
     else {
       objErr.set(id, msg || t`erro sem mensagem`);
       toast(t`Não deu para remover ${one} ${name}. ${errHint(msg) || t`O erro ficou na lista.`}`);
     }
-  } catch { toast(t`Sem resposta do servidor do Docker GUI.`); }
+  } catch { toast(t`Sem resposta do servidor do Stivo.`); }
   objBusy = '';
   await loadTab();  // imagem e volume mudam o df também
   if (ok) (document.querySelector<HTMLElement>(`[data-id="${near}"][data-a="rm"]`) || $('#tab-' + k)).focus();
@@ -1907,9 +1885,42 @@ async function rmObj(k: ObjKind, r: string, sure = false): Promise<unknown> {
 
 // o HTML gerado chama estas funções pelo nome (onclick="act(...)"); com módulos nada é global, então
 // esta lista é a interface completa entre o HTML e o código
+// preferências (só no desktop): salvar recarrega a janela com o CLI, o contexto e o idioma novos
+async function openPrefs() {
+  const p = await T.prefs!.get(), sel = (k: string) => $<HTMLSelectElement>(`#pref-${k}`);
+  const ctx = sel('context');
+  ctx.replaceChildren(ctx.options[0], ...p.contexts.map(c => Object.assign(document.createElement('option'), {value: c, textContent: c})));
+  sel('cli').value = p.cli ?? '';
+  ctx.value = p.context && p.contexts.includes(p.context) ? p.context : '';
+  sel('lang').value = p.lang ?? '';
+  $<HTMLInputElement>('#pref-notify').checked = p.notifications;
+  prefsContext();
+  $('#prefs-msg').textContent = '';
+  $<HTMLDialogElement>('#prefs').showModal();
+  sel('cli').focus();
+}
+// o contexto é do docker: com o podman, a linha some
+function prefsContext() { $('#pref-context-row').hidden = $<HTMLSelectElement>('#pref-cli').value === 'podman'; }
+async function savePrefs(e: SubmitEvent) {
+  e.preventDefault();
+  const v = (k: string) => $<HTMLSelectElement>(`#pref-${k}`).value || null, go = $('#prefs-go');
+  if (go.getAttribute('aria-disabled') === 'true') return;
+  go.setAttribute('aria-disabled', 'true');
+  const err = await T.prefs!.set({cli: v('cli'), context: v('cli') === 'podman' ? null : v('context'), lang: v('lang'),
+                                  notifications: $<HTMLInputElement>('#pref-notify').checked});
+  go.removeAttribute('aria-disabled');
+  if (err) $('#prefs-msg').textContent = err;
+}
+if (T.prefs) {
+  $('#prefs-open').hidden = false;
+  T.prefs.onOpen(() => void openPrefs());
+  $('#prefs-form').addEventListener('submit', savePrefs);
+  $('#pref-cli').addEventListener('change', prefsContext);
+}
+
 Object.assign(window, {
   ackFail, act, afterClose, askNotify, confirmArm, bulkAct, clearFilters, clearSel, closeOut, composeAct, copyAddr, copyExec, copyLogs, disarm, downloadLogs,
-  filterBy, followClick, loadHealth, loadHistory, loadInspect, loadMore, loadTop, logPick, menuPick, openCreate, openShell, pickTab, placeMenu, projectLogs,
+  filterBy, followClick, loadHealth, loadHistory, loadInspect, loadMore, loadTop, logPick, menuPick, openCreate, openPrefs, openShell, pickTab, placeMenu, projectLogs,
   prune, refreshLogs, rmObj, serviceAct, runToastAction, selectAll, sinceChange, stackAct, toggleSel,
 });
 

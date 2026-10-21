@@ -1,0 +1,17 @@
+{
+  "desc": "rota que não existe: 404",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [],
+  "request": {
+    "method": "GET",
+    "path": "/api/nada",
+    "body": null
+  },
+  "response": {
+    "status": 404,
+    "body": "not found"
+  }
+}

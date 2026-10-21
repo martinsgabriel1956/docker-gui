@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Gerenciador de containers Docker no navegador. Só stdlib + docker CLI."""
+"""Stivo: containers Docker e Podman no navegador. Só stdlib + docker CLI."""
 import argparse
 import base64
 import errno
@@ -165,13 +165,13 @@ EN = {
     "serviço não encontrado no projeto": "service not found in the project",
     "Porta {port} ocupada. Escolha outra com --port.": "Port {port} is in use. Pick another with --port.",
     "Portas {first}-{last} ocupadas. Escolha uma com --port.": "Ports {first}-{last} are in use. Pick one with --port.",
-    "Gerenciador de containers Docker no navegador. Só stdlib + docker CLI.": "Docker container manager in the browser. Stdlib + docker CLI only.",
+    "Stivo: containers Docker e Podman no navegador. Só stdlib + docker CLI.": "Stivo: Docker and Podman containers in the browser. Stdlib + docker CLI only.",
     "porta local (padrão: {port}, ou a próxima livre)": "local port (default: {port}, or the next free one)",
     "CLI de containers: docker ou podman (padrão: $DOCKER_GUI_CLI ou docker)": "container CLI: docker or podman (default: $DOCKER_GUI_CLI or docker)",
     "contexto do docker (docker --context); sem ele vale o DOCKER_CONTEXT ou o atual": "docker context (docker --context); without it, DOCKER_CONTEXT or the current one",
     "língua da página e das mensagens: pt ou en (padrão: $DOCKER_GUI_LANG ou o locale do sistema)":
         "language of the page and messages: pt or en (default: $DOCKER_GUI_LANG or the system locale)",
-    "Docker GUI em {url}  (Ctrl+C para sair)": "Docker GUI at {url}  (Ctrl+C to quit)",
+    "Stivo em {url}  (Ctrl+C para sair)": "Stivo at {url}  (Ctrl+C to quit)",
     "não abre o navegador; o link sai só no terminal": "don't open the browser; the link is only printed in the terminal",
 }
 
@@ -1173,7 +1173,7 @@ def main():
     pre.add_argument("--lang", nargs="?")
     lang = pre.parse_known_args()[0].lang
     LANG = lang if lang in ("pt", "en") else system_lang()
-    ap = argparse.ArgumentParser(description=tr("Gerenciador de containers Docker no navegador. Só stdlib + docker CLI."))
+    ap = argparse.ArgumentParser(description=tr("Stivo: containers Docker e Podman no navegador. Só stdlib + docker CLI."))
     ap.add_argument("--port", type=int, help=tr("porta local (padrão: {port}, ou a próxima livre)").format(port=PORT))
     ap.add_argument("--cli", default=os.environ.get("DOCKER_GUI_CLI", "docker"),
                     help=tr("CLI de containers: docker ou podman (padrão: $DOCKER_GUI_CLI ou docker)"))
@@ -1192,7 +1192,7 @@ def main():
     server = serve(args.port)
     # o token vai no #fragmento: não é enviado ao servidor nem fica em log; a página guarda e o tira da URL
     url = f"http://localhost:{server.server_address[1]}/#t={TOKEN}"
-    print(tr("Docker GUI em {url}  (Ctrl+C para sair)").format(url=url))
+    print(tr("Stivo em {url}  (Ctrl+C para sair)").format(url=url))
     if not args.no_browser:
         webbrowser.open(url)
     # SIGTERM vira saída normal (SystemExit), para o finally rodar; o código 143 é o de quem morre por SIGTERM
@@ -1216,7 +1216,7 @@ PAGE = r"""<!doctype html>
 <html lang="pt-BR" class="bg-canvas" data-cli="docker">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="dark light">
-<title>Docker GUI</title>
+<title>Stivo</title>
 <style>/*CSS*/</style>
 </head>
 <body class="min-h-screen bg-canvas text-fg-soft antialiased selection:bg-accent/30">
@@ -1227,7 +1227,7 @@ PAGE = r"""<!doctype html>
 <div class="border-b border-line bg-raised"><div class="max-w-7xl mx-auto px-4">
   <header class="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 pt-5 pb-3 max-sm:pt-3">
     <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
-      <h1 class="text-2xl max-sm:text-xl font-semibold text-fg-strong tracking-tight">Docker GUI</h1>
+      <h1 class="text-2xl max-sm:text-xl font-semibold text-fg-strong tracking-tight">Stivo</h1>
       <!-- onde as ações caem: o contexto do docker, em âmbar quando o daemon é remoto (app.ts preenche) -->
       <span id="where" class="empty:hidden font-mono text-xs px-2 py-0.5 rounded ring-1 ring-line-strong text-muted"></span>
       <!-- de onde a lista vem: eventos do docker (ao vivo) ou poll de 2 s (app.ts, showLive) -->
@@ -1236,6 +1236,8 @@ PAGE = r"""<!doctype html>
     <div class="flex flex-wrap items-center gap-x-4">
       <button popovertarget="hint" aria-keyshortcuts="?" class="coarse:hidden text-xs text-muted hover:text-fg rounded focus-visible:outline-2 focus-visible:outline-accent">
         <kbd class="font-mono px-1 rounded ring-1 ring-line-strong text-fg-soft">?</kbd> Atalhos</button>
+      <!-- só no app desktop (o transporte do Tauri tem preferências): CLI, contexto, idioma e notificações -->
+      <button id="prefs-open" hidden onclick="openPrefs()" class="coarse:py-3 text-xs text-muted hover:text-fg rounded focus-visible:outline-2 focus-visible:outline-accent">Preferências</button>
       <button id="notify" hidden onclick="askNotify()" class="coarse:py-3 text-xs text-accent-fg underline underline-offset-4 hover:text-accent-soft rounded focus-visible:outline-2 focus-visible:outline-accent">Notificar quando algo der problema</button>
       <!-- popover nativo: fecha com Esc e com clique fora -->
       <div id="hint" popover class="m-auto w-[min(26rem,calc(100vw-2rem))] rounded-lg bg-raised ring-1 ring-line-strong p-4 text-sm text-fg-soft shadow-lg shadow-black/40 backdrop:bg-black/40">
@@ -1487,6 +1489,53 @@ PAGE = r"""<!doctype html>
   </form>
 </dialog>
 
+<dialog id="prefs" aria-labelledby="prefs-title" aria-describedby="prefs-desc" class="m-auto w-[min(520px,95vw)] rounded-lg bg-raised text-fg-soft ring-1 ring-line-strong backdrop:bg-black/70 p-0">
+  <form id="prefs-form" novalidate>
+    <div class="px-4 py-3 border-b border-line flex items-start gap-3">
+      <div class="mr-auto min-w-0">
+        <h2 id="prefs-title" class="text-lg font-semibold text-fg-strong">Preferências</h2>
+        <p id="prefs-desc" class="text-sm mt-0.5 text-muted">Valem na hora: a janela recarrega com o que você escolher.</p>
+      </div>
+      <button type="button" onclick="prefs.close()" aria-label="Fechar" class="shrink-0 grid place-items-center size-8 coarse:size-11 rounded text-muted hover:text-fg-strong hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent">
+        <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="size-4"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
+    </div>
+    <div class="px-4 py-4 space-y-4 text-sm">
+      <div>
+        <label for="pref-cli" class="block font-medium text-fg-strong">CLI de containers</label>
+        <select id="pref-cli" class="mt-1 w-full rounded bg-canvas ring-1 ring-line px-3 py-2 coarse:py-3 text-fg-strong focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+          <option value="">Padrão (docker, ou o DOCKER_GUI_CLI)</option>
+          <option value="docker">docker</option>
+          <option value="podman">podman</option>
+        </select>
+      </div>
+      <div id="pref-context-row">
+        <label for="pref-context" class="block font-medium text-fg-strong">Contexto do docker</label>
+        <select id="pref-context" aria-describedby="pref-context-hint" class="mt-1 w-full rounded bg-canvas ring-1 ring-line px-3 py-2 coarse:py-3 text-fg-strong focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+          <option value="">Padrão (o que o docker escolher)</option>
+        </select>
+        <p id="pref-context-hint" class="mt-1 max-w-[70ch] text-xs text-muted">Os de <code class="font-mono">docker context ls</code>. O padrão segue o <code class="font-mono">DOCKER_CONTEXT</code> e o <code class="font-mono">docker context use</code>.</p>
+      </div>
+      <div>
+        <label for="pref-lang" class="block font-medium text-fg-strong">Idioma</label>
+        <select id="pref-lang" class="mt-1 w-full rounded bg-canvas ring-1 ring-line px-3 py-2 coarse:py-3 text-fg-strong focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+          <option value="">Automático (o do sistema)</option>
+          <option value="pt">Português</option>
+          <option value="en">English</option>
+        </select>
+      </div>
+      <label class="flex items-start gap-2 w-fit coarse:py-2 cursor-pointer">
+        <input id="pref-notify" type="checkbox" class="mt-0.5 size-4 accent-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+        <span>Notificar quando um container entrar na faixa de atenção</span>
+      </label>
+    </div>
+    <div id="prefs-msg" role="alert" class="empty:hidden mx-4 mb-3 rounded-lg ring-1 ring-bad/40 bg-bad/10 px-3 py-2 text-sm text-bad-soft"></div>
+    <div class="px-4 py-3 border-t border-line flex justify-end gap-2">
+      <button type="button" onclick="prefs.close()" class="px-3 py-1.5 coarse:min-h-11 coarse:px-4 rounded text-sm font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Cancelar</button>
+      <button id="prefs-go" type="submit" class="px-3 py-1.5 coarse:min-h-11 coarse:px-4 rounded text-sm font-medium ring-1 ring-accent/40 bg-accent/15 text-accent-fg hover:bg-accent/25 aria-disabled:opacity-60 aria-disabled:cursor-wait focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Salvar</button>
+    </div>
+  </form>
+</dialog>
+
 <div id="toast" role="status" aria-live="polite" class="fixed bottom-[calc(1rem+var(--dock,0px))] left-1/2 -translate-x-1/2 w-max max-w-[min(28rem,calc(100vw-2rem))] z-40"></div>
 
 <script>
@@ -1512,6 +1561,7 @@ PAGE = r"""<!doctype html>
     ", de {0}": ", from {0}",
     ", rede e PID do host, devices e comando ou entrypoint próprio. Para isso, use o terminal.": ", host network and PID, devices and a custom command or entrypoint. For those, use the terminal.",
     ", {0} fora do filtro": ", {0} outside the filter",
+    ". O padrão segue o": ". The default follows",
     ". Se a imagem faltar, ela é baixada antes.": ". If the image is missing, it is pulled first.",
     "0 containers": "0 containers",
     ": só esta máquina acessa.": ": only this machine can reach them.",
@@ -1541,12 +1591,14 @@ PAGE = r"""<!doctype html>
     "Atalhos do teclado": "Keyboard shortcuts",
     "Atenção: qualquer máquina que alcance a sua (Wi-Fi, VPN, rede do escritório) passa a acessar essas portas, e o Docker abre as portas por cima do firewall do sistema (ufw, firewalld). Só marque se precisar mesmo.": "Warning: any machine that can reach yours (Wi-Fi, VPN, office network) can then access these ports, and Docker opens them past the system firewall (ufw, firewalld). Only check this if you really need it.",
     Atualizar: "Refresh",
+    "Automático (o do sistema)": "Automatic (the system's)",
     "Avisos e erros": "Warnings and errors",
     Ações: "Actions",
     "Ações em lote": "Bulk actions",
     "Baixando…": "Pulling…",
     "Baixar .log": "Download .log",
     "Build cache": "Build cache",
+    "CLI de containers": "Container CLI",
     "Cancela sozinho em 8 s.": "Cancels by itself in 8 s.",
     "Cancela sozinho em 8 segundos.": "Cancels by itself in 8 seconds.",
     Cancelar: "Cancel",
@@ -1570,6 +1622,7 @@ PAGE = r"""<!doctype html>
     "Confirmação cancelada: passaram 8 s sem o segundo clique. Nada foi apagado.": "Confirmation canceled: 8 s went by without the second click. Nothing was deleted.",
     Containers: "Containers",
     "Containers parados": "Stopped containers",
+    "Contexto do docker": "Docker context",
     "Copiado: {0}": "Copied: {0}",
     Copiar: "Copy",
     "Copiar docker exec": "Copy docker exec",
@@ -1596,18 +1649,18 @@ PAGE = r"""<!doctype html>
     "Detalhes técnicos": "Technical details",
     "Disco cheio: libere espaço (aba Imagens, Limpar…).": "Disk full: free some space (Images tab, Clean up…).",
     "Disco: {0} lidos · {1} gravados": "Disk: {0} read · {1} written",
-    "Docker GUI": "Docker GUI",
     "Docker fora do ar": "Docker is down",
     "Dá para baixar de novo.": "It can be pulled again.",
     "Em uso por": "Used by",
     "Em uso por {0}: pare o container antes": "In use by {0}: stop the container first",
     "Em uso por {0}: remova o container antes": "In use by {0}: remove the container first",
     "Em uso: remova o container que usa (ou tire ele da rede) antes.": "In use: remove the container using it (or take it off the network) first.",
+    English: "English",
     "Erro sem mensagem.": "Error without a message.",
     "Esc cancela.": "Esc cancels.",
     "Escolha uma das opções da lista.": "Pick one of the options in the list.",
     Escopo: "Scope",
-    "Esta aba não tem o token do Docker GUI.": "This tab doesn't have the Docker GUI token.",
+    "Esta aba não tem o token do Stivo.": "This tab doesn't have the Stivo token.",
     "Este container não existe mais.": "This container no longer exists.",
     "Este projeto não tem mais containers.": "This project has no containers left.",
     "Faixa de portas: {0} do host → {1} do container": "Port range: {0} on the host → {1} in the container",
@@ -1623,6 +1676,7 @@ PAGE = r"""<!doctype html>
     "Filtrar por estado": "Filter by state",
     "Filtrar por nome, imagem ou projeto…": "Filter by name, image or project…",
     "Histórico: quando subiu, caiu ou mudou de saúde": "History: when it started, crashed or changed health",
+    Idioma: "Language",
     Imagem: "Image",
     "Imagem inválida: use repo[:tag] ou repo@sha256:…, com o caminho em minúsculas.": "Invalid image: use repo[:tag] or repo@sha256:…, with the path in lowercase.",
     "Imagem:": "Image:",
@@ -1677,20 +1731,21 @@ PAGE = r"""<!doctype html>
     Nome: "Name",
     "Nome inválido: 2 a 128 caracteres entre letras, números, _ . e -, começando por letra ou número.": "Invalid name: 2 to 128 characters among letters, digits, _ . and -, starting with a letter or digit.",
     "Notificar quando algo der problema": "Notify me when something breaks",
+    "Notificar quando um container entrar na faixa de atenção": "Notify me when a container needs attention",
     "Novo container": "New container",
-    "Não consegui carregar os logs. O servidor do Docker GUI está rodando?": "Could not load the logs. Is the Docker GUI server running?",
-    "Não consegui conectar ao servidor do Docker GUI.": "Could not connect to the Docker GUI server.",
+    "Não consegui carregar os logs. O servidor do Stivo está rodando?": "Could not load the logs. Is the Stivo server running?",
+    "Não consegui conectar ao servidor do Stivo.": "Could not connect to the Stivo server.",
     "Não consegui copiar.": "Could not copy.",
     "Não consegui copiar. O comando é: {0}": "Could not copy. The command is: {0}",
     "Não consegui falar com o Docker.": "Could not talk to Docker.",
     "Não consegui ler a lista de volumes; o prune leva os sem uso.": "Could not read the volume list; the prune takes the unused ones.",
-    "Não consegui ler a lista. O servidor do Docker GUI está rodando?": "Could not read the list. Is the Docker GUI server running?",
+    "Não consegui ler a lista. O servidor do Stivo está rodando?": "Could not read the list. Is the Stivo server running?",
     "Não consegui ler a lista: {0}": "Could not read the list: {0}",
     "Não consegui ler o healthcheck.": "Could not read the healthcheck.",
     "Não consegui ler o healthcheck: {0}": "Could not read the healthcheck: {0}",
     "Não consegui ler o inspect.": "Could not read the inspect.",
     "Não consegui ler o inspect: {0}": "Could not read the inspect: {0}",
-    "Não consegui ler o uso de disco. O servidor do Docker GUI está rodando?": "Could not read the disk usage. Is the Docker GUI server running?",
+    "Não consegui ler o uso de disco. O servidor do Stivo está rodando?": "Could not read the disk usage. Is the Stivo server running?",
     "Não consegui ler o uso de disco: {0}": "Could not read the disk usage: {0}",
     "Não consegui ler os eventos.": "Couldn't read the events.",
     "Não consegui ler os eventos: {0}": "Couldn't read the events: {0}",
@@ -1709,15 +1764,18 @@ PAGE = r"""<!doctype html>
     "O erro ficou na linha.": "The error is on its row.",
     "O erro ficou na lista.": "The error is shown in the list.",
     "O próximo build fica mais lento.": "The next build will be slower.",
-    "O servidor do Docker GUI parou de responder.": "The Docker GUI server stopped responding.",
+    "O servidor do Stivo parou de responder.": "The Stivo server stopped responding.",
     "O valor de {0} tem o caractere NUL ou passa de {1} caracteres.": "The value of {0} has the NUL character or is longer than {1} characters.",
     "Ocultar valores": "Hide values",
     "Os dados dele se perdem.": "Its data is lost.",
     "Os dados deles se perdem.": "Their data is lost.",
+    "Os de": "The ones from",
     "Os logs deles se perdem; os volumes ficam.": "Their logs are lost; volumes stay.",
     "Os volumes não são afetados.": "Volumes are not affected.",
     "Os {0} containers estão de pé.": "All {0} containers are up.",
     "Outras imagens foram construídas sobre esta.": "Other images were built on top of this one.",
+    "Padrão (docker, ou o DOCKER_GUI_CLI)": "Default (docker, or DOCKER_GUI_CLI)",
+    "Padrão (o que o docker escolher)": "Default (whatever docker picks)",
     "Parado há {0}": "Stopped {0} ago",
     "Parando…": "Stopping…",
     Parar: "Stop",
@@ -1728,7 +1786,9 @@ PAGE = r"""<!doctype html>
     Pausar: "Pause",
     Período: "Period",
     Portas: "Ports",
+    Português: "Português",
     "Precisa de atenção · {0}": "Needs attention · {0}",
+    Preferências: "Preferences",
     "Processos (docker top)": "Processes (docker top)",
     "Projeto compose · {0} de {1} rodando · todos os serviços": "Compose project · {0} of {1} running · all services",
     "Pronto: aviso quando um container entrar na faixa de atenção, mesmo com a aba em segundo plano.": "Done: you'll be notified when a container enters the attention band, even with the tab in the background.",
@@ -1764,7 +1824,9 @@ PAGE = r"""<!doctype html>
     "Rodando há {0}{1}": "Up for {0}{1}",
     "Rode {0} de novo; a página volta sozinha.": "Run {0} again; the page comes back by itself.",
     "Rode {0} e entre de novo na sessão.": "Run {0} and log in again.",
+    "Saia do Stivo pelo menu da bandeja e abra de novo.": "Quit Stivo from the tray menu and open it again.",
     "Saiu com código {0} há {1}": "Exited with code {0} {1} ago",
+    Salvar: "Save",
     "Saída do {0}": "{0} output",
     "Saída dos logs": "Log output",
     "Selecionar todos os visíveis": "Select all visible",
@@ -1773,12 +1835,15 @@ PAGE = r"""<!doctype html>
     "Sem o docker events: a lista é relida a cada 2 s": "Without docker events: the list is re-read every 2 s",
     "Sem permissão para notificar. Dá para liberar nas configurações do site, no navegador.": "No permission to notify. You can allow it in the browser's site settings.",
     "Sem projeto compose": "No compose project",
-    "Sem resposta do servidor do Docker GUI.": "No response from the Docker GUI server.",
+    "Sem resposta do servidor do Stivo.": "No response from the Stivo server.",
     Serviço: "Service",
     "Sessão encerrada.": "Session ended.",
     "Seu usuário não tem acesso ao Docker.": "Your user has no access to Docker.",
     Seções: "Sections",
     Status: "Status",
+    Stivo: "Stivo",
+    "Stivo · sem dados atualizados do Docker": "Stivo · no fresh data from Docker",
+    "Stivo · {0} na faixa de atenção": "Stivo · {0} need attention",
     "Subindo…": "Bringing up…",
     "Só erros": "Errors only",
     "Só no loopback do daemon remoto {0}: não abre daqui": "Only on the loopback of the remote daemon {0}: can't be opened from here",
@@ -1791,6 +1856,7 @@ PAGE = r"""<!doctype html>
     "Use nome:/caminho/no/container, ex.: dados:/var/lib/postgresql/data. Pasta do host (bind mount) não é aceita.": "Use name:/path/in/container, e.g. data:/var/lib/postgresql/data. Host folders (bind mounts) are not accepted.",
     "Vai apagar {0}: {1}{2}. Os dados deles se perdem.": "Will delete {0}: {1}{2}. Their data is lost.",
     "Vai remover {0}. {1}": "Will remove {0}. {1}",
+    "Valem na hora: a janela recarrega com o que você escolher.": "They apply right away: the window reloads with your choices.",
     "Variáveis de ambiente": "Environment variables",
     "Ver logs": "View logs",
     "Ver último healthcheck": "See last healthcheck",
@@ -1824,8 +1890,10 @@ PAGE = r"""<!doctype html>
     "das últimas 24 h": "from the last 24 h",
     "desde que o container subiu": "since the container started",
     "desfaz a última ação (Iniciar de novo, Retomar)": "undoes the last action (Start again, Resume)",
+    docker: "docker",
     "dos últimos 15 min": "from the last 15 min",
     "dos últimos 5 min": "from the last 5 min",
+    "e o": "and",
     "encerrado por SIGTERM": "terminated by SIGTERM",
     "erro da aplicação (veja o log)": "application error (see the log)",
     "erro sem mensagem": "error without a message",
@@ -1884,6 +1952,7 @@ PAGE = r"""<!doctype html>
     parou: "stopped",
     pausado: "paused",
     pausados: "paused",
+    podman: "podman",
     "portaDoHost:portaDoContainer, separadas por vírgula ou espaço. Ficam em {0} do daemon remoto {1}: só aquela máquina acessa, não esta.": "hostPort:containerPort, separated by commas or spaces. Bound to {0} of the remote daemon {1}: only that machine can reach them, not this one.",
     "portaDoHost:portaDoContainer, separadas por vírgula ou espaço. Ficam só em": "hostPort:containerPort, separated by commas or spaces. Bound only to",
     reconstruído: "rebuilt",
@@ -1955,7 +2024,7 @@ PAGE = r"""<!doctype html>
     "{0} às {1}": "{0} at {1}",
     "{0}, conferindo se ficaram de pé…": "{0}, checking they stay up…",
     "{0}: 1 de {1} falhou. O erro ficou na linha.": "{0}: 1 of {1} failed. The error is on its row.",
-    "{0}: sem resposta do servidor do Docker GUI.": "{0}: no response from the Docker GUI server.",
+    "{0}: sem resposta do servidor do Stivo.": "{0}: no response from the Stivo server.",
     "{0}: {1} concluído, conferindo se ficou de pé…": "{0}: {1} done, checking it stays up…",
     "{0}: {1} concluído.": "{0}: {1} done.",
     "{0}: {1} de {2} falharam. Os erros ficaram nas linhas.": "{0}: {1} of {2} failed. The errors are on their rows.",
@@ -2259,6 +2328,90 @@ PAGE = r"""<!doctype html>
   }
   var anonVolume = (name) => /^[0-9a-f]{64}$/.test(name);
   var prunedVolumes = (vs2, podman) => vs2.filter((v2) => !v2.Containers.length && (podman || anonVolume(v2.Name)));
+
+  // src/transport-web.ts
+  var TOKEN = (() => {
+    const t2 = new URLSearchParams(location.hash.slice(1)).get("t");
+    try {
+      if (t2) localStorage.setItem("docker-gui-token", t2);
+      return t2 || localStorage.getItem("docker-gui-token") || "";
+    } catch {
+      return t2 || "";
+    }
+  })();
+  var request = (method, path, body) => fetch(path, {
+    method,
+    headers: { "X-Docker-GUI-Token": TOKEN, ...body === void 0 ? {} : { "Content-Type": "application/json" } },
+    body: body === void 0 ? void 0 : JSON.stringify(body)
+  });
+  function stream(path, query, on2) {
+    const es2 = new EventSource(`${path}?${new URLSearchParams({ ...query, t: TOKEN })}`);
+    es2.onopen = () => on2.open?.();
+    es2.onmessage = (e) => on2.data(e.data);
+    es2.addEventListener("end", () => on2.end());
+    es2.onerror = () => on2.error(es2.readyState === EventSource.CLOSED);
+    return es2;
+  }
+  async function ndjson(path, body, onLine) {
+    const r = await request("POST", path, body);
+    if (!r.ok) return { status: r.status, code: -1, error: await r.json() };
+    const reader = r.body.pipeThrough(new TextDecoderStream()).getReader();
+    let rest = "", code2 = -1;
+    for (; ; ) {
+      const { value, done } = await reader.read();
+      if (done) return { status: r.status, code: code2 };
+      const lines = (rest + value).split("\n");
+      rest = lines.pop();
+      for (const l of lines) {
+        const v2 = JSON.parse(l);
+        if (typeof v2 === "string") onLine(v2);
+        else code2 = v2.code;
+      }
+    }
+  }
+  function terminal(id, on2) {
+    const ws2 = new WebSocket(`ws://${location.host}/api/exec/${id}?t=${encodeURIComponent(TOKEN)}`), enc = new TextEncoder();
+    ws2.binaryType = "arraybuffer";
+    ws2.onopen = () => on2.open();
+    ws2.onmessage = (e) => typeof e.data === "string" ? on2.notice(e.data) : on2.data(new Uint8Array(e.data));
+    ws2.onclose = () => on2.close();
+    const open = () => ws2.readyState === WebSocket.OPEN;
+    return {
+      send: (d) => {
+        if (open()) ws2.send(enc.encode(d));
+      },
+      resize: (cols, rows) => {
+        if (open()) ws2.send(JSON.stringify({ cols, rows }));
+      },
+      close: () => {
+        ws2.onclose = ws2.onmessage = null;
+        ws2.close();
+      }
+      // a sessão já foi: nada de escrever num terminal descartado
+    };
+  }
+  var icon = document.head.appendChild(Object.assign(document.createElement("link"), { rel: "icon" }));
+  var T = {
+    desktop: false,
+    request,
+    stream,
+    ndjson,
+    terminal,
+    attention(_badge, svg) {
+      const href = "data:image/svg+xml," + encodeURIComponent(svg);
+      if (icon.getAttribute("href") !== href) icon.href = href;
+    },
+    notify(title, body, onClick) {
+      try {
+        const n = new Notification(title, { body });
+        n.onclick = () => {
+          onClick();
+          n.close();
+        };
+      } catch {
+      }
+    }
+  };
 
   // node_modules/@xterm/xterm/lib/xterm.mjs
   var zs = Object.defineProperty;
@@ -3390,38 +3543,38 @@ ${h2.join(`
     Qe.None = () => D.None;
     function t2(y) {
       if ($l) {
-        let { onDidAddListener: T } = y, g = gi.create(), w = 0;
+        let { onDidAddListener: T2 } = y, g = gi.create(), w = 0;
         y.onDidAddListener = () => {
-          ++w === 2 && (console.warn("snapshotted emitter LIKELY used public and SHOULD HAVE BEEN created with DisposableStore. snapshotted here"), g.print()), T?.();
+          ++w === 2 && (console.warn("snapshotted emitter LIKELY used public and SHOULD HAVE BEEN created with DisposableStore. snapshotted here"), g.print()), T2?.();
         };
       }
     }
-    function e(y, T) {
+    function e(y, T2) {
       return d(y, () => {
-      }, 0, void 0, true, void 0, T);
+      }, 0, void 0, true, void 0, T2);
     }
     Qe.defer = e;
     function i(y) {
-      return (T, g = null, w) => {
+      return (T2, g = null, w) => {
         let E = false, x;
         return x = y((N) => {
-          if (!E) return x ? x.dispose() : E = true, T.call(g, N);
+          if (!E) return x ? x.dispose() : E = true, T2.call(g, N);
         }, null, w), E && x.dispose(), x;
       };
     }
     Qe.once = i;
-    function r(y, T, g) {
-      return h2((w, E = null, x) => y((N) => w.call(E, T(N)), null, x), g);
+    function r(y, T2, g) {
+      return h2((w, E = null, x) => y((N) => w.call(E, T2(N)), null, x), g);
     }
     Qe.map = r;
-    function n(y, T, g) {
+    function n(y, T2, g) {
       return h2((w, E = null, x) => y((N) => {
-        T(N), w.call(E, N);
+        T2(N), w.call(E, N);
       }, null, x), g);
     }
     Qe.forEach = n;
-    function o2(y, T, g) {
-      return h2((w, E = null, x) => y((N) => T(N) && w.call(E, N), null, x), g);
+    function o2(y, T2, g) {
+      return h2((w, E = null, x) => y((N) => T2(N) && w.call(E, N), null, x), g);
     }
     Qe.filter = o2;
     function l(y) {
@@ -3429,34 +3582,34 @@ ${h2.join(`
     }
     Qe.signal = l;
     function a(...y) {
-      return (T, g = null, w) => {
-        let E = ho(...y.map((x) => x((N) => T.call(g, N))));
+      return (T2, g = null, w) => {
+        let E = ho(...y.map((x) => x((N) => T2.call(g, N))));
         return c(E, w);
       };
     }
     Qe.any = a;
-    function u(y, T, g, w) {
+    function u(y, T2, g, w) {
       let E = g;
-      return r(y, (x) => (E = T(E, x), E), w);
+      return r(y, (x) => (E = T2(E, x), E), w);
     }
     Qe.reduce = u;
-    function h2(y, T) {
+    function h2(y, T2) {
       let g, w = { onWillAddFirstListener() {
         g = y(E.fire, E);
       }, onDidRemoveLastListener() {
         g?.dispose();
       } };
-      T || t2(w);
+      T2 || t2(w);
       let E = new v(w);
-      return T?.add(E), E.event;
+      return T2?.add(E), E.event;
     }
-    function c(y, T) {
-      return T instanceof Array ? T.push(y) : T && T.add(y), y;
+    function c(y, T2) {
+      return T2 instanceof Array ? T2.push(y) : T2 && T2.add(y), y;
     }
-    function d(y, T, g = 100, w = false, E = false, x, N) {
+    function d(y, T2, g = 100, w = false, E = false, x, N) {
       let Z, te, Oe, ze = 0, le, et = { leakWarningThreshold: x, onWillAddFirstListener() {
         Z = y((ht) => {
-          ze++, te = T(te, ht), w && !Oe && (me.fire(te), te = void 0), le = () => {
+          ze++, te = T2(te, ht), w && !Oe && (me.fire(te), te = void 0), le = () => {
             let fi = te;
             te = void 0, Oe = void 0, (!w || ze > 1) && me.fire(fi), ze = 0;
           }, typeof g == "number" ? (clearTimeout(Oe), Oe = setTimeout(le, g)) : Oe === void 0 && (Oe = 0, queueMicrotask(le));
@@ -3471,23 +3624,23 @@ ${h2.join(`
       return N?.add(me), me.event;
     }
     Qe.debounce = d;
-    function _2(y, T = 0, g) {
-      return Qe.debounce(y, (w, E) => w ? (w.push(E), w) : [E], T, void 0, true, void 0, g);
+    function _2(y, T2 = 0, g) {
+      return Qe.debounce(y, (w, E) => w ? (w.push(E), w) : [E], T2, void 0, true, void 0, g);
     }
     Qe.accumulate = _2;
-    function p(y, T = (w, E) => w === E, g) {
+    function p(y, T2 = (w, E) => w === E, g) {
       let w = true, E;
       return o2(y, (x) => {
-        let N = w || !T(x, E);
+        let N = w || !T2(x, E);
         return w = false, E = x, N;
       }, g);
     }
     Qe.latch = p;
-    function m(y, T, g) {
-      return [Qe.filter(y, T, g), Qe.filter(y, (w) => !T(w), g)];
+    function m(y, T2, g) {
+      return [Qe.filter(y, T2, g), Qe.filter(y, (w) => !T2(w), g)];
     }
     Qe.split = m;
-    function f(y, T = false, g = [], w) {
+    function f(y, T2 = false, g = [], w) {
       let E = g.slice(), x = y((te) => {
         E ? E.push(te) : Z.fire(te);
       });
@@ -3497,16 +3650,16 @@ ${h2.join(`
       }, Z = new v({ onWillAddFirstListener() {
         x || (x = y((te) => Z.fire(te)), w && w.add(x));
       }, onDidAddFirstListener() {
-        E && (T ? setTimeout(N) : N());
+        E && (T2 ? setTimeout(N) : N());
       }, onDidRemoveLastListener() {
         x && x.dispose(), x = null;
       } });
       return w && w.add(Z), Z.event;
     }
     Qe.buffer = f;
-    function A(y, T) {
+    function A(y, T2) {
       return (w, E, x) => {
-        let N = T(new O());
+        let N = T2(new O());
         return y(function(Z) {
           let te = N.evaluate(Z);
           te !== R && w.call(E, te);
@@ -3519,98 +3672,98 @@ ${h2.join(`
       constructor() {
         this.steps = [];
       }
-      map(T) {
-        return this.steps.push(T), this;
+      map(T2) {
+        return this.steps.push(T2), this;
       }
-      forEach(T) {
-        return this.steps.push((g) => (T(g), g)), this;
+      forEach(T2) {
+        return this.steps.push((g) => (T2(g), g)), this;
       }
-      filter(T) {
-        return this.steps.push((g) => T(g) ? g : R), this;
+      filter(T2) {
+        return this.steps.push((g) => T2(g) ? g : R), this;
       }
-      reduce(T, g) {
+      reduce(T2, g) {
         let w = g;
-        return this.steps.push((E) => (w = T(w, E), w)), this;
+        return this.steps.push((E) => (w = T2(w, E), w)), this;
       }
-      latch(T = (g, w) => g === w) {
+      latch(T2 = (g, w) => g === w) {
         let g = true, w;
         return this.steps.push((E) => {
-          let x = g || !T(E, w);
+          let x = g || !T2(E, w);
           return g = false, w = E, x ? E : R;
         }), this;
       }
-      evaluate(T) {
-        for (let g of this.steps) if (T = g(T), T === R) break;
-        return T;
+      evaluate(T2) {
+        for (let g of this.steps) if (T2 = g(T2), T2 === R) break;
+        return T2;
       }
     }
-    function I(y, T, g = (w) => w) {
-      let w = (...Z) => N.fire(g(...Z)), E = () => y.on(T, w), x = () => y.removeListener(T, w), N = new v({ onWillAddFirstListener: E, onDidRemoveLastListener: x });
+    function I(y, T2, g = (w) => w) {
+      let w = (...Z) => N.fire(g(...Z)), E = () => y.on(T2, w), x = () => y.removeListener(T2, w), N = new v({ onWillAddFirstListener: E, onDidRemoveLastListener: x });
       return N.event;
     }
     Qe.fromNodeEventEmitter = I;
-    function k(y, T, g = (w) => w) {
-      let w = (...Z) => N.fire(g(...Z)), E = () => y.addEventListener(T, w), x = () => y.removeEventListener(T, w), N = new v({ onWillAddFirstListener: E, onDidRemoveLastListener: x });
+    function k(y, T2, g = (w) => w) {
+      let w = (...Z) => N.fire(g(...Z)), E = () => y.addEventListener(T2, w), x = () => y.removeEventListener(T2, w), N = new v({ onWillAddFirstListener: E, onDidRemoveLastListener: x });
       return N.event;
     }
     Qe.fromDOMEventEmitter = k;
     function P(y) {
-      return new Promise((T) => i(y)(T));
+      return new Promise((T2) => i(y)(T2));
     }
     Qe.toPromise = P;
     function oe(y) {
-      let T = new v();
+      let T2 = new v();
       return y.then((g) => {
-        T.fire(g);
+        T2.fire(g);
       }, () => {
-        T.fire(void 0);
+        T2.fire(void 0);
       }).finally(() => {
-        T.dispose();
-      }), T.event;
+        T2.dispose();
+      }), T2.event;
     }
     Qe.fromPromise = oe;
-    function Me(y, T) {
-      return y((g) => T.fire(g));
+    function Me(y, T2) {
+      return y((g) => T2.fire(g));
     }
     Qe.forward = Me;
-    function Pe(y, T, g) {
-      return T(g), y((w) => T(w));
+    function Pe(y, T2, g) {
+      return T2(g), y((w) => T2(w));
     }
     Qe.runAndSubscribe = Pe;
     class Ke {
-      constructor(T, g) {
-        this._observable = T;
+      constructor(T2, g) {
+        this._observable = T2;
         this._counter = 0;
         this._hasChanged = false;
         let w = { onWillAddFirstListener: () => {
-          T.addObserver(this);
+          T2.addObserver(this);
         }, onDidRemoveLastListener: () => {
-          T.removeObserver(this);
+          T2.removeObserver(this);
         } };
         g || t2(w), this.emitter = new v(w), g && g.add(this.emitter);
       }
-      beginUpdate(T) {
+      beginUpdate(T2) {
         this._counter++;
       }
-      handlePossibleChange(T) {
+      handlePossibleChange(T2) {
       }
-      handleChange(T, g) {
+      handleChange(T2, g) {
         this._hasChanged = true;
       }
-      endUpdate(T) {
+      endUpdate(T2) {
         this._counter--, this._counter === 0 && (this._observable.reportChanges(), this._hasChanged && (this._hasChanged = false, this.emitter.fire(this._observable.get())));
       }
     }
-    function di(y, T) {
-      return new Ke(y, T).emitter.event;
+    function di(y, T2) {
+      return new Ke(y, T2).emitter.event;
     }
     Qe.fromObservable = di;
     function V(y) {
-      return (T, g, w) => {
+      return (T2, g, w) => {
         let E = 0, x = false, N = { beginUpdate() {
           E++;
         }, endUpdate() {
-          E--, E === 0 && (y.reportChanges(), x && (x = false, T.call(g)));
+          E--, E === 0 && (y.reportChanges(), x && (x = false, T2.call(g)));
         }, handlePossibleChange() {
         }, handleChange() {
           x = true;
@@ -6245,20 +6398,20 @@ ${h2.join(`
       let f, A = 0, R = "", O = 0, I = 0, k = 0, P = 0, oe = false, Me = 0, Pe = false, Ke = 0, di = 0, V = [], Qe = h2 !== -1 && c !== -1;
       for (let y = 0; y < m; y++) {
         t2.loadCell(y, this._workCell);
-        let T = this._workCell.getWidth();
-        if (T === 0) continue;
+        let T2 = this._workCell.getWidth();
+        if (T2 === 0) continue;
         let g = false, w = y >= di, E = y, x = this._workCell;
         if (_2.length > 0 && y === _2[0][0] && w) {
           let W = _2.shift(), An = this._isCellInSelection(W[0], e);
           for (O = W[0] + 1; O < W[1]; O++) w &&= An === this._isCellInSelection(O, e);
-          w &&= !i || o2 < W[0] || o2 >= W[1], w ? (g = true, x = new Vr(this._workCell, t2.translateToString(true, W[0], W[1]), W[1] - W[0]), E = W[1] - 1, T = x.getWidth()) : di = W[1];
+          w &&= !i || o2 < W[0] || o2 >= W[1], w ? (g = true, x = new Vr(this._workCell, t2.translateToString(true, W[0], W[1]), W[1] - W[0]), E = W[1] - 1, T2 = x.getWidth()) : di = W[1];
         }
         let N = this._isCellInSelection(y, e), Z = i && y === o2, te = Qe && y >= h2 && y <= c, Oe = false;
         this._decorationService.forEachDecorationAtCell(y, e, void 0, (W) => {
           Oe = true;
         });
         let ze = x.getChars() || we;
-        if (ze === " " && (x.isUnderline() || x.isOverline()) && (ze = " "), Ke = T * a - u.get(ze, x.isBold(), x.isItalic()), !f) f = this._document.createElement("span");
+        if (ze === " " && (x.isUnderline() || x.isOverline()) && (ze = " "), Ke = T2 * a - u.get(ze, x.isBold(), x.isItalic()), !f) f = this._document.createElement("span");
         else if (A && (N && Pe || !N && !Pe && x.bg === I) && (N && Pe && p.selectionForeground || x.fg === k) && x.extended.ext === P && te === oe && Ke === Me && !Z && !g && !Oe && w) {
           x.isInvisible() ? R += we : R += ze, A++;
           continue;
@@ -11688,16 +11841,7 @@ ${h2.join(`
 
   // src/app.ts
   var $2 = (s15) => document.querySelector(s15);
-  var TOKEN = (() => {
-    const t2 = new URLSearchParams(location.hash.slice(1)).get("t");
-    try {
-      if (t2) localStorage.setItem("docker-gui-token", t2);
-      return t2 || localStorage.getItem("docker-gui-token") || "";
-    } catch {
-      return t2 || "";
-    }
-  })();
-  var api = (path, opts = {}) => fetch(path, { ...opts, headers: { ...opts.headers, "X-Docker-GUI-Token": TOKEN } });
+  var api = (path) => T.request("GET", path);
   translatePage();
   var LABEL = { start: t`Iniciar`, stop: t`Parar`, restart: t`Reiniciar`, pause: t`Pausar`, unpause: t`Retomar`, logs: t`Logs`, remove: t`Remover` };
   var VERB = { start: t`Iniciando…`, stop: t`Parando…`, restart: t`Reiniciando…`, pause: t`Pausando…`, unpause: t`Retomando…`, remove: t`Removendo…` };
@@ -11780,7 +11924,7 @@ ${h2.join(`
   var only = "";
   var toastTimer;
   var logId = null;
-  var stream = null;
+  var stream2 = null;
   var pending = [];
   var arming = null;
   var lastSay = "";
@@ -11833,7 +11977,7 @@ ${h2.join(`
     try {
       const r = await api("/api/containers"), j2 = await r.json();
       if (r.status === 401) return showProblem([
-        t`Esta aba não tem o token do Docker GUI.`,
+        t`Esta aba não tem o token do Stivo.`,
         t`Abra o link com ${code("#t=…")} que aparece no terminal onde você rodou ${code("python3 docker_gui.py")}. O token muda a cada execução.`,
         j2,
         "auth"
@@ -11856,8 +12000,8 @@ ${h2.join(`
       showProblem(null);
     } catch (e) {
       showProblem([
-        lastOk ? t`O servidor do Docker GUI parou de responder.` : t`Não consegui conectar ao servidor do Docker GUI.`,
-        t`Rode ${code("python3 docker_gui.py")} de novo; a página volta sozinha.`,
+        lastOk ? t`O servidor do Stivo parou de responder.` : t`Não consegui conectar ao servidor do Stivo.`,
+        T.desktop ? t`Saia do Stivo pelo menu da bandeja e abra de novo.` : t`Rode ${code("python3 docker_gui.py")} de novo; a página volta sozinha.`,
         e.message,
         "server"
       ]);
@@ -11891,28 +12035,32 @@ ${h2.join(`
     clearTimeout(evRetry);
     evRetry = void 0;
     if (events || !watching()) return;
-    const es2 = events = new EventSource(`/api/events/stream?t=${encodeURIComponent(TOKEN)}`);
-    es2.onopen = () => {
-      live = true;
-      showLive();
-      refresh();
-    };
-    es2.onmessage = () => {
-      if (watching() && evTimer === void 0) evTimer = setTimeout(() => {
-        evTimer = void 0;
-        refresh();
-      }, COALESCE);
-    };
     const drop = () => {
       closeEvents();
       evRetry = setTimeout(connectEvents, POLL_LIVE);
     };
-    es2.addEventListener("end", drop);
-    es2.onerror = () => {
-      live = false;
-      showLive();
-      if (es2.readyState === EventSource.CLOSED) drop();
-    };
+    events = T.stream("/api/events/stream", {}, {
+      open: () => {
+        live = true;
+        showLive();
+        refresh();
+      },
+      // o que mudou antes de o docker events começar a ouvir
+      // uma rajada (compose up: create, start... de cada serviço) vira uma consulta só, no máximo COALESCE ms depois
+      data: () => {
+        if (watching() && evTimer === void 0) evTimer = setTimeout(() => {
+          evTimer = void 0;
+          refresh();
+        }, COALESCE);
+      },
+      end: drop,
+      // queda: reconecta sozinho, com o poll de 2 s enquanto isso; closed é recusa (token, limite, erro)
+      error: (closed) => {
+        live = false;
+        showLive();
+        if (closed) drop();
+      }
+    });
   }
   function closeEvents() {
     events?.close();
@@ -11924,8 +12072,8 @@ ${h2.join(`
     $2("#live").innerHTML = live ? `<span aria-hidden="true" class="inline-block size-1.5 mr-1.5 align-middle rounded-full bg-ok"></span>${t`ao vivo`}` : `<span aria-hidden="true" class="inline-block size-1.5 mr-1.5 align-middle rounded-full ring-1 ring-dim"></span>${t`a cada 2 s`}`;
     $2("#live").title = live ? t`A lista muda assim que o docker avisa (docker events)` : t`Sem o docker events: a lista é relida a cada 2 s`;
   }
-  var canAsk = () => isSecureContext && "Notification" in window && Notification.permission === "default";
-  var notifying = () => "Notification" in window && Notification.permission === "granted";
+  var canAsk = () => !T.desktop && isSecureContext && "Notification" in window && Notification.permission === "default";
+  var notifying = () => T.desktop || "Notification" in window && Notification.permission === "granted";
   async function askNotify() {
     const ok = await Notification.requestPermission() === "granted";
     $2("#notify").hidden = !canAsk();
@@ -11933,22 +12081,19 @@ ${h2.join(`
   }
   function notify(cs2) {
     if (!cs2.length || !notifying() || !document.hidden && document.hasFocus()) return;
-    try {
-      const n = new Notification(
-        cs2.length === 1 ? t`${cs2[0].Names} precisa de atenção` : t`${cs2.length} containers precisam de atenção`,
-        { body: cs2.length === 1 ? status(cs2[0])[0] : cs2.map((c) => c.Names).join(", ") }
-      );
-      n.onclick = () => {
+    T.notify(
+      cs2.length === 1 ? t`${cs2[0].Names} precisa de atenção` : t`${cs2.length} containers precisam de atenção`,
+      // o clique traz a página e põe o foco no Logs de quem caiu (a linha dele na faixa de atenção, que vem primeiro)
+      cs2.length === 1 ? status(cs2[0])[0] : cs2.map((c) => c.Names).join(", "),
+      () => {
         focus();
-        n.close();
-      };
-    } catch {
-    }
+        document.querySelector(`[data-id="${cs2[0].ID}"][data-a="logs"]`)?.focus();
+      }
+    );
   }
-  var icon = document.head.appendChild(Object.assign(document.createElement("link"), { rel: "icon" }));
+  var ICON = '<rect x="1" y="1" width="22" height="22" rx="5" fill="#141a22"/><rect x="5" y="5.4" width="14" height="3.6" rx="1" fill="#3fd0dc"/><rect x="5" y="10.2" width="14" height="3.6" rx="1" fill="#566273"/><rect x="5" y="15" width="8.6" height="3.6" rx="1" fill="#566273"/><rect x="15.2" y="15" width="2.6" height="3.6" rx="0.6" fill="#3fd0dc"/>';
   function setIcon(badge) {
-    const href = "data:image/svg+xml," + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"><rect x="1" y="2.5" width="22" height="19" rx="3" fill="#141a22"/><path d="M5.5 8.5 9.5 12l-4 3.5M11.5 16h6" stroke="#3fd0dc" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>${badge ? `<circle cx="16.5" cy="16.5" r="7.5" fill="#dc2626" stroke="none"/><text x="16.5" y="20" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="700" fill="#fff" stroke="none">${badge}</text>` : ""}</svg>`);
-    if (icon.getAttribute("href") !== href) icon.href = href;
+    T.attention(badge, `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none">${ICON}${badge ? `<circle cx="16.5" cy="16.5" r="7.5" fill="#dc2626" stroke="none"/><text x="16.5" y="20" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="700" fill="#fff" stroke="none">${badge}</text>` : ""}</svg>`);
   }
   var stats = {};
   var series = /* @__PURE__ */ new Map();
@@ -11991,7 +12136,7 @@ ${h2.join(`
     $2("#where").classList.replace("text-muted", "text-warn-fg");
     $2("#where").classList.replace("ring-line-strong", "ring-warn/60");
   }
-  var TITLE = CTX && CTX !== "default" ? `Docker GUI · ${CTX}` : "Docker GUI";
+  var TITLE = CTX && CTX !== "default" ? `Stivo · ${CTX}` : "Stivo";
   var PORT_HOST = (() => {
     try {
       return REMOTE && new URL(WHERE.host).hostname || "localhost";
@@ -12443,12 +12588,12 @@ ${WIDE.matches ? "" : `
     busy.set(c.ID, a);
     render();
     try {
-      const r = await api(`/api/${a}/${c.ID}`, { method: "POST" });
+      const r = await T.request("POST", `/api/${a}/${c.ID}`);
       const msg = await r.json();
       if (!r.ok) errors.set(c.ID, { msg: msg || t`erro sem mensagem`, state: c.State, what: LABEL[a] });
       return r.ok;
     } catch {
-      errors.set(c.ID, { msg: t`Sem resposta do servidor do Docker GUI.`, state: c.State, what: LABEL[a] });
+      errors.set(c.ID, { msg: t`Sem resposta do servidor do Stivo.`, state: c.State, what: LABEL[a] });
       return false;
     } finally {
       busy.delete(c.ID);
@@ -12600,21 +12745,6 @@ ${WIDE.matches ? "" : `
     disarm(false);
     run2();
   }
-  async function readOut(r, p, o2) {
-    const reader = r.body.pipeThrough(new TextDecoderStream()).getReader();
-    let rest = "", code2 = -1;
-    for (; ; ) {
-      const { value, done } = await reader.read();
-      if (done) return code2;
-      const lines = (rest + value).split("\n");
-      rest = lines.pop();
-      for (const l of lines) {
-        const v2 = JSON.parse(l);
-        if (typeof v2 === "string") addOut(p, o2, v2 + "\n");
-        else code2 = v2.code;
-      }
-    }
-  }
   var OUT_MAX = 2e5;
   var outs = /* @__PURE__ */ new Map();
   var outPre = (k) => document.querySelector(`pre[data-out="${CSS.escape(k)}"]`);
@@ -12660,17 +12790,14 @@ ${WIDE.matches ? "" : `
     render();
     $2("#shown").textContent = `${COMPOSE_VERB[a]} ${svc || p}`;
     try {
-      const r = await api(`/api/compose/${a}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ project: p, dir: workingDir(c), ...svc ? { service: svc } : {} })
-      });
-      const msg = r.ok ? (o2.code = await readOut(r, p, o2), o2.text) : (outs.delete(p), await r.json());
-      ok = r.ok && o2.code === 0;
+      const r = await T.ndjson(`/api/compose/${a}`, { project: p, dir: workingDir(c), ...svc ? { service: svc } : {} }, (l) => addOut(p, o2, l + "\n"));
+      const okStatus = r.status < 400;
+      const msg = okStatus ? (o2.code = r.code, o2.text) : (outs.delete(p), String(r.error));
+      ok = okStatus && o2.code === 0;
       toast(ok ? ids.length ? t`${p}: ${what} concluído, conferindo se ficou de pé…` : t`${p}: ${what} concluído.` : t`${p}: ${what} falhou. ${errHint(msg) || msg.trim().split("\n").at(-1) || t`Erro sem mensagem.`}`, ok);
     } catch {
       o2.code = -1;
-      toast(t`${p}: sem resposta do servidor do Docker GUI.`);
+      toast(t`${p}: sem resposta do servidor do Stivo.`);
     }
     if (ok || !o2.text) outs.delete(p);
     composing.delete(p);
@@ -12876,7 +13003,7 @@ ${WIDE.matches ? "" : `
   function sinceChange() {
     since = $2("#lsince").value;
     complete = false;
-    if (stream) toggleFollow(true);
+    if (stream2) toggleFollow(true);
     else fetchLogs();
   }
   function markInto(el2, text, re2) {
@@ -12960,7 +13087,7 @@ ${WIDE.matches ? "" : `
     marked = false;
     prevLv = /* @__PURE__ */ new Map();
     shown = buf.map(() => true);
-    if (buf.length && (re2 || narrowed() || stream || colored())) {
+    if (buf.length && (re2 || narrowed() || stream2 || colored())) {
       const frag = document.createDocumentFragment();
       buf.forEach((l, i) => {
         const m = markNode(l), n = re2 || narrowed() || colored() ? hitNode(l, re2) : l;
@@ -12977,7 +13104,7 @@ ${WIDE.matches ? "" : `
     const next = TAILS[tailAt + 1], b2 = $2("#more");
     b2.textContent = !next || complete ? t`Tudo carregado` : next === "all" ? t`Carregar tudo` : t`Carregar ${fmt(+next)} linhas`;
     b2.toggleAttribute("data-done", !next || complete);
-    b2.setAttribute("aria-disabled", String(!next || complete || !!stream && tailAt + 1 >= LIVE_TAILS));
+    b2.setAttribute("aria-disabled", String(!next || complete || !!stream2 && tailAt + 1 >= LIVE_TAILS));
   }
   async function fetchLogs(more = false) {
     const lb = $2("#lb"), atEnd = lb.scrollHeight - lb.scrollTop - lb.clientHeight < 40;
@@ -12999,7 +13126,7 @@ ${WIDE.matches ? "" : `
       $2("#lmeta").textContent = t`${hist().replace(/^./, (c) => c.toUpperCase())} · atualizado às ${(/* @__PURE__ */ new Date()).toLocaleTimeString(LOCALE)}`;
     } catch {
       buf = [];
-      lb.textContent = t`Não consegui carregar os logs. O servidor do Docker GUI está rodando?`;
+      lb.textContent = t`Não consegui carregar os logs. O servidor do Stivo está rodando?`;
     }
     renderMore();
     if (more) lb.scrollTop = lb.scrollHeight - fromEnd;
@@ -13043,11 +13170,11 @@ ${WIDE.matches ? "" : `
   }
   function loadMore() {
     if ($2("#more").getAttribute("aria-disabled") === "true") {
-      if (stream && TAILS[tailAt + 1]) toast(t`Ao vivo, o histórico vai até ${fmt(+TAILS[LIVE_TAILS - 1])} linhas. Para carregar tudo, desligue o ao vivo.`);
+      if (stream2 && TAILS[tailAt + 1]) toast(t`Ao vivo, o histórico vai até ${fmt(+TAILS[LIVE_TAILS - 1])} linhas. Para carregar tudo, desligue o ao vivo.`);
       return;
     }
     tailAt++;
-    if (stream) toggleFollow(true);
+    if (stream2) toggleFollow(true);
     else fetchLogs(true);
     renderMore();
   }
@@ -13071,37 +13198,40 @@ ${WIDE.matches ? "" : `
     if (re2 || narrowed()) renderHits();
     if (atEnd) lb.scrollTop = lb.scrollHeight;
   }
-  function toggleFollow(on2 = !stream, why = "") {
-    const was = !!stream;
-    stream?.close();
-    stream = null;
+  function toggleFollow(on2 = !stream2, why = "") {
+    const was = !!stream2;
+    stream2?.close();
+    stream2 = null;
     streamOpen = false;
     if (was) flushLogs();
     if (on2) {
       tailAt = Math.min(tailAt, LIVE_TAILS - 1);
       complete = false;
-      const q2 = new URLSearchParams({ ...logProject, t: TOKEN, tail: TAILS[tailAt], ...since ? { since } : {} });
-      const es2 = stream = new EventSource(logProject ? `/api/compose/logs/stream?${q2}` : `/api/logs/${logId}/stream?${q2}`);
-      es2.onopen = () => {
-        streamOpen = true;
-        pending = [];
-        buf = [];
-        shown = [];
-        prevLv = /* @__PURE__ */ new Map();
-        hits = hitLines = 0;
-        marked = false;
-        $2("#lb").textContent = "";
-        renderHits();
-        $2("#lmeta").textContent = t`Ao vivo · ${hist()} e as novas`;
-      };
-      es2.onmessage = (e) => {
-        if (pending.push(JSON.parse(e.data)) === 1) setTimeout(flushLogs, 50);
-      };
-      es2.addEventListener("end", () => toggleFollow(false, logProject ? t`os containers pararam` : t`o container parou`));
-      es2.onerror = () => {
-        if (es2.readyState === EventSource.CLOSED) toggleFollow(false, t`falhou`);
-        else $2("#lmeta").textContent = t`Ao vivo · reconectando…`;
-      };
+      const q2 = { ...logProject, tail: TAILS[tailAt], ...since ? { since } : {} };
+      stream2 = T.stream(logProject ? "/api/compose/logs/stream" : `/api/logs/${logId}/stream`, q2, {
+        // cada conexão (inclusive a reconexão automática) recomeça do histórico pedido: limpa para não duplicar
+        open: () => {
+          streamOpen = true;
+          pending = [];
+          buf = [];
+          shown = [];
+          prevLv = /* @__PURE__ */ new Map();
+          hits = hitLines = 0;
+          marked = false;
+          $2("#lb").textContent = "";
+          renderHits();
+          $2("#lmeta").textContent = t`Ao vivo · ${hist()} e as novas`;
+        },
+        data: (line) => {
+          if (pending.push(JSON.parse(line)) === 1) setTimeout(flushLogs, 50);
+        },
+        end: () => toggleFollow(false, logProject ? t`os containers pararam` : t`o container parou`),
+        // queda de rede: reconecta sozinho; closed é recusa do servidor (token, erro)
+        error: (closed) => {
+          if (closed) toggleFollow(false, t`falhou`);
+          else $2("#lmeta").textContent = t`Ao vivo · reconectando…`;
+        }
+      });
     } else if (was) $2("#lmeta").textContent = t`Ao vivo parado às ${(/* @__PURE__ */ new Date()).toLocaleTimeString(LOCALE)}${why ? ` · ${why}` : ""}`;
     $2("#follow").setAttribute("aria-pressed", String(on2));
     $2("#refresh").setAttribute("aria-disabled", String(on2));
@@ -13110,7 +13240,7 @@ ${WIDE.matches ? "" : `
   function followClick() {
     toggleFollow();
     try {
-      localStorage.setItem("docker-gui-follow", stream ? "1" : "");
+      localStorage.setItem("docker-gui-follow", stream2 ? "1" : "");
     } catch {
     }
   }
@@ -13122,7 +13252,7 @@ ${WIDE.matches ? "" : `
     }
   };
   function refreshLogs() {
-    if (!stream) fetchLogs();
+    if (!stream2) fetchLogs();
   }
   function copyLogs() {
     navigator.clipboard.writeText($2("#lb").textContent ?? "").then(() => toast(t`Logs copiados.`, true), () => toast(t`Não consegui copiar.`));
@@ -13224,30 +13354,27 @@ ${WIDE.matches ? "" : `
     $2("#shell-status").textContent = t`Conectando…`;
     $2("#shell").showModal();
     const term = new Dl({ cursorBlink: true, fontSize: 13, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" });
-    const fit = new o(), enc = new TextEncoder();
+    const fit = new o();
     term.loadAddon(fit);
     term.open($2("#shell-box"));
     fit.fit();
-    const ws2 = new WebSocket(`ws://${location.host}/api/exec/${id}?t=${encodeURIComponent(TOKEN)}`);
-    ws2.binaryType = "arraybuffer";
-    const size = () => {
-      if (ws2.readyState === WebSocket.OPEN) ws2.send(JSON.stringify({ cols: term.cols, rows: term.rows }));
-    };
-    ws2.onopen = () => {
-      size();
-      $2("#shell-status").textContent = t`Conectado. Esc vai para o terminal; feche pelo ×.`;
-      term.focus();
-    };
-    ws2.onmessage = (e) => {
-      if (typeof e.data === "string") $2("#shell-status").textContent = e.data;
-      else term.write(new Uint8Array(e.data));
-    };
-    ws2.onclose = () => {
-      $2("#shell-status").textContent = t`Sessão encerrada.`;
-    };
-    term.onData((d) => {
-      if (ws2.readyState === WebSocket.OPEN) ws2.send(enc.encode(d));
+    const size = () => ws2.resize(term.cols, term.rows);
+    const ws2 = T.terminal(id, {
+      open: () => {
+        size();
+        $2("#shell-status").textContent = t`Conectado. Esc vai para o terminal; feche pelo ×.`;
+        term.focus();
+      },
+      data: (b2) => term.write(b2),
+      // aviso do servidor (no Windows, imagem sem TTY), que vai para o status
+      notice: (text) => {
+        $2("#shell-status").textContent = text;
+      },
+      close: () => {
+        $2("#shell-status").textContent = t`Sessão encerrada.`;
+      }
     });
+    term.onData((d) => ws2.send(d));
     term.onResize(size);
     const ro2 = new ResizeObserver(() => fit.fit());
     ro2.observe($2("#shell-box"));
@@ -13257,7 +13384,6 @@ ${WIDE.matches ? "" : `
     if (!sess) return;
     const { id, term, ws: ws2, ro: ro2 } = sess;
     sess = null;
-    ws2.onclose = ws2.onmessage = null;
     ws2.close();
     ro2.disconnect();
     term.dispose();
@@ -13307,11 +13433,11 @@ ${WIDE.matches ? "" : `
     $2("#shown").textContent = t`Criando ${label}…`;
     let ok = false, msg;
     try {
-      const r = await api("/api/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(spec) });
+      const r = await T.request("POST", "/api/run", spec);
       msg = await r.json();
       ok = r.ok;
     } catch {
-      msg = t`Sem resposta do servidor do Docker GUI.`;
+      msg = t`Sem resposta do servidor do Stivo.`;
     }
     creating = false;
     go2.removeAttribute("aria-disabled");
@@ -13371,7 +13497,7 @@ ${WIDE.matches ? "" : `
       const r = await api("/api/df"), j2 = await r.json();
       disk = r.ok ? j2 : t`Não consegui ler o uso de disco: ${j2}`;
     } catch {
-      disk = t`Não consegui ler o uso de disco. O servidor do Docker GUI está rodando?`;
+      disk = t`Não consegui ler o uso de disco. O servidor do Stivo está rodando?`;
     }
     render();
   }
@@ -13402,12 +13528,12 @@ ${WIDE.matches ? "" : `
     render();
     $2("#shown").textContent = t`Limpando ${label.toLowerCase()}…`;
     try {
-      const r = await api("/api/prune/" + k, { method: "POST" }), msg = await r.json();
+      const r = await T.request("POST", "/api/prune/" + k), msg = await r.json();
       const freed = msg.match(/Total(?: reclaimed space)?:\s*(\S+)/)?.[1];
       if (r.ok) toast(`${label}: ${freed ? t`${freed} liberados` : t`limpeza feita`}.`, true);
       else toast(t`Não deu para limpar ${label.toLowerCase()}: ${msg || t`erro sem mensagem`}`);
     } catch {
-      toast(t`Sem resposta do servidor do Docker GUI.`);
+      toast(t`Sem resposta do servidor do Stivo.`);
     }
     diskBusy = "";
     await Promise.all([loadTab(), k === "containers" && load()]);
@@ -13430,7 +13556,7 @@ ${WIDE.matches ? "" : `
       const r = await api("/api/" + k), j2 = await r.json();
       objs[k] = r.ok ? j2 : t`Não consegui ler a lista: ${j2}`;
     } catch {
-      objs[k] = t`Não consegui ler a lista. O servidor do Docker GUI está rodando?`;
+      objs[k] = t`Não consegui ler a lista. O servidor do Stivo está rodando?`;
     }
     render();
   }
@@ -13496,7 +13622,7 @@ ${WIDE.matches ? "" : `
     $2("#shown").textContent = t`Removendo ${one} ${name}…`;
     let ok = false;
     try {
-      const res = await api(`/api/rm/${rm}/${encodeURIComponent(r)}`, { method: "POST" }), msg = await res.json();
+      const res = await T.request("POST", `/api/rm/${rm}/${encodeURIComponent(r)}`), msg = await res.json();
       ok = res.ok;
       if (ok) toast(`${label} ${name} ${done}.`, true);
       else {
@@ -13504,11 +13630,47 @@ ${WIDE.matches ? "" : `
         toast(t`Não deu para remover ${one} ${name}. ${errHint(msg) || t`O erro ficou na lista.`}`);
       }
     } catch {
-      toast(t`Sem resposta do servidor do Docker GUI.`);
+      toast(t`Sem resposta do servidor do Stivo.`);
     }
     objBusy = "";
     await loadTab();
     if (ok) (document.querySelector(`[data-id="${near}"][data-a="rm"]`) || $2("#tab-" + k)).focus();
+  }
+  async function openPrefs() {
+    const p = await T.prefs.get(), sel2 = (k) => $2(`#pref-${k}`);
+    const ctx = sel2("context");
+    ctx.replaceChildren(ctx.options[0], ...p.contexts.map((c) => Object.assign(document.createElement("option"), { value: c, textContent: c })));
+    sel2("cli").value = p.cli ?? "";
+    ctx.value = p.context && p.contexts.includes(p.context) ? p.context : "";
+    sel2("lang").value = p.lang ?? "";
+    $2("#pref-notify").checked = p.notifications;
+    prefsContext();
+    $2("#prefs-msg").textContent = "";
+    $2("#prefs").showModal();
+    sel2("cli").focus();
+  }
+  function prefsContext() {
+    $2("#pref-context-row").hidden = $2("#pref-cli").value === "podman";
+  }
+  async function savePrefs(e) {
+    e.preventDefault();
+    const v2 = (k) => $2(`#pref-${k}`).value || null, go2 = $2("#prefs-go");
+    if (go2.getAttribute("aria-disabled") === "true") return;
+    go2.setAttribute("aria-disabled", "true");
+    const err = await T.prefs.set({
+      cli: v2("cli"),
+      context: v2("cli") === "podman" ? null : v2("context"),
+      lang: v2("lang"),
+      notifications: $2("#pref-notify").checked
+    });
+    go2.removeAttribute("aria-disabled");
+    if (err) $2("#prefs-msg").textContent = err;
+  }
+  if (T.prefs) {
+    $2("#prefs-open").hidden = false;
+    T.prefs.onOpen(() => void openPrefs());
+    $2("#prefs-form").addEventListener("submit", savePrefs);
+    $2("#pref-cli").addEventListener("change", prefsContext);
   }
   Object.assign(window, {
     ackFail,
@@ -13536,6 +13698,7 @@ ${WIDE.matches ? "" : `
     logPick,
     menuPick,
     openCreate,
+    openPrefs,
     openShell,
     pickTab,
     placeMenu,

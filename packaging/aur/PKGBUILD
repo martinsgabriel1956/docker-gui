@@ -1,0 +1,25 @@
+# Maintainer: Gabriel Martins
+# Pacote binário: o .deb da release do GitHub, desempacotado. Para uma versão nova: pkgver, updpkgsums e
+# makepkg --printsrcinfo > .SRCINFO (veja packaging/README.md)
+pkgname=stivo-bin
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Containers Docker e Podman: lista ao vivo, logs, compose e terminal, avisando da bandeja quando algo quebra"
+arch=('x86_64')
+url="https://github.com/martinsgabriel1956/docker-gui"
+license=('MIT')
+depends=('webkit2gtk-4.1' 'gtk3' 'libayatana-appindicator' 'hicolor-icon-theme')
+optdepends=('docker: o CLI que o Stivo usa'
+            'podman: no lugar do docker')
+provides=('stivo')
+conflicts=('stivo')
+source=("Stivo_${pkgver}_amd64.deb::${url}/releases/download/v${pkgver}/Stivo_${pkgver}_amd64.deb"
+        "LICENSE::https://raw.githubusercontent.com/martinsgabriel1956/docker-gui/v${pkgver}/LICENSE")
+# atualize com updpkgsums depois que a release existir
+sha256sums=('SKIP'
+            'SKIP')
+
+package() {
+  bsdtar -xf data.tar.gz -C "${pkgdir}"
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}

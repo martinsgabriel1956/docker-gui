@@ -1,0 +1,17 @@
+{
+  "desc": "tail vazio é inválido, não o padrão",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [],
+  "request": {
+    "method": "GET",
+    "path": "/api/logs/0123456789ab?tail=",
+    "body": null
+  },
+  "response": {
+    "status": 400,
+    "body": "tail inválido"
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "desc": "saída do image ls que não é JSON: 500 com a explicação",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "isto não é json\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "image",
+        "ls",
+        "--no-trunc",
+        "--format",
+        "{{json .}}"
+      ]
+    },
+    {
+      "stdout": "",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "ps",
+        "-a",
+        "-q",
+        "--no-trunc"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/images",
+    "body": null
+  },
+  "response": {
+    "status": 500,
+    "body": "formato inesperado na saída do docker image ls --no-trunc"
+  }
+}

@@ -32,6 +32,7 @@ for (row, &limit) in constraints.iter().zip(limits.iter()) {
 }
 let solution = problem.solve().unwrap();
 ```
+
 **Libraries:** `minilp`, `good_lp`, `osqp`
 
 ### Submodular Greedy
@@ -52,6 +53,7 @@ where F: Fn(&[usize]) -> f64 {
     selected
 }
 ```
+
 **Guarantee:** 63% of optimal for monotone submodular
 
 ### Semiring Generalization
@@ -90,6 +92,7 @@ impl Semiring for bool {
 **Recognition:** Independent sets satisfy hereditary property + exchange property
 
 **Examples:**
+
 - Graphic matroids (spanning trees)
 - Partition matroids (select k from each category)
 - Linear matroids (linearly independent vectors)
@@ -120,6 +123,7 @@ fn greedy_matroid<I: Matroid>(elements: &[Element], matroid: &I) -> Vec<Element>
 use pathfinding::prelude::*;
 let (flow, cost, paths) = edmonds_karp(&graph, source, sink);
 ```
+
 **Libraries:** `pathfinding`, `petgraph`
 
 ### 2-SAT Reduction
@@ -278,6 +282,7 @@ let sa = SuffixArray::new(text);
 let lcp = sa.lcp_array();
 let range = sa.search(pattern);  // O(m log n)
 ```
+
 **Libraries:** `suffix_array`, `cdivsufsort`
 
 ### Wavelet Trees
@@ -290,6 +295,7 @@ let range = sa.search(pattern);  // O(m log n)
 // select(c, k): position of k-th occurrence of c
 // quantile(l, r, k): k-th smallest in range [l, r)
 ```
+
 **Libraries:** `wavelet-matrix`
 
 ### Link-Cut Trees
@@ -303,6 +309,7 @@ let range = sa.search(pattern);  // O(m log n)
 // path_query(u, v): Aggregate on u-v path
 // find_root(u): Find tree root
 ```
+
 **Libraries:** `link_cut_tree` crate or implement from scratch
 
 ### Heavy-Light Decomposition
@@ -414,6 +421,7 @@ let mut hll: HyperLogLog<str> = HyperLogLog::new(14).unwrap();  // 2^14 register
 for item in stream { hll.insert(&item); }
 let cardinality = hll.count();
 ```
+
 **Libraries:** `hyperloglogplus`
 
 ### Locality-Sensitive Hashing (LSH)
@@ -468,6 +476,7 @@ impl CuckooFilter {
     }
 }
 ```
+
 **Libraries:** `cuckoofilter`, `xorf`
 
 ### Minimal Perfect Hashing
@@ -496,6 +505,7 @@ impl MinimalPerfectHash {
     }
 }
 ```
+
 **Libraries:** `phf` (compile-time), `boomphf`, `ph`
 
 ### Fractional Cascading
@@ -520,6 +530,7 @@ impl FractionalCascade {
     }
 }
 ```
+
 **Use cases:** Computational geometry, database range queries
 
 ---
@@ -904,6 +915,7 @@ fn quickselect<T: Ord + Clone>(arr: &mut [T], k: usize) -> T {
 **Key insight:** Don't optimize operations that are already amortized O(1)
 
 **Examples:**
+
 - **Dynamic array resize:** O(1) amortized push despite O(n) occasional resize
 - **Union-Find path compression:** O(α(n)) amortized despite O(log n) worst case
 - **Splay tree:** O(log n) amortized despite O(n) worst case
@@ -954,46 +966,47 @@ fn nw_score_linear_space(a: &[u8], b: &[u8]) -> Vec<i32> {
     prev
 }
 ```
+
 **Use cases:** Bioinformatics, diff algorithms, sequences >10K elements
 
 ---
 
 ## Quick Reference
 
-| Technique | Recognition | Complexity Change |
-|-----------|-------------|-------------------|
-| Convex optimization | Continuous params + convex constraints | Brute → poly |
-| Submodular greedy | Diminishing returns | Optimal (63%) |
-| Matroid greedy | Hereditary + exchange property | Optimal |
-| 2-SAT | Pairwise boolean constraints | O(n+m) |
-| DP as shortest path | DAG + non-uniform costs | Dijkstra-style |
-| CHT / Li Chao | Linear cost DP | O(n²) → O(n log n) |
-| Knuth optimization | Monotonic optimal split | O(n³) → O(n²) |
-| D&C DP | Similar to Knuth, 1D | O(n²) → O(n log n) |
-| FFT convolution | Polynomial multiply | O(n²) → O(n log n) |
-| Matrix exponentiation | Linear recurrence | O(n) → O(log n) |
-| Möbius transform | Subset sums | O(3^n) → O(n·2^n) |
-| GF(2) linear algebra | XOR systems | Gaussian elim |
-| HyperLogLog | Count distinct | O(n) → O(log log n) space |
-| LSH | Approximate NN | Sublinear query |
-| Bidirectional search | Exponential branch | O(b^d) → O(b^{d/2}) |
-| Mo's algorithm | Offline range queries | O(qn) → O((n+q)√n) |
-| Fractional cascading | Multi-list search | O(k log n) → O(log n + k) |
-| Cuckoo filter | Membership + delete | Better than Bloom |
-| Minimal perfect hash | Static keys | O(1), 2-3 bits/key |
-| Reservoir sampling | Stream sampling | O(n) time, O(k) space |
-| Quickselect | kth element | O(n) expected |
-| Hirschberg | Alignment | O(nm) time, O(n) space |
-| Cache-oblivious | Any cache size | Recursive blocking |
+| Technique             | Recognition                            | Complexity Change         |
+| --------------------- | -------------------------------------- | ------------------------- |
+| Convex optimization   | Continuous params + convex constraints | Brute → poly              |
+| Submodular greedy     | Diminishing returns                    | Optimal (63%)             |
+| Matroid greedy        | Hereditary + exchange property         | Optimal                   |
+| 2-SAT                 | Pairwise boolean constraints           | O(n+m)                    |
+| DP as shortest path   | DAG + non-uniform costs                | Dijkstra-style            |
+| CHT / Li Chao         | Linear cost DP                         | O(n²) → O(n log n)        |
+| Knuth optimization    | Monotonic optimal split                | O(n³) → O(n²)             |
+| D&C DP                | Similar to Knuth, 1D                   | O(n²) → O(n log n)        |
+| FFT convolution       | Polynomial multiply                    | O(n²) → O(n log n)        |
+| Matrix exponentiation | Linear recurrence                      | O(n) → O(log n)           |
+| Möbius transform      | Subset sums                            | O(3^n) → O(n·2^n)         |
+| GF(2) linear algebra  | XOR systems                            | Gaussian elim             |
+| HyperLogLog           | Count distinct                         | O(n) → O(log log n) space |
+| LSH                   | Approximate NN                         | Sublinear query           |
+| Bidirectional search  | Exponential branch                     | O(b^d) → O(b^{d/2})       |
+| Mo's algorithm        | Offline range queries                  | O(qn) → O((n+q)√n)        |
+| Fractional cascading  | Multi-list search                      | O(k log n) → O(log n + k) |
+| Cuckoo filter         | Membership + delete                    | Better than Bloom         |
+| Minimal perfect hash  | Static keys                            | O(1), 2-3 bits/key        |
+| Reservoir sampling    | Stream sampling                        | O(n) time, O(k) space     |
+| Quickselect           | kth element                            | O(n) expected             |
+| Hirschberg            | Alignment                              | O(nm) time, O(n) space    |
+| Cache-oblivious       | Any cache size                         | Recursive blocking        |
 
 ### Libraries
 
-| Category | Libraries |
-|----------|-----------|
-| LP/Optimization | `minilp`, `good_lp`, `osqp` |
-| Graph | `pathfinding`, `petgraph` |
-| Strings | `suffix_array`, `cdivsufsort` |
-| Probabilistic | `hyperloglogplus`, `cuckoofilter`, `bloom` |
-| FFT | `rustfft` |
-| Perfect hash | `phf`, `boomphf` |
-| Wavelets | `wavelet-matrix` |
+| Category        | Libraries                                  |
+| --------------- | ------------------------------------------ |
+| LP/Optimization | `minilp`, `good_lp`, `osqp`                |
+| Graph           | `pathfinding`, `petgraph`                  |
+| Strings         | `suffix_array`, `cdivsufsort`              |
+| Probabilistic   | `hyperloglogplus`, `cuckoofilter`, `bloom` |
+| FFT             | `rustfft`                                  |
+| Perfect hash    | `phf`, `boomphf`                           |
+| Wavelets        | `wavelet-matrix`                           |

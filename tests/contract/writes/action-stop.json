@@ -1,0 +1,27 @@
+{
+  "desc": "stop: docker stop <id>",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "0123456789ab\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "stop",
+        "0123456789ab"
+      ]
+    }
+  ],
+  "request": {
+    "method": "POST",
+    "path": "/api/stop/0123456789ab",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": ""
+  }
+}

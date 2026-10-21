@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="1024" height="1024" fill="none">
+  <!-- Stivo: uma pilha de contêineres (a estiva) em que a última linha é o cursor do terminal. Fonte de todos os
+       ícones (npx tauri icon src-tauri/icons/stivo.svg) e o mesmo desenho do favicon da web (setIcon, src/app.ts) -->
+  <rect x="1" y="1" width="22" height="22" rx="5" fill="#141a22"/>
+  <rect x="5" y="5.4" width="14" height="3.6" rx="1" fill="#3fd0dc"/>
+  <rect x="5" y="10.2" width="14" height="3.6" rx="1" fill="#566273"/>
+  <rect x="5" y="15" width="8.6" height="3.6" rx="1" fill="#566273"/>
+  <rect x="15.2" y="15" width="2.6" height="3.6" rx="0.6" fill="#3fd0dc"/>
+</svg>

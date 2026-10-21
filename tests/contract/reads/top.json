@@ -1,0 +1,27 @@
+{
+  "desc": "docker top como o CLI imprime",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "UID PID PPID C STIME TTY TIME CMD\nroot 1 0 0 10:00 ? 00:00:00 sh\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "top",
+        "0123456789ab"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/top/0123456789ab",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": "UID PID PPID C STIME TTY TIME CMD\nroot 1 0 0 10:00 ? 00:00:00 sh"
+  }
+}

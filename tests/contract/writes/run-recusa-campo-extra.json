@@ -1,0 +1,21 @@
+{
+  "desc": "run recusado (campo-extra): 400 sem chamar o docker",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [],
+  "request": {
+    "method": "POST",
+    "path": "/api/run",
+    "body": {
+      "image": "nginx",
+      "privileged": true,
+      "command": "sh"
+    }
+  },
+  "response": {
+    "status": 400,
+    "body": "campo não suportado: command, privileged"
+  }
+}

@@ -1,6 +1,8 @@
-# Docker GUI
+# Stivo
 
-Gerenciador de containers Docker no navegador, num arquivo Python só. Usa apenas a biblioteca padrão e o `docker` CLI que você já tem.
+Gerenciador de containers para Docker e Podman, de duas formas: no navegador, num arquivo Python só (usa apenas a biblioteca padrão e o `docker` CLI que você já tem), ou como [app desktop](#app-desktop) para Linux e Windows, que fica na bandeja e avisa quando algo quebra.
+
+> Até outubro de 2026 o projeto se chamava Docker GUI. O nome mudou porque as [diretrizes de marca da Docker](https://www.docker.com/legal/trademark-guidelines/) não permitem "Docker" em nome de produto; o comando, as variáveis `DOCKER_GUI_*` e o que a página guarda no navegador continuam iguais.
 
 ```bash
 python3 docker_gui.py
@@ -35,6 +37,20 @@ DOCKER_GUI_LANG=pt python3 docker_gui.py
 
 A saída do `podman ps` tem outro formato (`Names` em lista, portas como objetos, labels como dicionário…), e a do `podman stats` também (`cpu_percent`, `net_io`…; pelo `podman-docker`, números crus). O servidor converte tudo para o formato do `docker ps` e do `docker stats`, então a página funciona igual. O mesmo vale para as listas de imagens (tamanho em bytes, data em epoch), volumes e redes (chaves em minúsculas no Podman 4+). Uma rede que venha sem ID (formatos antigos do Podman) aparece na lista, mas sem o botão de remover. O "Copiar `docker exec`" usa o mesmo binário e contexto.
 
+## App desktop
+
+O Stivo também vem como app instalável para Linux (`.deb` e `.rpm`) e Windows (`.msi` e `.exe`), com as mesmas features da página. A diferença:
+
+- **Não precisa de Python.** O instalador tem uns 3 MB e usa a WebView do sistema (o WebKitGTK no Linux, o WebView2 no Windows); do lado de fora, só o `docker` (ou o `podman`).
+- **Fica na bandeja.** Fechar a janela não encerra o app: ele continua vigiando os containers, o ícone da bandeja mostra quantos precisam de atenção e a notificação do sistema avisa quando um entra na faixa (com as mesmas regras da página: só quem entra, uma notificação para vários juntos). Para sair, use Sair no menu da bandeja. Abrir o Stivo de novo traz a janela de volta.
+- **Nenhuma porta aberta.** A janela fala com o núcleo pela IPC do app, sem servidor em `localhost` e sem token.
+- **Preferências** no cabeçalho e no menu da bandeja: CLI (Docker ou Podman), contexto do docker, idioma e notificações. Valem na hora.
+- **Terminal com TTY também no Windows** (ConPTY), sem o `script` dentro do container.
+
+No GNOME, a bandeja depende da extensão [AppIndicator](https://extensions.gnome.org/extension/615/appindicator-support/): sem ela o ícone não aparece (o app continua rodando, e abrir o Stivo de novo traz a janela). No Windows, como o instalador não é assinado, o SmartScreen avisa na primeira execução ("Mais informações" → "Executar assim mesmo").
+
+Os instaladores saem em cada [release](https://github.com/martinsgabriel1956/docker-gui/releases).
+
 ## O que faz
 
 - **Lista ao vivo** de todos os containers, atualizada pelos eventos do `docker events`: quando um container é criado, sobe, cai, pausa ou muda de saúde (`health_status`), a lista é consultada de novo em até 200 ms, e uma rajada (um `compose up`, por exemplo) vira uma consulta só. Os `exec` que o healthcheck roda a cada intervalo são ignorados. Como o Docker não avisa a passagem do tempo ("Up 5 minutes"), um poll de segurança roda a cada 30s. Se o stream de eventos cair, for recusado ou não existir (um Podman antigo, por exemplo), a lista volta ao poll de 2s e tenta os eventos de novo depois de 30s. Só as linhas que mudaram são redesenhadas, e com a aba escondida a página para de consultar e fecha o stream (a não ser com as notificações ligadas).
@@ -43,7 +59,7 @@ A saída do `podman ps` tem outro formato (`Names` em lista, portas como objetos
 - **Faixa "Precisa de atenção"** com o que está quebrado: healthcheck falhando, loop de reinício e saída com código diferente de zero. O status vem traduzido, por exemplo "Saiu com código 137 · sem memória (OOM)", e quem caiu mostra também a última linha do log. Junto com ela vem o `docker inspect` (os dois lidos uma vez por queda, não a cada consulta): o código 137 se separa em falta de memória (`OOMKilled`) ou morto à força com SIGKILL, e quem saiu diz quantas vezes o docker já o reiniciou (no loop de reinício a contagem fica de fora, porque mudaria a cada volta).
 - **Em qual daemon a página age**, ao lado do título: `docker · default`, `docker · producao`, `podman`… O contexto vem do próprio `docker context inspect` (que já resolve `--context`, `DOCKER_CONTEXT`, `DOCKER_HOST` e o `docker context use`). Quando o daemon é remoto (endereço que não é `unix://` nem `npipe://`), o rótulo fica em âmbar, uma faixa no topo lembra o tempo todo onde as ações caem, os avisos e as confirmações começam pelo nome do contexto e as portas abrem pelo host do daemon (as publicadas só no `127.0.0.1` de lá viram informação, porque daqui não abrem). Fora do `default`, o contexto vai também para o título da aba.
 - **Favicon com a contagem** da faixa de atenção (`9+` acima de 9) e `!` quando a lista não consegue atualizar.
-- **Notificação do sistema** quando um container entra na faixa de atenção, só se você pedir pelo botão "Notificar quando algo der problema", abaixo da busca. O botão aparece em contexto seguro (`localhost` é) enquanto a permissão não foi decidida. A notificação só sai com a página em segundo plano (aba escondida ou janela sem foco): `<nome> precisa de atenção`, com o status no corpo, ou `N containers precisam de atenção`, com os nomes, quando entram vários juntos. Quem já estava na faixa ao abrir a página não notifica e quem continua nela não repete; sair e voltar conta como entrada nova. Clicar na notificação traz a página para a frente. No Chrome do Android ela não aparece, e fica só o favicon.
+- **Notificação do sistema** quando um container entra na faixa de atenção, só se você pedir pelo botão "Notificar quando algo der problema", abaixo da busca. O botão aparece em contexto seguro (`localhost` é) enquanto a permissão não foi decidida. A notificação só sai com a página em segundo plano (aba escondida ou janela sem foco): `<nome> precisa de atenção`, com o status no corpo, ou `N containers precisam de atenção`, com os nomes, quando entram vários juntos. Quem já estava na faixa ao abrir a página não notifica e quem continua nela não repete; sair e voltar conta como entrada nova. Clicar na notificação traz a página para a frente, com o foco no Logs de quem caiu. No Chrome do Android ela não aparece, e fica só o favicon.
 - **Agrupamento por projeto do compose** (`com.docker.compose.project`), com uma faixa de estado (um bloco por container, na cor do estado), **Iniciar / Reiniciar / Parar tudo** (com um container só, o botão diz qual: "Iniciar worker") e "Iniciar de novo" para desfazer.
 - **`compose up` / `up --build` / `pull` / `down` por projeto**, com a pasta e os arquivos do compose lidos dos labels dos containers (o servidor nunca confia num caminho vindo da página). O `down` pede confirmação em 2 passos e diz quais containers vão sair: os volumes ficam, mas o projeto some da lista e só volta com `up` pelo terminal. No cabeçalho do projeto ficam a ação principal (Iniciar tudo se algo está parado, senão Parar tudo) e Logs; o resto fica no menu "⋯" do projeto.
 - **Saída ao vivo do compose:** enquanto o `up`, o `up --build`, o `pull`, o `down` ou uma ação de serviço (reiniciar, reconstruir, subir) roda, a saída do compose (o build, linha a linha, e o progresso) aparece logo abaixo do cabeçalho do projeto. Deu certo, ela some e o aviso confirma. Falhou, ela fica aberta com o código de saída até você fechar (×), e o motivo, que o compose escreve no fim, fica à vista sem abrir o terminal. Fechar a aba no meio não interrompe o compose (um `down` pela metade deixaria o projeto pela metade); só o prazo de 10 min o interrompe.
@@ -136,6 +152,22 @@ python3 build.py --css   # HTML, JS e CSS
 
 Não edite o bloco gerado do `docker_gui.py` à mão: o CI confere se ele bate com `src/`.
 
+O app desktop usa a mesma página. O `build.py` gera também o `src-tauri/dist/index.html`, trocando o transporte: o `app.ts` importa `#transport`, que o `package.json` resolve para o `src/transport-web.ts` (fetch, `EventSource`, `WebSocket`) ou, com a condição `desktop` do esbuild, para o `src/transport-desktop.ts` (a IPC do Tauri). O resto mora em `src-tauri/`:
+
+| Pasta | O que tem |
+|---|---|
+| `src-tauri/core/` | O núcleo em Rust: as mesmas rotas do servidor Python (listas, ações, compose, logs e eventos ao vivo, terminal num PTY), sem Tauri e sem HTTP. O binário `harness` (só de teste) serve a página da web com ele |
+| `src-tauri/src/` | O app Tauri: a página no protocolo `dg://`, os comandos da IPC, a bandeja, as notificações e as preferências |
+| `tests/contract/` | O contrato entre os dois backends: o que o docker responde e o que a API devolve, conferido no `unittest` e no `cargo test` |
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml      # núcleo, contrato e app (precisa do Rust)
+npx tauri dev                                         # o app, com o docker de verdade
+npx tauri build --bundles deb,rpm                     # os instaladores (msi,nsis no Windows)
+```
+
+No Linux, o build do app precisa de `libwebkit2gtk-4.1-dev` e `libayatana-appindicator3-dev`.
+
 O texto da interface fica em pt-BR no código. Uma frase nova vai num `t\`...\`` (em `src/*.ts`) ou direto no `page.html`, e a tradução dela vai no `src/en.json`; no servidor, num `tr("...")` com a tradução no `EN` do `docker_gui.py`. O `tests/test_i18n.py` falha se faltar tradução, se sobrar chave que ninguém usa ou se os `{0}`, `{1}`... não baterem.
 
 ## Testes
@@ -165,9 +197,12 @@ Os testes de UI usam o [Playwright](https://playwright.dev) e cobrem o que a pá
 ```bash
 npx playwright install chromium   # uma vez
 npm run test:e2e
+npm run test:e2e:rust             # os mesmos specs contra o núcleo Rust do desktop (pelo harness)
 ```
 
-O CI roda tudo isso em cada pull request e em cada push na `main` e na `develop`: lint (`ruff check`), testes em Python 3.7 a 3.14, E2E com Docker real, tipos (`tsc`) e testes do `format.ts`, testes de UI com Playwright, e a conferência de que o `docker_gui.py` está em dia com `src/`, CSS incluído.
+O que o harness não cobre (a janela, fechar que esconde, a notificação com a janela fechada e a instância única) fica com o `e2e/desktop-smoke.sh`, num X e num D-Bus próprios (Xvfb, `xdotool`, `dbus-run-session`, `python3-gi`). As metas do PRD têm scripts: `scripts/size.sh` (instaladores com até 20 MB) e `scripts/memory.sh --idle` (até 150 MB com a janela fechada).
+
+O CI roda tudo isso em cada pull request e em cada push na `main` e na `develop`: lint (`ruff check`), testes em Python 3.7 a 3.14, E2E com Docker real, tipos (`tsc`) e testes do `format.ts` e do transporte do desktop, testes de UI com Playwright contra os dois backends, a conferência de que o `docker_gui.py` e a página do desktop estão em dia com `src/` (CSS incluído), o núcleo Rust (fmt, clippy e o contrato) e o build dos instaladores de Linux e Windows, com o teto de tamanho e o smoke do desktop.
 
 ## Licença
 

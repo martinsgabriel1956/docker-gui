@@ -9,7 +9,7 @@ test('em inglês, a página inteira troca de língua', async ({ page, gui }) => 
   await expect(page.locator('#count')).toHaveText('1 with problems1 running fine');  // do app.ts
   await expect(page.locator('#rows')).toContainText('Exited with code 137 2 min ago');  // do format.ts
   await expect(page.locator('#rows')).toContainText('out of memory (OOM)');
-  await expect(page).toHaveTitle('Docker GUI · 1 running fine · 1 with problems');
+  await expect(page).toHaveTitle('Stivo · 1 running fine · 1 with problems');
 
   await page.getByRole('button', { name: 'Logs web' }).click();
   await expect(page.locator('#lmeta')).toContainText('Last 500 lines · updated at');

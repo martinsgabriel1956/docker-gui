@@ -1,5 +1,5 @@
 ---
-name: Docker GUI
+name: Stivo
 description: O docker ps que cresceu, no navegador, para o ciclo mudar → reiniciar → ler logs.
 colors:
   canvas: "oklch(16% 0.012 255)"
@@ -161,9 +161,17 @@ components:
   surface:
     backgroundColor: "{colors.raised}"
     rounded: "{rounded.surface}"
+  compose-output:
+    backgroundColor: "{colors.canvas}"
+    textColor: "{colors.fg-soft}"
+    typography: "{typography.data-small}"
+    rounded: "{rounded.control}"
+    padding: "8px"
+  compose-output-failed:
+    textColor: "{colors.bad-fg}"
 ---
 
-# Design System: Docker GUI
+# Design System: Stivo
 
 ## Overview
 
@@ -221,7 +229,7 @@ Paleta de terminal ANSI reafinada: grafite frio de croma baixo (matiz 255) para 
 **Character:** o mono carrega tudo o que o `docker` imprime; o sans carrega tudo o que a GUI diz. Fontes do sistema porque o produto é um arquivo só, offline, sem nada para baixar. O mono desenha maior que o sans, por isso o token `--text-data` (13px) em vez dos 14px do corpo.
 
 ### Hierarchy
-- **Title** (600, 24px, tracking -0.025em; 20px abaixo de 640px): só o "Docker GUI" do cabeçalho, sem ícone.
+- **Title** (600, 24px, tracking -0.025em; 20px abaixo de 640px): só o "Stivo" do cabeçalho, sem ícone.
 - **Headline** (600, 18px): título dos modais ("Logs · shop-api-1", "Novo container").
 - **Body** (400, 14px): botões do cabeçalho, campos, avisos, rótulos de formulário, rótulo das categorias do disco. As abas usam 14px em 500.
 - **Label** (500, 12px): botões de linha e das ferramentas dos logs (14px no toque).
@@ -239,7 +247,7 @@ Paleta de terminal ANSI reafinada: grafite frio de croma baixo (matiz 255) para 
 
 Coluna única centrada, largura máxima de 80rem, calha de 16px. Cabeçalho da página em superfície própria (raised), de ponta a ponta, com título, contexto e indicador ao vivo à esquerda e "Atalhos" à direita; as abas Containers / Imagens / Volumes / Redes ficam na borda de baixo dessa faixa, sobre o traço line dela. Na aba Containers, uma barra de ferramentas: "+ Novo container", contagens por estado e a busca (288px a partir de 640px) à direita; abaixo, a tabela num contêiner de 8px de raio. Nas abas Imagens e Volumes, o uso de disco (`docker system df`) vem em cima, num contêiner próprio (Imagens leva também os containers parados e o build cache), e a tabela de objetos embaixo; Redes só tem a tabela.
 
-A tabela segue o ritmo de colunas do CLI: nome, imagem (truncada pela esquerda para manter a tag), status, portas, ações. A partir de 1280px são as 5 colunas, em `table-fixed` (nome 17rem, imagem 11rem, portas 10rem, ações 17.5rem; o status fica com o resto), para nada mudar de largura quando um healthcheck abre ou uma busca esvazia. Entre 640 e 1280px (a janela ao lado do editor) a tabela fica compacta: nome, status e ações, com a imagem e as portas descendo para baixo do nome. Quem decide é o `matchMedia` no app.ts, não duas cópias no DOM: cada porta existe uma vez para o Tab e o leitor de tela. A ordem é diagnóstico primeiro: faixa de atenção, depois cada projeto compose, depois "Sem projeto compose". Ações de linha têm posição fixa por estado (Logs sempre no mesmo lugar). A linha de uso põe CPU e RAM cada um na sua linha abaixo de 1280px (o "·" some) e lado a lado a partir de 1280px.
+A tabela segue o ritmo de colunas do CLI: nome, imagem (truncada pela esquerda para manter a tag), status, portas, ações. A partir de 1280px são as 5 colunas, em `table-fixed` (nome 17rem, imagem 11rem, portas 10rem, ações 17.5rem; o status fica com o resto), para nada mudar de largura quando um healthcheck abre ou uma busca esvazia. Entre 640 e 1280px (a janela ao lado do editor) a tabela fica compacta: nome, status e ações, com a imagem e as portas descendo para baixo do nome. Quem decide é o `matchMedia` no app.ts, não duas cópias no DOM: cada porta existe uma vez para o Tab e o leitor de tela. A ordem é diagnóstico primeiro: faixa de atenção, depois cada projeto compose (com a saída do compose, quando houver, entre o cabeçalho e os containers), depois "Sem projeto compose". Ações de linha têm posição fixa por estado (Logs sempre no mesmo lugar). A linha de uso põe CPU e RAM cada um na sua linha abaixo de 1280px (o "·" some) e lado a lado a partir de 1280px.
 
 Abaixo de 640px a tabela vira cards: o cabeçalho some (menos "Selecionar todos") e status e ações recuam até o nome. O alvo de 44px não depende da largura, e sim do ponteiro: `coarse:` (`@media (pointer: coarse)`) dá altura mínima de 44px a todo controle no toque, e com mouse a janela estreita continua densa como o terminal. As contagens rolam de lado em vez de quebrar. A barra da aba Containers reordena para a triagem vir primeiro: contagens, busca e, por último, "+ Novo container". Cada linha das tabelas de objetos vira um card, com cada célula rotulada "Coluna: valor". No toque as abas ganham 44px de altura; se faltar largura elas rolam de lado e esmaecem na borda direita enquanto há mais para ver (máscara ligada a `animation-timeline: scroll()`). O modal de logs vira tela cheia e Atualizar/Copiar/Baixar entram num menu "⋯".
 
@@ -301,6 +309,9 @@ Primeiro grupo da tabela, quando há algo quebrado: cabeçalho "PRECISA DE ATEN�
 ### Faixa de estado do projeto (assinatura)
 No cabeçalho de cada grupo compose (fundo raised, separador line-strong acima): o nome do projeto em mono 16px semibold (Group), depois um bloco por container, 6×12px, raio de 1px, 2px de vão, na cor do estado, ordenados por nome, como uma calha de processos. Em seguida "compose · 3 de 5 rodando · 1 pausado · 1 reiniciando" em mono muted (os estados que entram no "Parar tudo (5)" aparecem pelo nome) e, se for o caso, "1 na faixa de atenção, acima" em bad-fg. Ação principal do projeto, Logs e "⋯" à direita. No "⋯" de um container, o compose do serviço vem com o comando literal em mono ("compose restart api", "compose up --build api"), para não se confundir com o Reiniciar da linha (o `docker restart` daquele container).
 
+### Saída do compose
+Enquanto um `up`, `up --build`, `pull`, `down` ou uma ação de serviço roda, uma linha própria aparece logo abaixo do cabeçalho do projeto, no mesmo chão raised dele, como continuação do cabeçalho e não como mais um container. Em cima, o comando e o estado numa linha só, em mono 12px: "compose up --build · rodando…" em fg-soft. Embaixo, a saída do compose num `pre` mono 12px fg-soft sobre canvas, com anel line e 4px de raio, quebrando linhas longas e com até 256px de altura antes de rolar. A caixa acompanha o fim da saída, a não ser que a pessoa tenha rolado para cima para ler. Ela recebe foco por Tab (o contorno de 2px accent) e é rotulada "Saída do compose up". Se der certo, a linha some e o aviso basta. Se falhar, ela fica: a linha de cima passa a bad-fg ("falhou (código 1)" ou "sem resposta do servidor") e ganha o botão quadrado com × na ponta direita, que fecha a saída e devolve o foco ao "⋯" do projeto.
+
 ### Logs
 Modal de altura fixa, `pre` mono 12px. Cada linha toma a cor do nível (ERROR bad-fg, WARN warn-fg, DEBUG muted; o resto fg-soft). O timestamp do docker continua no texto (Copiar e Baixar levam a linha inteira), mas aparece como HH:MM:SS local em muted, desenhado pelo CSS a partir de `data-t`; o UTC vai no title. Depois de um reinício, uma marca "— reiniciado às HH:MM:SS —" em sans 11px accent-fg sobre um traço `accent/50`, também desenhada pelo CSS (`data-mark`), para não entrar no texto copiado. Nos logs do projeto, o prefixo do serviço toma um tom svc-* (ver Colors). O filtro realça os trechos que casam com `accent/30` e texto fg-strong, não com o tom de aviso. Ao lado do campo, três `select` nativos no mesmo estilo (canvas, anel line-strong/80, 12px): nível (todos, avisos e erros, só erros), serviço (só nos logs do projeto) e período (`--since`). Log ao vivo vazio mostra uma frase em sans muted, desenhada pelo CSS (`data-empty`). Depois de reiniciar pelo modal, a linha de status ganha "· reiniciado às HH:MM:SS" em muted, porque a marca só aparece se o container escrever algo. Ao abrir, o foco vai para a caixa do log. O Ao vivo começa ligado para container rodando; desligar fica lembrado neste navegador. No cabeçalho, CPU, memória, rede e disco são grupos que não quebram por dentro, com o "·" no fim do anterior.
 
@@ -309,6 +320,15 @@ No topo das abas Imagens (containers parados, imagens e build cache, nessa ordem
 
 ### Tabelas de objetos
 Imagens, volumes e redes no ritmo de colunas do CLI, dentro do mesmo contêiner de 8px de raio e `raised/40`, linhas separadas por `line/70`. Cabeçalho uppercase mono 11px muted; a primeira coluna é o nome em mono 13px semibold fg-strong; as demais células em mono 12px muted. A coluna "Em uso por" lista os nomes dos containers (fg-soft) ou diz "nenhum container". Qualificadores como "(anônimo)", "(padrão)" e "(dangling)" são texto muted ao lado do nome, nunca selo com borda. A ação da linha é "Remover…", na ponta direita; a rede padrão não tem. Em uso (imagem ou volume com qualquer container, rede com container de pé), o "Remover…" fica indisponível em muted, com "Em uso por db: remova o container antes" no title, em vez de deixar o docker recusar. A contagem de cada lista aparece na aba, em mono 12px muted ("Imagens · 4").
+
+### Ícone
+"Estiva": uma pilha de três contêineres sobre o chão grafite (`#141a22`, raio 5 de 24), em que a de cima é ciano e a última linha termina num bloco ciano, o cursor. As outras são `#566273`. Fonte única em `src-tauri/icons/stivo.svg`: dela saem os PNG e o ICO do app (`npx tauri icon`), e o `setIcon` do app.ts desenha o mesmo SVG no favicon da web e na bandeja do desktop. A contagem da faixa de atenção vai num selo vermelho no canto inferior direito (`9+` acima de 9, `!` com os dados velhos), porque ali o vermelho é estado. Legível a 16 px nos dois temas da bandeja; nada de baleia nem cubo isométrico.
+
+### Preferências (só no desktop)
+O mesmo esqueleto do modal "Novo container": título "Preferências" com a nota "Valem na hora" em muted, campos em coluna (`select` nativos de CLI, contexto e idioma, e a caixa das notificações), Cancelar e Salvar (primário) no pé. A linha do contexto some com o podman, porque o contexto é do docker. Salvar recarrega a janela, que volta com o rótulo do daemon e o idioma novos; erro aparece no mesmo aviso vermelho do Novo container. O botão "Preferências" fica no cabeçalho, ao lado de "Atalhos", e só existe no app desktop. No WebKitGTK os `select` nativos (aqui e nos logs) desenham o fundo do tema do GTK, não o canvas.
+
+### Bandeja (só no desktop)
+O ícone do Stivo com o selo da faixa de atenção (o mesmo desenho do favicon, em PNG de 64 px). Menu: Abrir o Stivo, Preferências… e Sair. Fechar a janela pela primeira vez gera uma notificação que diz que o app continua na bandeja e como sair.
 
 ### Navigation
 Abas (`role="tablist"`): Containers, Imagens, Volumes, Redes, na borda de baixo da faixa do cabeçalho. Sans 14px em 500, padding 8px 12px, texto muted; hover fg; a selecionada fica fg-strong com um sublinhado de 2px accent que encosta no traço da faixa. Todas as abas levam a contagem em mono 12px muted ("Containers · 6"). Setas, Home e End andam entre as abas; trocar de aba entra no histórico e desarma qualquer confirmação. Atalhos de teclado (`/`, ←→, ↑↓, `r`, `s`, `b`, `x`, `a`, `z`, `?`; o `s` faz a ação principal da linha) aparecem num popover nativo com `kbd` mono de 4px de raio e anel line-strong.

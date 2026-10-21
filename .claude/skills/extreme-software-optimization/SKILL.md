@@ -22,15 +22,16 @@ description: >-
 
 ## Opportunity Matrix
 
-| Hotspot | Impact (1-5) | Confidence (1-5) | Effort (1-5) | Score |
-|---------|--------------|------------------|--------------|-------|
-| *func:line* | × | × | ÷ | Impact×Conf/Effort |
+| Hotspot     | Impact (1-5) | Confidence (1-5) | Effort (1-5) | Score              |
+| ----------- | ------------ | ---------------- | ------------ | ------------------ |
+| _func:line_ | ×            | ×                | ÷            | Impact×Conf/Effort |
 
 **Rule:** Only implement Score ≥ 2.0
 
 ## Isomorphism Proof Template
 
 For EVERY change, document:
+
 ```
 ## Change: [description]
 - Ordering preserved:     [yes/no + why]
@@ -46,32 +47,32 @@ For EVERY change, document:
 
 ### Tier 1: Low-Hanging Fruit
 
-| Pattern | When | Isomorphism |
-|---------|------|-------------|
-| N+1 → Batch | Sequential fetches | Same results, fewer round-trips |
-| Linear → HashMap | Keyed lookups | O(n)→O(1), order may change |
-| Lazy eval | Maybe-unused values | Same final values |
-| Memoization | Repeated pure calls | Cached = recomputed |
-| Buffer reuse | Alloc per iteration | Zero-copy in loop |
+| Pattern          | When                | Isomorphism                     |
+| ---------------- | ------------------- | ------------------------------- |
+| N+1 → Batch      | Sequential fetches  | Same results, fewer round-trips |
+| Linear → HashMap | Keyed lookups       | O(n)→O(1), order may change     |
+| Lazy eval        | Maybe-unused values | Same final values               |
+| Memoization      | Repeated pure calls | Cached = recomputed             |
+| Buffer reuse     | Alloc per iteration | Zero-copy in loop               |
 
 ### Tier 2: Algorithmic
 
-| Pattern | Change | Check |
-|---------|--------|-------|
-| Binary search | O(n)→O(log n) | Sorted input |
-| Two-pointer | O(n²)→O(n) | Structured input |
-| Prefix sums | O(n)→O(1) query | Static data |
-| Priority queue | O(n)→O(log n) | Top-k/scheduling |
+| Pattern        | Change          | Check            |
+| -------------- | --------------- | ---------------- |
+| Binary search  | O(n)→O(log n)   | Sorted input     |
+| Two-pointer    | O(n²)→O(n)      | Structured input |
+| Prefix sums    | O(n)→O(1) query | Static data      |
+| Priority queue | O(n)→O(log n)   | Top-k/scheduling |
 
 ### Tier 3: Data Structures
 
-| Structure | Use Case |
-|-----------|----------|
-| HashMap | Point lookups |
-| BTreeMap | Range queries |
-| SmallVec | Usually-small collections |
-| Arena | Many allocations, bulk free |
-| Bloom filter | Membership pre-filter |
+| Structure    | Use Case                    |
+| ------------ | --------------------------- |
+| HashMap      | Point lookups               |
+| BTreeMap     | Range queries               |
+| SmallVec     | Usually-small collections   |
+| Arena        | Many allocations, bulk free |
+| Bloom filter | Membership pre-filter       |
 
 **Full catalog:** [TECHNIQUES.md](references/TECHNIQUES.md)
 
@@ -79,12 +80,12 @@ For EVERY change, document:
 
 ## Language Cheatsheet
 
-| Lang | CPU Profile | Trouble Spot Grep |
-|------|-------------|-------------------|
-| Rust | `cargo flamegraph` | `rg '\.clone\(\)' --type rust` |
-| Go | `go tool pprof /debug/pprof/profile` | `rg 'interface\{\}' --type go` |
-| TS | `clinic flame -- node app.js` | `rg 'JSON\.(parse\|stringify)' --type ts` |
-| Python | `py-spy record -o flame.svg -- python script.py` | `rg '\.iterrows\(\)' --type py` |
+| Lang   | CPU Profile                                      | Trouble Spot Grep                         |
+| ------ | ------------------------------------------------ | ----------------------------------------- |
+| Rust   | `cargo flamegraph`                               | `rg '\.clone\(\)' --type rust`            |
+| Go     | `go tool pprof /debug/pprof/profile`             | `rg 'interface\{\}' --type go`            |
+| TS     | `clinic flame -- node app.js`                    | `rg 'JSON\.(parse\|stringify)' --type ts` |
+| Python | `py-spy record -o flame.svg -- python script.py` | `rg '\.iterrows\(\)' --type py`           |
 
 **Full language guides:** [LANGUAGE-SPECIFIC.md](references/LANGUAGE-SPECIFIC.md)
 
@@ -92,13 +93,13 @@ For EVERY change, document:
 
 ## Anti-Patterns (Never Do)
 
-| ✗ | Why |
-|---|-----|
-| Optimize without profiling | Wastes effort on non-hotspots |
-| Multiple changes per commit | Can't isolate regressions |
-| Assume improvement | Must measure before/after |
-| Change behavior "while we're here" | Breaks isomorphism guarantee |
-| Skip golden output capture | No regression detection |
+| ✗                                  | Why                           |
+| ---------------------------------- | ----------------------------- |
+| Optimize without profiling         | Wastes effort on non-hotspots |
+| Multiple changes per commit        | Can't isolate regressions     |
+| Assume improvement                 | Must measure before/after     |
+| Change behavior "while we're here" | Breaks isomorphism guarantee  |
+| Skip golden output capture         | No regression detection       |
 
 ---
 
@@ -134,12 +135,12 @@ sha256sum -c golden_checksums.txt          # After changes
 
 ## References
 
-| Need | Reference |
-|------|-----------|
-| Complete technique catalog | [TECHNIQUES.md](references/TECHNIQUES.md) |
-| Step-by-step methodology | [METHODOLOGY.md](references/METHODOLOGY.md) |
-| Language-specific guides | [LANGUAGE-SPECIFIC.md](references/LANGUAGE-SPECIFIC.md) |
-| Advanced (Round 2+) | [ADVANCED.md](references/ADVANCED.md) |
+| Need                       | Reference                                               |
+| -------------------------- | ------------------------------------------------------- |
+| Complete technique catalog | [TECHNIQUES.md](references/TECHNIQUES.md)               |
+| Step-by-step methodology   | [METHODOLOGY.md](references/METHODOLOGY.md)             |
+| Language-specific guides   | [LANGUAGE-SPECIFIC.md](references/LANGUAGE-SPECIFIC.md) |
+| Advanced (Round 2+)        | [ADVANCED.md](references/ADVANCED.md)                   |
 
 ## Iteration Rounds
 

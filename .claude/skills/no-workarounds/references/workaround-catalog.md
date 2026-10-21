@@ -17,7 +17,7 @@ interface DataPayload {
   items: Array<{ name: string; id: string }>;
 }
 function processData(data: DataPayload) {
-  return data.items.map((item) => item.name);
+  return data.items.map(item => item.name);
 }
 ```
 
@@ -34,7 +34,7 @@ const config = {} as AppConfig;
 const config: AppConfig = {
   apiUrl: "https://api.example.com",
   timeout: 5000,
-  retries: 3,
+  retries: 3
 };
 ```
 
@@ -44,11 +44,11 @@ const config: AppConfig = {
 
 ```typescript
 // WORKAROUND
-const user = users.find((u) => u.id === id)!;
+const user = users.find(u => u.id === id)!;
 // Crashes if user not found
 
 // PROPER FIX
-const user = users.find((u) => u.id === id);
+const user = users.find(u => u.id === id);
 if (!user) {
   throw new UserNotFoundError(id);
 }
@@ -89,11 +89,11 @@ const value = transformResponse(response);
 
 ## Lint and Warning Suppression
 
-### W-06: Inline eslint-disable
+### W-06: Inline biome-ignore
 
 ```typescript
 // WORKAROUND
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+// biome-ignore lint/suspicious/noExplicitAny: legacy handler
 const handler = (e: any) => {};
 
 // PROPER FIX

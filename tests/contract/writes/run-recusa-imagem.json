@@ -1,0 +1,19 @@
+{
+  "desc": "run recusado (imagem): 400 sem chamar o docker",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [],
+  "request": {
+    "method": "POST",
+    "path": "/api/run",
+    "body": {
+      "image": "-v /:/host"
+    }
+  },
+  "response": {
+    "status": 400,
+    "body": "imagem inválida: use repo[:tag] ou repo@sha256:…"
+  }
+}

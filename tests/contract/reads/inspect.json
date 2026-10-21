@@ -1,0 +1,61 @@
+{
+  "desc": "resumo do inspect: o env vai sem os valores",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "{\"HostConfig\": {\"RestartPolicy\": {\"Name\": \"on-failure\", \"MaximumRetryCount\": 3}}, \"NetworkSettings\": {\"Networks\": {\"bridge\": {\"IPAddress\": \"172.17.0.2\"}, \"loja_default\": null}}, \"Config\": {\"Env\": [\"PATH=/usr/bin\", \"SENHA=segredo=com=igual\", \"VAZIO=\"]}, \"Mounts\": [{\"Type\": \"volume\", \"Name\": \"dados\", \"Source\": \"/var/lib/docker/volumes/dados/_data\", \"Destination\": \"/data\", \"RW\": true}], \"State\": {\"OOMKilled\": true, \"FinishedAt\": \"2026-10-01T10:00:00Z\"}, \"RestartCount\": 2}\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "inspect",
+        "--format",
+        "{{json .}}",
+        "0123456789ab"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/inspect/0123456789ab",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "Restart": "on-failure:3",
+      "Networks": {
+        "bridge": "172.17.0.2",
+        "loja_default": ""
+      },
+      "Mounts": [
+        {
+          "Type": "volume",
+          "Name": "dados",
+          "Source": "/var/lib/docker/volumes/dados/_data",
+          "Destination": "/data",
+          "RW": true
+        }
+      ],
+      "Env": [
+        [
+          "PATH",
+          null
+        ],
+        [
+          "SENHA",
+          null
+        ],
+        [
+          "VAZIO",
+          null
+        ]
+      ],
+      "OOMKilled": true,
+      "RestartCount": 2,
+      "FinishedAt": "2026-10-01T10:00:00Z"
+    }
+  }
+}

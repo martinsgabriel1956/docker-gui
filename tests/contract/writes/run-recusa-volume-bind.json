@@ -1,0 +1,20 @@
+{
+  "desc": "run recusado (volume-bind): 400 sem chamar o docker",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [],
+  "request": {
+    "method": "POST",
+    "path": "/api/run",
+    "body": {
+      "image": "nginx",
+      "volume": "/etc:/host"
+    }
+  },
+  "response": {
+    "status": 400,
+    "body": "volume inválido: use nome:/caminho/no/container (só volume nomeado, nunca pasta do host)"
+  }
+}

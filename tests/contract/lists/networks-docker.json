@@ -1,0 +1,74 @@
+{
+  "desc": "network ls: padrão marcada, quem usa",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "{\"ID\": \"a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\", \"Name\": \"bridge\", \"Driver\": \"bridge\", \"Scope\": \"local\"}\n{\"ID\": \"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\", \"Name\": \"loja_default\", \"Driver\": \"bridge\", \"Scope\": \"local\"}\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "network",
+        "ls",
+        "--no-trunc",
+        "--format",
+        "{{json .}}"
+      ]
+    },
+    {
+      "stdout": "0123456789abfull\nabcdef012345full\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "ps",
+        "-a",
+        "-q",
+        "--no-trunc"
+      ]
+    },
+    {
+      "stdout": "[{\"Name\": \"/web\", \"Image\": \"sha256:f00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafebeef\", \"Mounts\": [{\"Type\": \"volume\", \"Name\": \"dados\"}, {\"Type\": \"bind\", \"Name\": \"\"}], \"NetworkSettings\": {\"Networks\": {\"bridge\": {}, \"loja_default\": {}}}}, {\"Name\": \"/db\", \"Image\": \"sha256:f00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafebeef\", \"Mounts\": [{\"Type\": \"volume\", \"Name\": \"pg\"}], \"NetworkSettings\": {\"Networks\": {\"loja_default\": {}}}}]",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "container",
+        "inspect",
+        "0123456789abfull",
+        "abcdef012345full"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/networks",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": [
+      {
+        "ID": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+        "Name": "bridge",
+        "Driver": "bridge",
+        "Scope": "local",
+        "Builtin": true,
+        "Containers": [
+          "web"
+        ]
+      },
+      {
+        "ID": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "Name": "loja_default",
+        "Driver": "bridge",
+        "Scope": "local",
+        "Builtin": false,
+        "Containers": [
+          "web",
+          "db"
+        ]
+      }
+    ]
+  }
+}

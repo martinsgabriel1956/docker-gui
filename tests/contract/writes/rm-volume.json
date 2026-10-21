@@ -1,0 +1,28 @@
+{
+  "desc": "remover volume pelo nome",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "dados\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "volume",
+        "rm",
+        "dados"
+      ]
+    }
+  ],
+  "request": {
+    "method": "POST",
+    "path": "/api/rm/volume/dados",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": "dados"
+  }
+}

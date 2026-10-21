@@ -1,0 +1,20 @@
+{
+  "desc": "ação de compose fora da lista: 404",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [],
+  "request": {
+    "method": "POST",
+    "path": "/api/compose/rm",
+    "body": {
+      "project": "loja",
+      "dir": "/srv/loja"
+    }
+  },
+  "response": {
+    "status": 404,
+    "body": "not found"
+  }
+}

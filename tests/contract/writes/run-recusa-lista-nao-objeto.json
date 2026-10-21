@@ -1,0 +1,19 @@
+{
+  "desc": "run recusado (lista-nao-objeto): 400 sem chamar o docker",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [],
+  "request": {
+    "method": "POST",
+    "path": "/api/run",
+    "body": [
+      "nginx"
+    ]
+  },
+  "response": {
+    "status": 400,
+    "body": "corpo inválido: esperado um objeto JSON"
+  }
+}

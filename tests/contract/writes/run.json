@@ -1,0 +1,53 @@
+{
+  "desc": "docker run -d com tudo: portas em 127.0.0.1, --mount de volume, -- antes da imagem; devolve o ID",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "Unable to find image\nlatest: Pulling\neeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "run",
+        "-d",
+        "--restart=unless-stopped",
+        "--name=web",
+        "-p",
+        "127.0.0.1:8080:80/tcp",
+        "-p",
+        "127.0.0.1:5353:53/udp",
+        "-e",
+        "A=1",
+        "-e",
+        "SENHA=a=b",
+        "--mount=type=volume,source=dados,target=/usr/share/nginx/html",
+        "--",
+        "nginx:1.27"
+      ]
+    }
+  ],
+  "request": {
+    "method": "POST",
+    "path": "/api/run",
+    "body": {
+      "image": "nginx:1.27",
+      "name": "web",
+      "ports": [
+        "8080:80",
+        "5353:53/udp"
+      ],
+      "env": [
+        "A=1",
+        "SENHA=a=b"
+      ],
+      "restart": "unless-stopped",
+      "volume": "dados:/usr/share/nginx/html"
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  }
+}

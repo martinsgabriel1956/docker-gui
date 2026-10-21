@@ -2,7 +2,7 @@
 <html lang="pt-BR" class="bg-canvas" data-cli="docker">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="dark light">
-<title>Docker GUI</title>
+<title>Stivo</title>
 <style>/*CSS*/</style>
 </head>
 <body class="min-h-screen bg-canvas text-fg-soft antialiased selection:bg-accent/30">
@@ -13,7 +13,7 @@
 <div class="border-b border-line bg-raised"><div class="max-w-7xl mx-auto px-4">
   <header class="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 pt-5 pb-3 max-sm:pt-3">
     <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
-      <h1 class="text-2xl max-sm:text-xl font-semibold text-fg-strong tracking-tight">Docker GUI</h1>
+      <h1 class="text-2xl max-sm:text-xl font-semibold text-fg-strong tracking-tight">Stivo</h1>
       <!-- onde as ações caem: o contexto do docker, em âmbar quando o daemon é remoto (app.ts preenche) -->
       <span id="where" class="empty:hidden font-mono text-xs px-2 py-0.5 rounded ring-1 ring-line-strong text-muted"></span>
       <!-- de onde a lista vem: eventos do docker (ao vivo) ou poll de 2 s (app.ts, showLive) -->
@@ -22,6 +22,8 @@
     <div class="flex flex-wrap items-center gap-x-4">
       <button popovertarget="hint" aria-keyshortcuts="?" class="coarse:hidden text-xs text-muted hover:text-fg rounded focus-visible:outline-2 focus-visible:outline-accent">
         <kbd class="font-mono px-1 rounded ring-1 ring-line-strong text-fg-soft">?</kbd> Atalhos</button>
+      <!-- só no app desktop (o transporte do Tauri tem preferências): CLI, contexto, idioma e notificações -->
+      <button id="prefs-open" hidden onclick="openPrefs()" class="coarse:py-3 text-xs text-muted hover:text-fg rounded focus-visible:outline-2 focus-visible:outline-accent">Preferências</button>
       <button id="notify" hidden onclick="askNotify()" class="coarse:py-3 text-xs text-accent-fg underline underline-offset-4 hover:text-accent-soft rounded focus-visible:outline-2 focus-visible:outline-accent">Notificar quando algo der problema</button>
       <!-- popover nativo: fecha com Esc e com clique fora -->
       <div id="hint" popover class="m-auto w-[min(26rem,calc(100vw-2rem))] rounded-lg bg-raised ring-1 ring-line-strong p-4 text-sm text-fg-soft shadow-lg shadow-black/40 backdrop:bg-black/40">
@@ -269,6 +271,53 @@
     <div class="px-4 py-3 border-t border-line flex justify-end gap-2">
       <button type="button" onclick="create.close()" class="px-3 py-1.5 coarse:min-h-11 coarse:px-4 rounded text-sm font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Cancelar</button>
       <button id="create-go" type="submit" class="px-3 py-1.5 coarse:min-h-11 coarse:px-4 rounded text-sm font-medium ring-1 ring-accent/40 bg-accent/15 text-accent-fg hover:bg-accent/25 aria-disabled:opacity-60 aria-disabled:cursor-wait focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Criar e iniciar</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="prefs" aria-labelledby="prefs-title" aria-describedby="prefs-desc" class="m-auto w-[min(520px,95vw)] rounded-lg bg-raised text-fg-soft ring-1 ring-line-strong backdrop:bg-black/70 p-0">
+  <form id="prefs-form" novalidate>
+    <div class="px-4 py-3 border-b border-line flex items-start gap-3">
+      <div class="mr-auto min-w-0">
+        <h2 id="prefs-title" class="text-lg font-semibold text-fg-strong">Preferências</h2>
+        <p id="prefs-desc" class="text-sm mt-0.5 text-muted">Valem na hora: a janela recarrega com o que você escolher.</p>
+      </div>
+      <button type="button" onclick="prefs.close()" aria-label="Fechar" class="shrink-0 grid place-items-center size-8 coarse:size-11 rounded text-muted hover:text-fg-strong hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent">
+        <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="size-4"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
+    </div>
+    <div class="px-4 py-4 space-y-4 text-sm">
+      <div>
+        <label for="pref-cli" class="block font-medium text-fg-strong">CLI de containers</label>
+        <select id="pref-cli" class="mt-1 w-full rounded bg-canvas ring-1 ring-line px-3 py-2 coarse:py-3 text-fg-strong focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+          <option value="">Padrão (docker, ou o DOCKER_GUI_CLI)</option>
+          <option value="docker">docker</option>
+          <option value="podman">podman</option>
+        </select>
+      </div>
+      <div id="pref-context-row">
+        <label for="pref-context" class="block font-medium text-fg-strong">Contexto do docker</label>
+        <select id="pref-context" aria-describedby="pref-context-hint" class="mt-1 w-full rounded bg-canvas ring-1 ring-line px-3 py-2 coarse:py-3 text-fg-strong focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+          <option value="">Padrão (o que o docker escolher)</option>
+        </select>
+        <p id="pref-context-hint" class="mt-1 max-w-[70ch] text-xs text-muted">Os de <code class="font-mono">docker context ls</code>. O padrão segue o <code class="font-mono">DOCKER_CONTEXT</code> e o <code class="font-mono">docker context use</code>.</p>
+      </div>
+      <div>
+        <label for="pref-lang" class="block font-medium text-fg-strong">Idioma</label>
+        <select id="pref-lang" class="mt-1 w-full rounded bg-canvas ring-1 ring-line px-3 py-2 coarse:py-3 text-fg-strong focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+          <option value="">Automático (o do sistema)</option>
+          <option value="pt">Português</option>
+          <option value="en">English</option>
+        </select>
+      </div>
+      <label class="flex items-start gap-2 w-fit coarse:py-2 cursor-pointer">
+        <input id="pref-notify" type="checkbox" class="mt-0.5 size-4 accent-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+        <span>Notificar quando um container entrar na faixa de atenção</span>
+      </label>
+    </div>
+    <div id="prefs-msg" role="alert" class="empty:hidden mx-4 mb-3 rounded-lg ring-1 ring-bad/40 bg-bad/10 px-3 py-2 text-sm text-bad-soft"></div>
+    <div class="px-4 py-3 border-t border-line flex justify-end gap-2">
+      <button type="button" onclick="prefs.close()" class="px-3 py-1.5 coarse:min-h-11 coarse:px-4 rounded text-sm font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Cancelar</button>
+      <button id="prefs-go" type="submit" class="px-3 py-1.5 coarse:min-h-11 coarse:px-4 rounded text-sm font-medium ring-1 ring-accent/40 bg-accent/15 text-accent-fg hover:bg-accent/25 aria-disabled:opacity-60 aria-disabled:cursor-wait focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Salvar</button>
     </div>
   </form>
 </dialog>

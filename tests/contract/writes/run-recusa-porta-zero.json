@@ -1,0 +1,22 @@
+{
+  "desc": "run recusado (porta-zero): 400 sem chamar o docker",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [],
+  "request": {
+    "method": "POST",
+    "path": "/api/run",
+    "body": {
+      "image": "nginx",
+      "ports": [
+        "0:80"
+      ]
+    }
+  },
+  "response": {
+    "status": 400,
+    "body": "porta inválida: '0:80' (use portaDoHost:portaDoContainer[/tcp|udp], de 1 a 65535)"
+  }
+}

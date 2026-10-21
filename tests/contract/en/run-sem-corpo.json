@@ -1,0 +1,17 @@
+{
+  "desc": "mensagem em inglês",
+  "lang": "en",
+  "cli": [
+    "docker"
+  ],
+  "calls": [],
+  "request": {
+    "method": "POST",
+    "path": "/api/run",
+    "body": null
+  },
+  "response": {
+    "status": 400,
+    "body": "invalid body: expected JSON of up to 64 KiB"
+  }
+}

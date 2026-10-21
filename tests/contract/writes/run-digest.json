@@ -1,0 +1,32 @@
+{
+  "desc": "imagem por digest",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "run",
+        "-d",
+        "--restart=no",
+        "--",
+        "registry.local:5000/time/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ]
+    }
+  ],
+  "request": {
+    "method": "POST",
+    "path": "/api/run",
+    "body": {
+      "image": "registry.local:5000/time/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  }
+}

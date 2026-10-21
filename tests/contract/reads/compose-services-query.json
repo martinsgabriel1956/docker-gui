@@ -1,0 +1,17 @@
+{
+  "desc": "query sem dir: 400",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [],
+  "request": {
+    "method": "GET",
+    "path": "/api/compose/services?project=loja",
+    "body": null
+  },
+  "response": {
+    "status": 400,
+    "body": "query inválida: esperado ?project=...&dir=..."
+  }
+}

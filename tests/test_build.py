@@ -11,8 +11,18 @@ class BuildTest(unittest.TestCase):
 
     @unittest.skipUnless(build.ESBUILD.exists(), "precisa do esbuild (npm ci); no CI roda no job frontend")
     def test_docker_gui_in_sync_with_src(self):
-        old, new = build.build()
-        self.assertEqual(old, new, "docker_gui.py desatualizado: rode python3 build.py")
+        for path, old, new in build.build():
+            self.assertEqual(old, new, f"{path.name} desatualizado: rode python3 build.py")
+
+    @unittest.skipUnless(build.ESBUILD.exists(), "precisa do esbuild (npm ci); no CI roda no job frontend")
+    def test_transports_do_not_leak(self):
+        # a versão web não carrega nada do Tauri, e o desktop não carrega o token nem o EventSource
+        self.assertNotIn("__TAURI_INTERNALS__", docker_gui.PAGE)
+        desktop = build.DESKTOP.read_text()
+        self.assertIn("__TAURI_INTERNALS__", desktop)
+        self.assertNotIn("new EventSource", desktop)
+        self.assertNotIn("X-Docker-GUI-Token", desktop)
+        self.assertNotIn("/*CSS*/", desktop)
 
     def test_page_has_no_placeholders(self):
         self.assertNotIn("/*JS*/", docker_gui.PAGE)

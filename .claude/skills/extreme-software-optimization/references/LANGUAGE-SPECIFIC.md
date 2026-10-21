@@ -35,17 +35,17 @@ valgrind --tool=cachegrind ./binary <args>
 
 ### Trouble Spots
 
-| Pattern | Problem | Fix |
-|---------|---------|-----|
-| `.clone()` in loops | Allocs | Refs, `Cow<T>`, `Rc<T>` |
-| `String` vs `&str` | Allocs | Accept `&str`, return `Cow<str>` |
-| `Vec::push` loop | Reallocations | `Vec::with_capacity(n)` |
-| `Box<dyn Trait>` | Vtable + heap | Generics or enum dispatch |
-| `Mutex` contention | Lock wait | `RwLock`, sharding, lock-free |
-| `.collect::<Vec<_>>()` | Materializes | Keep as iterator |
-| `format!()` hot path | Allocs | Pre-alloc buffer, `write!()` |
-| Default hasher | SipHash slow | `ahash`, `rustc-hash` |
-| `async` overhead | Future alloc | Sync if not I/O bound |
+| Pattern                | Problem       | Fix                              |
+| ---------------------- | ------------- | -------------------------------- |
+| `.clone()` in loops    | Allocs        | Refs, `Cow<T>`, `Rc<T>`          |
+| `String` vs `&str`     | Allocs        | Accept `&str`, return `Cow<str>` |
+| `Vec::push` loop       | Reallocations | `Vec::with_capacity(n)`          |
+| `Box<dyn Trait>`       | Vtable + heap | Generics or enum dispatch        |
+| `Mutex` contention     | Lock wait     | `RwLock`, sharding, lock-free    |
+| `.collect::<Vec<_>>()` | Materializes  | Keep as iterator                 |
+| `format!()` hot path   | Allocs        | Pre-alloc buffer, `write!()`     |
+| Default hasher         | SipHash slow  | `ahash`, `rustc-hash`            |
+| `async` overhead       | Future alloc  | Sync if not I/O bound            |
 
 ### Grep for Issues
 
@@ -104,6 +104,7 @@ llvm-profdata merge -o /tmp/pgo-data/merged.profdata /tmp/pgo-data
 # Step 4: Build optimized binary
 RUSTFLAGS="-Cprofile-use=/tmp/pgo-data/merged.profdata" cargo build --release
 ```
+
 **Typical gains:** 10-20% for hot paths
 **When to use:** Production binaries, after other optimizations exhausted
 
@@ -138,18 +139,18 @@ go build -gcflags='-m -m' 2>&1 | grep "escapes to heap"
 
 ### Trouble Spots
 
-| Pattern | Problem | Fix |
-|---------|---------|-----|
-| `interface{}` | Boxing | Generics (1.18+), concrete |
-| Small allocs in loops | GC pressure | `sync.Pool`, pre-allocate |
-| `defer` in hot loops | Overhead | Move outside loop |
-| String `+` | Allocs | `strings.Builder` |
-| `[]byte` ↔ `string` | Copies | `unsafe` if safe |
-| Slice append | Reallocations | `make([]T, 0, cap)` |
-| Channel for single val | Overhead | Direct return or atomic |
-| Mutex for read-heavy | Block all | `sync.RWMutex` |
-| `fmt.Sprintf` hot path | Reflection | `strconv` functions |
-| Goroutine per request | Scheduler | Worker pool |
+| Pattern                | Problem       | Fix                        |
+| ---------------------- | ------------- | -------------------------- |
+| `interface{}`          | Boxing        | Generics (1.18+), concrete |
+| Small allocs in loops  | GC pressure   | `sync.Pool`, pre-allocate  |
+| `defer` in hot loops   | Overhead      | Move outside loop          |
+| String `+`             | Allocs        | `strings.Builder`          |
+| `[]byte` ↔ `string`    | Copies        | `unsafe` if safe           |
+| Slice append           | Reallocations | `make([]T, 0, cap)`        |
+| Channel for single val | Overhead      | Direct return or atomic    |
+| Mutex for read-heavy   | Block all     | `sync.RWMutex`             |
+| `fmt.Sprintf` hot path | Reflection    | `strconv` functions        |
+| Goroutine per request  | Scheduler     | Worker pool                |
 
 ### Grep for Issues
 
@@ -217,6 +218,7 @@ GODEBUG=allocfreetrace=1 ./binary  # Very verbose - every alloc/free
 # Schedule tracing (goroutine scheduling)
 GODEBUG=schedtrace=1000 ./binary   # Every 1000ms
 ```
+
 **Use when:** High GC pause times, memory pressure, allocation debugging
 
 ### Race Detection
@@ -231,6 +233,7 @@ go test -race ./...
 # Run with race detector
 go run -race main.go
 ```
+
 **Note:** 10-20x slowdown, 5-10x memory overhead; use in CI, not production
 **Finds:** Data races, concurrent map access, improper channel use
 
@@ -266,17 +269,17 @@ setInterval(() => console.log(h.percentile(99)), 1000);
 
 ### Trouble Spots
 
-| Pattern | Problem | Fix |
-|---------|---------|-----|
-| `JSON.parse/stringify` loop | CPU | Stream parsing, cache |
-| Sync fs | Blocks event loop | `fs.promises` |
-| `await` in loop | Sequential | `Promise.all()` |
-| `.map().filter()` chain | Multiple passes | Single pass |
-| `new Date()` hot path | Alloc | Cache timestamp |
-| Regex without compile | Recompile | Const outside function |
-| Object spread in loop | Copy | Mutate or pre-allocate |
-| `console.log` production | I/O | Remove or log levels |
-| `Array.includes` | O(n) | Use `Set` |
+| Pattern                     | Problem           | Fix                    |
+| --------------------------- | ----------------- | ---------------------- |
+| `JSON.parse/stringify` loop | CPU               | Stream parsing, cache  |
+| Sync fs                     | Blocks event loop | `fs.promises`          |
+| `await` in loop             | Sequential        | `Promise.all()`        |
+| `.map().filter()` chain     | Multiple passes   | Single pass            |
+| `new Date()` hot path       | Alloc             | Cache timestamp        |
+| Regex without compile       | Recompile         | Const outside function |
+| Object spread in loop       | Copy              | Mutate or pre-allocate |
+| `console.log` production    | I/O               | Remove or log levels   |
+| `Array.includes`            | O(n)              | Use `Set`              |
 
 ### Grep for Issues
 
@@ -294,27 +297,29 @@ rg '\.(map|filter|reduce)\(.*\)\.(map|filter|reduce)' --type ts
 ```typescript
 // Set for membership
 const seen = new Set<string>();
-if (seen.has(item)) { /* O(1) vs includes O(n) */ }
+if (seen.has(item)) {
+  /* O(1) vs includes O(n) */
+}
 
 // Parallel async
 const results = await Promise.all(items.map(processAsync));
 
 // Stream large JSON
-import { createReadStream } from 'fs';
-import { parser } from 'stream-json';
-createReadStream('large.json').pipe(parser()).on('data', process);
+import { createReadStream } from "fs";
+import { parser } from "stream-json";
+createReadStream("large.json").pipe(parser()).on("data", process);
 
 // Pre-compile regex
-const PATTERN = /\d+/g;  // Outside function
+const PATTERN = /\d+/g; // Outside function
 
 // Map over object
-const cache = new Map<string, Result>();  // Faster for dynamic keys
+const cache = new Map<string, Result>(); // Faster for dynamic keys
 
 // TypedArrays
-const data = new Float64Array(1000);  // Faster than number[]
+const data = new Float64Array(1000); // Faster than number[]
 
 // Worker threads for CPU
-import { Worker, isMainThread, parentPort } from 'worker_threads';
+import { Worker, isMainThread, parentPort } from "worker_threads";
 ```
 
 ---
@@ -347,17 +352,17 @@ pip install scalene && scalene script.py
 
 ### Trouble Spots
 
-| Pattern | Problem | Fix |
-|---------|---------|-----|
-| String `+=` in loop | O(n²) | `''.join()` |
-| `list.append` loop | Resize | List comprehension |
-| Global lookup | Slower | Cache in local |
-| `in list` | O(n) | `set` |
-| Attr access in loop | Dict lookup | Cache as local |
-| `import` in function | Overhead | Module level |
-| Object creation in loop | Allocs | Reuse or pool |
-| `re.match()` | Recompiles | `re.compile()` |
-| `pandas.iterrows()` | Extremely slow | Vectorize |
+| Pattern                 | Problem        | Fix                |
+| ----------------------- | -------------- | ------------------ |
+| String `+=` in loop     | O(n²)          | `''.join()`        |
+| `list.append` loop      | Resize         | List comprehension |
+| Global lookup           | Slower         | Cache in local     |
+| `in list`               | O(n)           | `set`              |
+| Attr access in loop     | Dict lookup    | Cache as local     |
+| `import` in function    | Overhead       | Module level       |
+| Object creation in loop | Allocs         | Reuse or pool      |
+| `re.match()`            | Recompiles     | `re.compile()`     |
+| `pandas.iterrows()`     | Extremely slow | Vectorize          |
 
 ### Grep for Issues
 
@@ -444,6 +449,7 @@ print(gc.get_count())  # Objects in each generation
 gc.collect()           # Collect first
 print(gc.garbage)      # Uncollectable objects (reference cycles with __del__)
 ```
+
 **Use when:** Memory leaks, high GC pause times, debugging reference cycles
 
 ### objgraph (Visual Memory Debugging)
@@ -463,6 +469,7 @@ objgraph.show_backrefs([obj], filename='refs.png')
 # Find reference chains (why isn't this GC'd?)
 objgraph.find_backref_chain(obj, objgraph.is_proper_module)
 ```
+
 **Install:** `pip install objgraph`
 
 ---
@@ -483,31 +490,31 @@ rg 'for.*\{' -A20 | rg 'for.*\{'
 
 ### By Symptom
 
-| Symptom | Grep |
-|---------|------|
-| High CPU | `clone\|copy\|Clone\|deepcopy` |
-| Memory growth | `append\|push\|Add\|\.add\(` |
-| Lock contention | `Mutex\|Lock\|synchronized` |
-| I/O bound | `read\|write\|fetch\|http` |
-| GC pressure | `new \|make\(\|Box::new\|alloc` |
-| Serialization | `JSON\|json\|serde\|marshal` |
+| Symptom         | Grep                            |
+| --------------- | ------------------------------- |
+| High CPU        | `clone\|copy\|Clone\|deepcopy`  |
+| Memory growth   | `append\|push\|Add\|\.add\(`    |
+| Lock contention | `Mutex\|Lock\|synchronized`     |
+| I/O bound       | `read\|write\|fetch\|http`      |
+| GC pressure     | `new \|make\(\|Box::new\|alloc` |
+| Serialization   | `JSON\|json\|serde\|marshal`    |
 
 ### Red Flags
 
-| Language | Red Flag |
-|----------|----------|
-| Rust | `.clone()` 50+ times, `Box<dyn>` hot path, default hasher |
-| Go | `interface{}` everywhere, no `sync.Pool`, `defer` in loops |
-| TS | `JSON.parse` in handlers, `await` in loops, sync fs |
-| Python | `+=` strings, `iterrows()`, `in list` |
+| Language | Red Flag                                                   |
+| -------- | ---------------------------------------------------------- |
+| Rust     | `.clone()` 50+ times, `Box<dyn>` hot path, default hasher  |
+| Go       | `interface{}` everywhere, no `sync.Pool`, `defer` in loops |
+| TS       | `JSON.parse` in handlers, `await` in loops, sync fs        |
+| Python   | `+=` strings, `iterrows()`, `in list`                      |
 
 ---
 
 ## Profiling Cheatsheet
 
-| Lang | CPU | Memory | Live |
-|------|-----|--------|------|
-| Rust | `cargo flamegraph` | `heaptrack` | `perf top` |
-| Go | `pprof /profile` | `pprof /heap` | `pprof /goroutine` |
-| TS | `clinic flame` | DevTools heap | `clinic doctor` |
-| Python | `py-spy record` | `scalene` | `py-spy top` |
+| Lang   | CPU                | Memory        | Live               |
+| ------ | ------------------ | ------------- | ------------------ |
+| Rust   | `cargo flamegraph` | `heaptrack`   | `perf top`         |
+| Go     | `pprof /profile`   | `pprof /heap` | `pprof /goroutine` |
+| TS     | `clinic flame`     | DevTools heap | `clinic doctor`    |
+| Python | `py-spy record`    | `scalene`     | `py-spy top`       |

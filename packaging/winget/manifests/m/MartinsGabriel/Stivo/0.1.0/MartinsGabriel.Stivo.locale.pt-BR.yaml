@@ -1,0 +1,23 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+PackageIdentifier: MartinsGabriel.Stivo
+PackageVersion: 0.1.0
+PackageLocale: pt-BR
+Publisher: Gabriel Martins
+PublisherUrl: https://github.com/martinsgabriel1956
+PackageName: Stivo
+PackageUrl: https://github.com/martinsgabriel1956/docker-gui
+License: MIT
+LicenseUrl: https://github.com/martinsgabriel1956/docker-gui/blob/main/LICENSE
+ShortDescription: Gerenciador de containers para Docker e Podman, que avisa da bandeja quando algo quebra
+Description: |-
+  O Stivo mostra os containers Docker e Podman da sua máquina ao vivo, diz o que quebrou e por quê (código de saída,
+  healthcheck, loop de reinício) e fecha o ciclo reiniciar e ler logs sem sair da janela: logs ao vivo, compose,
+  terminal no container. Fechar a janela deixa o Stivo na bandeja, avisando quando um container cai.
+Tags:
+  - docker
+  - podman
+  - containers
+  - compose
+  - devtools
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0
