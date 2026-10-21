@@ -22,7 +22,8 @@ test('Baixar imagem pelo nome mostra a saída ao vivo e põe a imagem na lista',
   await expect(page.locator('#pulls pre')).toContainText('Pulling from library/postgres');
   await expect(page.locator('#toast')).toHaveText('Baixada: postgres:17.', { timeout: 10_000 });
   await expect(page.locator('#pulls')).toBeEmpty();
-  await expect(item(page, 'postgres:17')).toBeVisible();
+  await expect(item(page, 'postgres:17')).toHaveAttribute('data-fresh', '');  // em destaque por um momento
+  await expect(item(page, 'postgres:17')).not.toHaveAttribute('data-fresh', '', { timeout: 8_000 });
   await expect(page.locator('#pull-q')).toHaveValue('');
 });
 

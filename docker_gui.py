@@ -13941,7 +13941,8 @@ ${WIDE.matches ? "" : `
       return `<button data-id="pull-${et}" data-a="pull" data-r="${et}" ${run2 ? 'aria-disabled="true"' : ""} onclick="pullImage(this.dataset.r)"
       title="docker pull ${et}" aria-label="${t`Atualizar ${et}`}" class="${BTN} text-fg hover:bg-hover">${run2 ? t`Baixando…` : tags.length > 1 ? t`Atualizar ${et}` : t`Atualizar`}</button>`;
     }).join("");
-    return `<tr class="border-t border-line/70 ${armed ? "bg-bad/10" : ""} max-sm:block max-sm:py-3">
+    const fresh = !!freshRef && tags.some((tg) => sameRef(tg, freshRef));
+    return `<tr ${fresh ? "data-fresh" : ""} class="border-t border-line/70 ${armed ? "bg-bad/10" : fresh ? "bg-accent/10" : ""} transition-[background-color] motion-reduce:transition-none max-sm:block max-sm:py-3">
     <th scope="row" class="py-2.5 pl-4 pr-6 max-sm:block max-sm:p-0 max-sm:px-4 text-left font-normal align-top">
       <div class="font-mono text-data font-semibold text-fg-strong [overflow-wrap:anywhere]">${title}</div>
       ${err ? `<div class="mt-1 [contain:inline-size] max-sm:[contain:none] text-xs text-bad-fg">${hint ? `<p class="font-sans">${hint}</p>` : ""}
@@ -13963,6 +13964,7 @@ ${WIDE.matches ? "" : `
     }
   }
   var pulls = /* @__PURE__ */ new Map();
+  var freshRef = "";
   var imageOf = (ref) => Array.isArray(objs.images) ? objs.images.find((i) => i.Tags.some((tg) => sameRef(tg, ref))) : void 0;
   function pullHint() {
     const v2 = $2("#pull-q").value.trim();
@@ -13999,6 +14001,13 @@ ${WIDE.matches ? "" : `
         updated: t`Atualizada: ${ref}. A versão anterior ficou sem tag.`
       }[out] + (old.length ? " " + t`${old.join(", ")} continuam com a versão anterior até serem recriados.` : ""), true);
       pulls.delete(ref);
+      freshRef = ref;
+      setTimeout(() => {
+        if (freshRef === ref) {
+          freshRef = "";
+          render();
+        }
+      }, 4e3);
       if ($2("#pull-q").value.trim() === typed) {
         $2("#pull-q").value = "";
         pullHint();
