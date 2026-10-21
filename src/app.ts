@@ -2,7 +2,7 @@ import {
   type Blocker, type Bucket, type Container, type ContainerState, type DepState, type DiffItem, type DiskUsage, type Facts, type HistoryEvent, type Image, type LogLevel, type MemState,
   type Network, type Port, type Probe, type RunErrors, type RunField, type Sample, type Stats, type Tone, type Volume, HISTORY, age, anonVolume,
   DIFF_MAX, blockers, bucket, bulkSummary, bytes, continues, diffSummary, errHint, esc, eventText, fmtBytes, hasHealth, healthChanges, healthSummary, held, historySummary, holds, io, memHot, memText, memWatch, isProblem,
-  logFilter, logLevel, logServices, newProblems, percent, ports, probeDuration, probeResult, probeTime, project, prunedVolumes, pushSample,
+  imageOk, logFilter, logLevel, logServices, newProblems, percent, ports, pullOutcome, sameRef, withTag, probeDuration, probeResult, probeTime, project, prunedVolumes, pushSample,
   reclaimShare, runSpec, service, shortImage, sparkPoints, status, tone, topTable, trend, usage, workingDir,
 } from './format';
 import {LOCALE, t, translatePage} from './i18n';
@@ -1978,13 +1978,20 @@ function objItem(k: ObjKind, o: Obj) {
   const held = holds.length ? esc(holds.join(', ')) : '';
   const cls = armed ? 'ring-bad/60 text-bad-fg hover:bg-bad/10' : 'text-fg hover:bg-hover';
   const cols = OBJ_COLS[k].slice(1);
+  // imagens: um Atualizar (docker pull) por tag; sem tag (dangling), nada para atualizar
+  const tags = k === 'images' ? (o as Image).Tags : [];
+  const pullBtns = tags.map(tg => {
+    const run = pulls.get(tg)?.code === null, et = esc(tg);
+    return `<button data-id="pull-${et}" data-a="pull" data-r="${et}" ${run ? 'aria-disabled="true"' : ''} onclick="pullImage(this.dataset.r)"
+      title="docker pull ${et}" aria-label="${t`Atualizar ${et}`}" class="${BTN} text-fg hover:bg-hover">${run ? t`Baixando…` : tags.length > 1 ? t`Atualizar ${et}` : t`Atualizar`}</button>`;
+  }).join('');
   return `<tr class="border-t border-line/70 ${armed ? 'bg-bad/10' : ''} max-sm:block max-sm:py-3">
     <th scope="row" class="py-2.5 pl-4 pr-6 max-sm:block max-sm:p-0 max-sm:px-4 text-left font-normal align-top">
       <div class="font-mono text-data font-semibold text-fg-strong [overflow-wrap:anywhere]">${title}</div>
       ${err ? `<div class="mt-1 [contain:inline-size] max-sm:[contain:none] text-xs text-bad-fg">${hint ? `<p class="font-sans">${hint}</p>` : ''}
         <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-bad-soft">${esc(err)}</pre></div>` : ''}</th>
     ${cells.map((c, i) => `<td class="py-2.5 pr-4 max-sm:block max-sm:p-0 max-sm:px-4 align-top font-mono text-xs leading-5 text-muted [overflow-wrap:anywhere]"><span class="sm:sr-only">${cols[i]}: </span>${c}</td>`).join('')}
-    <td class="py-2 pr-4 max-sm:block max-sm:p-0 max-sm:px-4 max-sm:pt-2 align-top"><div class="flex justify-end max-sm:justify-start items-center gap-1.5">${!canRm ? '' : held
+    <td class="py-2 pr-4 max-sm:block max-sm:p-0 max-sm:px-4 max-sm:pt-2 align-top"><div class="flex flex-wrap justify-end max-sm:justify-start items-center gap-1.5">${pullBtns}${!canRm ? '' : held
       ? `<button data-id="${esc(id)}" data-a="rm" aria-disabled="true" aria-label="${t`Remover (indisponível: em uso por ${held})`}"
       title="${k === 'networks' ? t`Em uso por ${held}: pare o container antes` : t`Em uso por ${held}: remova o container antes`}" class="${BTN} text-muted cursor-not-allowed">${t`Remover…`}</button>`
       : `<button data-id="${esc(id)}" data-a="rm" data-k="${k}" data-r="${esc(r)}" ${objBusy ? 'aria-disabled="true"' : ''} ${armed ? 'aria-expanded="true"' : ''}
@@ -2007,6 +2014,59 @@ function renderObjects() {
     if (html !== objHtml[k]) $(`#obj-${k}-list`).innerHTML = objHtml[k] = html;  // o render roda a cada poll
     $(`#obj-${k}-n`).textContent = Array.isArray(v) ? ` · ${v.length}` : '';
   }
+}
+
+// docker pull: um por referência (com a tag explícita), com a saída ao vivo pelo addOut do compose (chave
+// "pull:<ref>"). before: o ID da tag antes do pull (null se não havia), para dizer no fim se a imagem mudou
+const pulls = new Map<string, Out & {before: string | null}>();
+const imageOf = (ref: string) => Array.isArray(objs.images) ? (objs.images as Image[]).find(i => i.Tags.some(tg => sameRef(tg, ref))) : undefined;
+function pullHint() {
+  const v = $<HTMLInputElement>('#pull-q').value.trim();
+  $('#pull-hint').textContent = !v ? '' : !imageOk(v) ? t`Imagem inválida: use repo[:tag] ou repo@sha256:…, com o caminho em minúsculas.`
+    : withTag(v) !== v ? t`(tag latest)` : '';
+}
+async function pullImage(typed = $<HTMLInputElement>('#pull-q').value.trim()) {
+  pullHint();
+  const ref = withTag(typed);
+  if (!typed || !imageOk(typed) || pulls.get(ref)?.code === null) return;
+  const p = {what: `docker pull ${ref}`, text: '', code: null as number | null, before: imageOf(ref)?.ID ?? null};
+  pulls.set(ref, p); renderPulls(); render();
+  $('#shown').textContent = t`Baixando ${ref}…`;
+  let msg = '';
+  try {
+    const r = await T.ndjson('/api/pull', {image: ref}, l => addOut(`pull:${ref}`, p, l + '\n'));
+    if (r.status >= 400) { p.code = -2; msg = String(r.error); } else p.code = r.code;
+  } catch { p.code = -1; msg = t`sem resposta do servidor do Stivo.`; }
+  await loadObjects('images');
+  if (p.code === 0) {
+    const out = pullOutcome(p.before, imageOf(ref)?.ID ?? null);
+    // atualizada: quem usava a versão anterior continua nela até ser recriado
+    const old = out === 'updated' && Array.isArray(objs.images) ? (objs.images as Image[]).find(i => i.ID === p.before)?.Containers ?? [] : [];
+    toast({new: t`Baixada: ${ref}.`, missing: t`Baixada: ${ref}.`, same: t`${ref} já estava em dia.`,
+           updated: t`Atualizada: ${ref}. A versão anterior ficou sem tag.`}[out]
+      + (old.length ? ' ' + t`${old.join(', ')} continuam com a versão anterior até serem recriados.` : ''), true);
+    pulls.delete(ref);
+    if ($<HTMLInputElement>('#pull-q').value.trim() === typed) { $<HTMLInputElement>('#pull-q').value = ''; pullHint(); }
+  } else {
+    msg ||= p.text;
+    toast(t`Não deu para baixar ${ref}. ${errHint(msg) || msg.trim().split('\n').at(-1) || t`Erro sem mensagem.`}`);
+    if (p.code === -2) pulls.delete(ref);  // recusado antes de rodar: não há saída para mostrar
+  }
+  renderPulls(); render();
+}
+function closePull(ref: string) { pulls.delete(ref); renderPulls(); $('#pull-q').focus(); }
+// a área dos pulls, acima da lista: o comando, o estado e a saída (o texto entra pelo addOut); o que falhou fica até o ×
+function renderPulls() {
+  $('#pulls').innerHTML = [...pulls].map(([ref, p]) => {
+    const running = p.code === null, er = esc(ref);
+    const state = running ? t`baixando…` : p.code === -1 ? t`sem resposta do servidor` : t`falhou (código ${p.code})`;
+    return `<div class="rounded-lg ring-1 ring-line bg-raised/40 p-3"><div class="flex items-center gap-2 font-mono text-xs ${running ? 'text-fg-soft' : 'text-bad-fg'}">
+      <span>docker pull ${er} · ${state}</span>${running ? '' : `<button data-r="${er}" onclick="closePull(this.dataset.r)" aria-label="${t`Fechar a saída do docker pull ${er}`}"
+        title="${t`Fechar`}" class="ml-auto grid place-items-center shrink-0 w-9 coarse:w-11 ${BTN} text-fg hover:bg-hover">${X_ICON}</button>`}</div>
+      <pre data-out="pull:${er}" tabindex="0" aria-label="${t`Saída do docker pull ${er}`}"
+        class="mt-1.5 max-h-64 overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] rounded bg-canvas p-2 font-mono text-xs text-fg-soft ring-1 ring-line focus-visible:outline-2 focus-visible:outline-accent"></pre></div>`;
+  }).join('');
+  pulls.forEach((p, ref) => { const pre = outPre(`pull:${ref}`); if (pre) { pre.textContent = p.text; pre.scrollTop = pre.scrollHeight; } });
 }
 
 // docker image/volume/network rm, com a confirmação em 2 passos. Em uso, o docker recusa e o erro fica no item
@@ -2070,8 +2130,8 @@ if (T.prefs) {
 }
 
 Object.assign(window, {
-  ackFail, act, afterClose, askNotify, confirmArm, bulkAct, clearFilters, clearSel, closeOut, composeAct, copyAddr, copyDiff, copyExec, copyLogs, copyProbe, disarm, downloadLogs,
-  filterBy, followClick, loadDiff, loadHealth, loadHistory, loadInspect, loadMore, loadTop, logPick, menuPick, openCreate, openPrefs, openProcs, openShell, pickTab, placeMenu, projectLogs,
+  ackFail, act, afterClose, askNotify, confirmArm, bulkAct, clearFilters, clearSel, closeOut, closePull, composeAct, copyAddr, copyDiff, copyExec, copyLogs, copyProbe, disarm, downloadLogs,
+  filterBy, followClick, loadDiff, loadHealth, loadHistory, loadInspect, loadMore, loadTop, logPick, menuPick, openCreate, openPrefs, openProcs, openShell, pickTab, placeMenu, projectLogs, pullImage,
   prune, refreshLogs, reloadHealth, rmObj, serviceAct, runToastAction, selectAll, sinceChange, stackAct, toggleSel,
 });
 
@@ -2097,6 +2157,7 @@ $('#lf').addEventListener('keydown', e => {
   const f = e.target as HTMLInputElement;
   if (e.key === 'Escape' && f.value) { e.preventDefault(); f.value = ''; paint(); }
 });
+$('#pull-q').oninput = pullHint;
 // o filtro das mudanças funciona igual
 $('#diff-q').oninput = paintDiff;
 $('#diff-q').addEventListener('keydown', e => {

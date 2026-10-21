@@ -100,6 +100,14 @@
 
   <!-- o docker system df é caro (soma os volumes): só roda ao abrir a aba, nunca no poll -->
   <section id="panel-images" role="tabpanel" aria-labelledby="tab-images" hidden class="space-y-4">
+    <!-- docker pull: baixar uma imagem pelo nome (a mesma regra do Novo container) e, nos itens, Atualizar a tag -->
+    <form id="pull-form" onsubmit="event.preventDefault(); pullImage()" class="flex flex-wrap items-center gap-2">
+      <label for="pull-q" class="text-sm text-fg-soft">Baixar imagem</label>
+      <input id="pull-q" placeholder="postgres:17" autocomplete="off" spellcheck="false" aria-describedby="pull-hint" class="w-full sm:w-72 rounded bg-raised ring-1 ring-line px-3 py-2 coarse:py-3 text-sm text-fg-strong placeholder:text-muted focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+      <button type="submit" title="docker pull" class="px-2.5 py-1.5 coarse:min-h-11 coarse:px-4 rounded text-sm font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Baixar</button>
+      <span id="pull-hint" class="text-xs text-muted"></span>
+    </form>
+    <div id="pulls" class="space-y-2"></div>
     <div id="df-images" class="rounded-lg ring-1 ring-line bg-raised/40 px-4 text-sm divide-y divide-line/70"></div>
     <div id="obj-images-list" class="rounded-lg ring-1 ring-line bg-raised/40 text-sm overflow-x-auto"></div>
   </section>
