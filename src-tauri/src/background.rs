@@ -111,7 +111,7 @@ pub fn show_notification<R: Runtime>(app: &AppHandle<R>, title: &str, body: &str
     let mut n = notify_rust::Notification::new();
     n.summary(title).body(body).appname("Stivo");
     #[cfg(target_os = "linux")]
-    n.action("default", "Abrir").icon(&app.config().identifier);
+    n.action("default", "Abrir").icon("stivo"); // o ícone que o .deb e o .rpm instalam no tema hicolor
     #[cfg(windows)]
     n.app_id(&app.config().identifier);
     let app = app.clone();

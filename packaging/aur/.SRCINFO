@@ -1,0 +1,21 @@
+pkgbase = stivo-bin
+	pkgdesc = Containers Docker e Podman: lista ao vivo, logs, compose e terminal, avisando da bandeja quando algo quebra
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/martinsgabriel1956/docker-gui
+	arch = x86_64
+	license = MIT
+	depends = webkit2gtk-4.1
+	depends = gtk3
+	depends = libayatana-appindicator
+	depends = hicolor-icon-theme
+	optdepends = docker: o CLI que o Stivo usa
+	optdepends = podman: no lugar do docker
+	provides = stivo
+	conflicts = stivo
+	source = Stivo_0.1.0_amd64.deb::https://github.com/martinsgabriel1956/docker-gui/releases/download/v0.1.0/Stivo_0.1.0_amd64.deb
+	source = LICENSE::https://raw.githubusercontent.com/martinsgabriel1956/docker-gui/v0.1.0/LICENSE
+	sha256sums = SKIP
+	sha256sums = SKIP
+
+pkgname = stivo-bin

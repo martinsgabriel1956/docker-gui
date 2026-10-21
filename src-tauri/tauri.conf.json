@@ -15,15 +15,31 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["deb", "rpm", "msi", "nsis"],
+    "targets": [
+      "deb",
+      "rpm",
+      "msi",
+      "nsis"
+    ],
     "category": "DeveloperTool",
     "shortDescription": "Containers Docker e Podman: lista ao vivo, logs, compose e terminal",
     "longDescription": "O Stivo mostra os containers Docker e Podman da sua máquina ao vivo, diz o que quebrou e por quê, e fecha o ciclo reiniciar e ler logs sem sair da janela. Fechar a janela deixa o Stivo na bandeja, avisando quando algo cai.",
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.png", "icons/icon.ico"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png",
+      "icons/icon.ico"
+    ],
     "license": "MIT",
+    "publisher": "Gabriel Martins",
+    "homepage": "https://github.com/martinsgabriel1956/docker-gui",
     "linux": {
-      "deb": { "depends": ["libayatana-appindicator3-1"] },
-      "rpm": { "depends": ["libayatana-appindicator-gtk3"] }
+      "rpm": {
+        "depends": [
+          "libayatana-appindicator-gtk3"
+        ]
+      }
     }
   }
 }
