@@ -93,7 +93,7 @@ O produto passa a se chamar **Stivo** nas duas versões, porque "Docker GUI" usa
 ### 7. Distribuição
 
 1. **RF7.1** Instaladores para Linux e Windows publicados a cada release no GitHub.
-2. **RF7.2** O app também é publicado no Flathub, no winget, no AUR e no Snap.
+2. **RF7.2** O app também é publicado no winget e no AUR (os dois só apontam para os instaladores da release).
 3. **RF7.3** O CI gera os instaladores e confere que a versão desktop e a versão web passam nos testes antes da release.
 
 ## Experiência do usuário
@@ -110,7 +110,6 @@ O produto passa a se chamar **Stivo** nas duas versões, porque "Docker GUI" usa
 - **Tauri é decisão tomada** para a camada desktop. O techspec decide como o backend atual é aproveitado ou reescrito.
 - **As duas versões convivem e são mantidas.** Uma feature nova precisa chegar às duas, ou o PRD dela diz por que não.
 - **Linux e Windows** na primeira entrega. No Windows, o alvo é quem usa o Docker Desktop.
-- **O Flathub e o Snap isolam o app.** O acesso ao socket do Docker ou do Podman e ao binário da CLI precisa funcionar dentro dessas restrições.
 - **A GUI nunca amplia o que o `docker` já permite** (PRODUCT.md, "Capabilities and Constraints"). Isso vale igual para o desktop.
 - **Metas mensuráveis:** aviso em até 5 s, instalador de até 20 MB, até 150 MB de RAM ocioso.
 - **Funciona offline**, como hoje: nada de rede além do daemon.
@@ -123,6 +122,7 @@ O produto passa a se chamar **Stivo** nas duas versões, porque "Docker GUI" usa
 - **Features novas** além de paridade, segundo plano, janela própria e preferências. Exemplos: vários daemons ao mesmo tempo, atalho global, iniciar com o sistema.
 - **Layout de celular no desktop.**
 - **Telemetria** de qualquer tipo.
+- **Flathub e Snap**, por enquanto. O Stivo executa o `docker` (ou o `podman`) do host, e os dois canais isolam o app disso. No Flatpak, isso exige o `flatpak-spawn --host`, um contorno do sandbox que as [regras do Flathub](https://docs.flathub.org/docs/for-app-authors/requirements) recusam ("disabling or bypassing security mechanisms"), além de recusar apps que dependem de componentes do host e de considerar ferramentas de desenvolvimento geralmente inadequadas. No Snap, o confinamento `classic` é [reservado a apps maduros de publicadores conhecidos](https://snapcraft.io/docs/reference/administration/reviewing-classic-confinement-snaps/), e o `strict` com a interface `docker` só fala com o Docker do próprio snap, não com o docker-ce nem com o Podman. Empacotar um docker CLI próprio para contornar isso ficaria de fora do que o produto promete (usar o CLI que a pessoa já tem). Fica como consideração futura, se as regras mudarem ou com um pedido feito pelo próprio projeto.
 
 ## Histórico
 
@@ -131,3 +131,5 @@ O produto passa a se chamar **Stivo** nas duas versões, porque "Docker GUI" usa
 **2026-10-21**. Nome do produto: Stivo (seção 6, RF6.1 a RF6.3), no lugar de "Docker GUI", por causa das diretrizes de marca da Docker; distribuição renumerada para a seção 7 (RF7.x). Busca de marca no INPI e no USPTO pendente.
 
 **2026-10-21**. Ícone escolhido: "Estiva" (pilha de contêineres com o cursor na última linha), entre três direções; registrado no PRODUCT.md e no DESIGN.md.
+
+**2026-10-21**. RF7.2: Flathub e Snap saem da primeira entrega (vão para fora de escopo, com as fontes). As regras dos dois canais não aceitam um app que precisa executar o CLI do host, e contornar isso iria contra o produto. O app sai nas releases do GitHub, no AUR e no winget.
