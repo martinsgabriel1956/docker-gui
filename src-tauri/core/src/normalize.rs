@@ -334,6 +334,12 @@ pub fn from_podman_stats(st: &Value) -> Option<Value> {
 }
 
 /// Saída do stats -> lista no formato do docker. Como no ps, a forma da linha decide
+/// RAM total do daemon, do `info --format {{json .}}` (o mem_total do Python)
+pub fn mem_total(out: &str) -> Option<u64> {
+    let v: Value = serde_json::from_str(out).ok()?;
+    v.get("MemTotal").or_else(|| v.get("host")?.get("memTotal"))?.as_u64().filter(|&t| t > 0)
+}
+
 pub fn stats(out: &str) -> Option<Value> {
     let rows: Vec<Value> = if out.trim_start().starts_with('[') {
         serde_json::from_str(out).ok()?

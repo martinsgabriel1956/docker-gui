@@ -104,6 +104,17 @@ async fn get(ctx: &Ctx, req: &Request) -> Step<Response> {
         let base = compose_query(ctx, &req.query).await?;
         return Ok(reply(200, compose_services(ctx, &base).await?));
     }
+    if full == "/api/info" {
+        // sem limite, o stats reporta a RAM total como limite: a página precisa dela
+        let r = ctx.docker(&["info", "--format", "{{json .}}"], READ_TIMEOUT).await;
+        if r.code != 0 {
+            return Ok(reply(500, r.stderr.trim()));
+        }
+        let cmd = format!("{} info", ctx.cli[0]);
+        return Ok(
+            n::mem_total(&r.stdout).map_or_else(|| format_error(ctx, &cmd), |t| reply(200, json!({"MemTotal": t})))
+        );
+    }
     if full == "/api/containers" || full == "/api/stats" || full == "/api/df" {
         // o ps e o stats do podman só saem completos em "json" (um array); o resto em um JSON por linha
         let fmt = if full != "/api/df" && ctx.podman() { "json" } else { "{{json .}}" };

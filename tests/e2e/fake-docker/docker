@@ -348,6 +348,8 @@ def main(args):
             save(f, state)
             if err:
                 fail(err)
+        elif cmd == "info":  # info --format '{{json .}}': só a RAM total, que a página usa no alerta de memória
+            print(json.dumps({"MemTotal": state.get("mem_total", 16 * 2**30)}))
         elif cmd == "stats":
             n = state["stats_calls"] = state.get("stats_calls", 0) + 1
             save(f, state)

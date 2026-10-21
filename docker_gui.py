@@ -357,6 +357,17 @@ def from_podman_stats(s):
             "BlockIO": f"{podman_size(s.get('BlockInput') or 0)} / {podman_size(s.get('BlockOutput') or 0)}"}
 
 
+def mem_total(out):
+    """RAM total do daemon, do `info --format {{json .}}`: MemTotal no docker, host.memTotal no podman (e no
+    podman-docker, que o nome do binário não denuncia). None se não vier."""
+    try:
+        d = json.loads(out)
+    except ValueError:
+        return None
+    v = (d.get("MemTotal") or (d.get("host") or {}).get("memTotal")) if isinstance(d, dict) else None
+    return v if isinstance(v, int) and v > 0 else None
+
+
 def stats(out):
     """Saída do stats -> lista no formato do docker (ID curto, CPUPerc, MemUsage, MemPerc, NetIO, BlockIO).
     Como no ps, a forma da linha decide: o docker manda um JSON por linha, o podman um array indentado."""
@@ -634,6 +645,13 @@ class Handler(BaseHTTPRequestHandler):
             base = self.compose_query(query)
             services = None if base is None else self.compose_services(base)
             return None if services is None else self.send(200, json.dumps(services))
+        if self.path == "/api/info":  # sem limite, o stats reporta a RAM total como limite: a página precisa dela
+            r = docker("info", "--format", "{{json .}}")
+            if r.returncode:
+                return self.send(500, json.dumps(r.stderr.strip()))
+            total = mem_total(r.stdout)
+            return (self.send(200, json.dumps({"MemTotal": total})) if total else
+                    self.send(500, json.dumps(tr("formato inesperado na saída do {cmd}").format(cmd=f"{CLI[0]} info"))))
         if self.path in LISTS or self.path == "/api/df":
             ps, st = self.path == "/api/containers", self.path == "/api/stats"
             # o ps e o stats do podman só saem completos em "json" (um array); containers() e stats() convertem

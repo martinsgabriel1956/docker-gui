@@ -1,0 +1,28 @@
+{
+  "desc": "info sem a RAM total: 500 com a explicação",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "{}\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "info",
+        "--format",
+        "{{json .}}"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/info",
+    "body": null
+  },
+  "response": {
+    "status": 500,
+    "body": "formato inesperado na saída do docker info"
+  }
+}

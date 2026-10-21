@@ -43,6 +43,7 @@ export type DockerState = {
   images?: ImageRow[]; volumes?: VolumeRow[]; networks?: NetworkRow[]; removed?: string[];
   context?: { Name: string; Host: string };  // o que o `context inspect` responde (padrão: default em unix://)
   compose_services?: Record<string, string[]>;  // o `compose config --services` de cada projeto
+  mem_total?: number;  // a RAM total do `docker info` (padrão: 16 GiB)
 };
 
 // ID estável por nome: o mesmo container tem o mesmo ID em todo teste

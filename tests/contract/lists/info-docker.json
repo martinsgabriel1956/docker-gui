@@ -1,0 +1,30 @@
+{
+  "desc": "RAM total do daemon no docker info",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "{\"MemTotal\": 16654159872, \"NCPU\": 8, \"ServerVersion\": \"28.0.0\"}\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "info",
+        "--format",
+        "{{json .}}"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/info",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "MemTotal": 16654159872
+    }
+  }
+}
