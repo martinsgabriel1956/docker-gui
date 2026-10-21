@@ -15,5 +15,11 @@
     "@xterm/xterm": "6.0.0",
     "esbuild": "0.28.2",
     "typescript": "7.0.2"
+  },
+  "imports": {
+    "#transport": {
+      "desktop": "./src/transport-desktop.ts",
+      "default": "./src/transport-web.ts"
+    }
   }
 }
