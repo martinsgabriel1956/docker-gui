@@ -6,11 +6,12 @@
   "scripts": {
     "typecheck": "tsc -p .",
     "build": "python3 build.py",
-    "test:js": "node --test tests/format.test.js",
+    "test:js": "node --test tests/format.test.js tests/transport-desktop.test.js",
     "test:e2e": "playwright test",
     "build:harness": "cargo build --manifest-path src-tauri/Cargo.toml -p stivo-core --features harness",
     "test:e2e:rust": "npm run build:harness && GUI_BACKEND=rust playwright test",
-    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml"
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "tauri": "tauri"
   },
   "devDependencies": {
     "@playwright/test": "1.63.0",

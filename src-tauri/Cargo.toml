@@ -1,3 +1,27 @@
+[package]
+name = "stivo"
+version = "0.1.0"
+description = "Stivo: containers Docker e Podman, com a lista ao vivo, logs, compose e terminal"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[lib]
+name = "stivo_lib"
+
+[build-dependencies]
+tauri-build = { version = "=2.7.3", features = [] }
+
+[dependencies]
+# fixo no minor, como no Paddock: a 2.13 pode mudar o que o protocolo próprio e a bandeja expõem
+tauri = { version = "=2.12.4", features = [] }
+stivo-core = { path = "core" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+tokio = { version = "=1.54.0", features = ["sync", "rt-multi-thread", "macros"] }
+futures-util = "=0.3.34"
+log = "=0.4.34"
+
 [workspace]
 # core: o equivalente ao backend do docker_gui.py, sem Tauri (cargo test e o harness dos testes não precisam do WebKit)
 members = ["core"]
