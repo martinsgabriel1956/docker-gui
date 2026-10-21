@@ -1,6 +1,6 @@
 # Stivo
 
-Gerenciador de containers para Docker e Podman, no navegador, num arquivo Python só. Usa apenas a biblioteca padrão e o `docker` CLI que você já tem.
+Gerenciador de containers para Docker e Podman, de duas formas: no navegador, num arquivo Python só (usa apenas a biblioteca padrão e o `docker` CLI que você já tem), ou como [app desktop](#app-desktop) para Linux e Windows, que fica na bandeja e avisa quando algo quebra.
 
 > Até outubro de 2026 o projeto se chamava Docker GUI. O nome mudou porque as [diretrizes de marca da Docker](https://www.docker.com/legal/trademark-guidelines/) não permitem "Docker" em nome de produto; o comando, as variáveis `DOCKER_GUI_*` e o que a página guarda no navegador continuam iguais.
 
@@ -36,6 +36,20 @@ DOCKER_GUI_LANG=pt python3 docker_gui.py
 ```
 
 A saída do `podman ps` tem outro formato (`Names` em lista, portas como objetos, labels como dicionário…), e a do `podman stats` também (`cpu_percent`, `net_io`…; pelo `podman-docker`, números crus). O servidor converte tudo para o formato do `docker ps` e do `docker stats`, então a página funciona igual. O mesmo vale para as listas de imagens (tamanho em bytes, data em epoch), volumes e redes (chaves em minúsculas no Podman 4+). Uma rede que venha sem ID (formatos antigos do Podman) aparece na lista, mas sem o botão de remover. O "Copiar `docker exec`" usa o mesmo binário e contexto.
+
+## App desktop
+
+O Stivo também vem como app instalável para Linux (`.deb` e `.rpm`) e Windows (`.msi` e `.exe`), com as mesmas features da página. A diferença:
+
+- **Não precisa de Python.** O instalador tem uns 3 MB e usa a WebView do sistema (o WebKitGTK no Linux, o WebView2 no Windows); do lado de fora, só o `docker` (ou o `podman`).
+- **Fica na bandeja.** Fechar a janela não encerra o app: ele continua vigiando os containers, o ícone da bandeja mostra quantos precisam de atenção e a notificação do sistema avisa quando um entra na faixa (com as mesmas regras da página: só quem entra, uma notificação para vários juntos). Para sair, use Sair no menu da bandeja. Abrir o Stivo de novo traz a janela de volta.
+- **Nenhuma porta aberta.** A janela fala com o núcleo pela IPC do app, sem servidor em `localhost` e sem token.
+- **Preferências** no cabeçalho e no menu da bandeja: CLI (Docker ou Podman), contexto do docker, idioma e notificações. Valem na hora.
+- **Terminal com TTY também no Windows** (ConPTY), sem o `script` dentro do container.
+
+No GNOME, a bandeja depende da extensão [AppIndicator](https://extensions.gnome.org/extension/615/appindicator-support/): sem ela o ícone não aparece (o app continua rodando, e abrir o Stivo de novo traz a janela). No Windows, como o instalador não é assinado, o SmartScreen avisa na primeira execução ("Mais informações" → "Executar assim mesmo").
+
+Os instaladores saem em cada [release](https://github.com/martinsgabriel1956/docker-gui/releases).
 
 ## O que faz
 
@@ -138,6 +152,22 @@ python3 build.py --css   # HTML, JS e CSS
 
 Não edite o bloco gerado do `docker_gui.py` à mão: o CI confere se ele bate com `src/`.
 
+O app desktop usa a mesma página. O `build.py` gera também o `src-tauri/dist/index.html`, trocando o transporte: o `app.ts` importa `#transport`, que o `package.json` resolve para o `src/transport-web.ts` (fetch, `EventSource`, `WebSocket`) ou, com a condição `desktop` do esbuild, para o `src/transport-desktop.ts` (a IPC do Tauri). O resto mora em `src-tauri/`:
+
+| Pasta | O que tem |
+|---|---|
+| `src-tauri/core/` | O núcleo em Rust: as mesmas rotas do servidor Python (listas, ações, compose, logs e eventos ao vivo, terminal num PTY), sem Tauri e sem HTTP. O binário `harness` (só de teste) serve a página da web com ele |
+| `src-tauri/src/` | O app Tauri: a página no protocolo `dg://`, os comandos da IPC, a bandeja, as notificações e as preferências |
+| `tests/contract/` | O contrato entre os dois backends: o que o docker responde e o que a API devolve, conferido no `unittest` e no `cargo test` |
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml      # núcleo, contrato e app (precisa do Rust)
+npx tauri dev                                         # o app, com o docker de verdade
+npx tauri build --bundles deb,rpm                     # os instaladores (msi,nsis no Windows)
+```
+
+No Linux, o build do app precisa de `libwebkit2gtk-4.1-dev` e `libayatana-appindicator3-dev`.
+
 O texto da interface fica em pt-BR no código. Uma frase nova vai num `t\`...\`` (em `src/*.ts`) ou direto no `page.html`, e a tradução dela vai no `src/en.json`; no servidor, num `tr("...")` com a tradução no `EN` do `docker_gui.py`. O `tests/test_i18n.py` falha se faltar tradução, se sobrar chave que ninguém usa ou se os `{0}`, `{1}`... não baterem.
 
 ## Testes
@@ -167,9 +197,12 @@ Os testes de UI usam o [Playwright](https://playwright.dev) e cobrem o que a pá
 ```bash
 npx playwright install chromium   # uma vez
 npm run test:e2e
+npm run test:e2e:rust             # os mesmos specs contra o núcleo Rust do desktop (pelo harness)
 ```
 
-O CI roda tudo isso em cada pull request e em cada push na `main` e na `develop`: lint (`ruff check`), testes em Python 3.7 a 3.14, E2E com Docker real, tipos (`tsc`) e testes do `format.ts`, testes de UI com Playwright, e a conferência de que o `docker_gui.py` está em dia com `src/`, CSS incluído.
+O que o harness não cobre (a janela, fechar que esconde, a notificação com a janela fechada e a instância única) fica com o `e2e/desktop-smoke.sh`, num X e num D-Bus próprios (Xvfb, `xdotool`, `dbus-run-session`, `python3-gi`). As metas do PRD têm scripts: `scripts/size.sh` (instaladores com até 20 MB) e `scripts/memory.sh --idle` (até 150 MB com a janela fechada).
+
+O CI roda tudo isso em cada pull request e em cada push na `main` e na `develop`: lint (`ruff check`), testes em Python 3.7 a 3.14, E2E com Docker real, tipos (`tsc`) e testes do `format.ts` e do transporte do desktop, testes de UI com Playwright contra os dois backends, a conferência de que o `docker_gui.py` e a página do desktop estão em dia com `src/` (CSS incluído), o núcleo Rust (fmt, clippy e o contrato) e o build dos instaladores de Linux e Windows, com o teto de tamanho e o smoke do desktop.
 
 ## Licença
 

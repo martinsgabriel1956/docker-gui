@@ -58,14 +58,35 @@ jobs:
       - run: npm ci
       - name: Tipos (tsc)
         run: npx tsc -p .
-      - name: Testes do format.ts
-        run: node --test tests/format.test.js
-      - name: docker_gui.py em dia com src/ (HTML, JS e CSS do Tailwind)
+      - name: Testes do format.ts e do transporte do desktop
+        run: npm run test:js
+      - name: docker_gui.py e a página do desktop em dia com src/ (HTML, JS e CSS do Tailwind)
         run: python3 build.py --css --check
 
-  ui:
-    name: ui (Playwright)
+  rust:
+    name: rust (núcleo)
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      # o núcleo não depende do Tauri nem do WebKit: o contrato com o Python roda aqui, sem pacote de sistema
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all --check
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml -p stivo-core --all-targets --features harness -- -D warnings
+      - run: cargo test --manifest-path src-tauri/Cargo.toml -p stivo-core
+
+  ui:
+    name: ui (Playwright, ${{ matrix.backend }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # python: o docker_gui.py; rust: o núcleo do desktop servido pelo harness, com o mesmo contrato
+        backend: [python, rust]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -74,13 +95,70 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium
-      # cada teste sobe o docker_gui.py contra um docker falso (tests/e2e/fake-docker): não precisa de daemon
+      - if: matrix.backend == 'rust'
+        uses: dtolnay/rust-toolchain@1.99.0
+      - if: matrix.backend == 'rust'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - if: matrix.backend == 'rust'
+        run: npm run build:harness
+      # cada teste sobe o backend contra um docker falso (tests/e2e/fake-docker): não precisa de daemon
       - run: npx playwright test
+        env:
+          GUI_BACKEND: ${{ matrix.backend }}
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: playwright-report
+          name: playwright-report-${{ matrix.backend }}
           path: |
             playwright-report/
             test-results/
+          retention-days: 14
+
+  desktop:
+    name: desktop (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22.04: o .deb nasce com a glibc e o WebKitGTK mais antigos que o app aceita
+        os: [ubuntu-22.04, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf rpm \
+            xvfb xdotool dbus-x11 python3-gi gir1.2-glib-2.0 bc
+      - run: npm ci
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml -p stivo --all-targets -- -D warnings
+      - run: cargo test --manifest-path src-tauri/Cargo.toml -p stivo
+      - run: npx tauri build --bundles ${{ runner.os == 'Linux' && 'deb,rpm' || 'msi,nsis' }}
+      # teto do PRD: cada instalador com até 20 MB
+      - run: scripts/size.sh
+      # janela, fechar que esconde, notificação em até 5 s e instância única, num X e num D-Bus próprios
+      - if: runner.os == 'Linux'
+        run: e2e/desktop-smoke.sh src-tauri/target/release/stivo
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stivo-${{ matrix.os }}
+          path: |
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/rpm/*.rpm
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*-setup.exe
           retention-days: 14

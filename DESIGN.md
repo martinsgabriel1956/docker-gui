@@ -324,6 +324,12 @@ Imagens, volumes e redes no ritmo de colunas do CLI, dentro do mesmo contêiner 
 ### Ícone
 "Estiva": uma pilha de três contêineres sobre o chão grafite (`#141a22`, raio 5 de 24), em que a de cima é ciano e a última linha termina num bloco ciano, o cursor. As outras são `#566273`. Fonte única em `src-tauri/icons/stivo.svg`: dela saem os PNG e o ICO do app (`npx tauri icon`), e o `setIcon` do app.ts desenha o mesmo SVG no favicon da web e na bandeja do desktop. A contagem da faixa de atenção vai num selo vermelho no canto inferior direito (`9+` acima de 9, `!` com os dados velhos), porque ali o vermelho é estado. Legível a 16 px nos dois temas da bandeja; nada de baleia nem cubo isométrico.
 
+### Preferências (só no desktop)
+O mesmo esqueleto do modal "Novo container": título "Preferências" com a nota "Valem na hora" em muted, campos em coluna (`select` nativos de CLI, contexto e idioma, e a caixa das notificações), Cancelar e Salvar (primário) no pé. A linha do contexto some com o podman, porque o contexto é do docker. Salvar recarrega a janela, que volta com o rótulo do daemon e o idioma novos; erro aparece no mesmo aviso vermelho do Novo container. O botão "Preferências" fica no cabeçalho, ao lado de "Atalhos", e só existe no app desktop. No WebKitGTK os `select` nativos (aqui e nos logs) desenham o fundo do tema do GTK, não o canvas.
+
+### Bandeja (só no desktop)
+O ícone do Stivo com o selo da faixa de atenção (o mesmo desenho do favicon, em PNG de 64 px). Menu: Abrir o Stivo, Preferências… e Sair. Fechar a janela pela primeira vez gera uma notificação que diz que o app continua na bandeja e como sair.
+
 ### Navigation
 Abas (`role="tablist"`): Containers, Imagens, Volumes, Redes, na borda de baixo da faixa do cabeçalho. Sans 14px em 500, padding 8px 12px, texto muted; hover fg; a selecionada fica fg-strong com um sublinhado de 2px accent que encosta no traço da faixa. Todas as abas levam a contagem em mono 12px muted ("Containers · 6"). Setas, Home e End andam entre as abas; trocar de aba entra no histórico e desarma qualquer confirmação. Atalhos de teclado (`/`, ←→, ↑↓, `r`, `s`, `b`, `x`, `a`, `z`, `?`; o `s` faz a ação principal da linha) aparecem num popover nativo com `kbd` mono de 4px de raio e anel line-strong.
 
