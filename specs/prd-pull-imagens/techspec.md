@@ -116,3 +116,9 @@ Nada novo. O nome da imagem não vai para o log (a regra de privacidade do proje
 ## Histórico
 
 **2026-10-21**. Documento criado.
+
+**2026-10-21**. Durante o sdd-tasks:
+- A mensagem de prazo do stream usa o primeiro argumento (`compose` ou `pull`), no lugar do "compose" fixo.
+- A validação da imagem vira o `image_ok()` nos dois backends, usado pelo `run_argv` e pelo pull.
+- A saída ao vivo usa o `addOut` do compose (chave `pull:<ref>`), numa área própria da aba (`#pulls`).
+- O "mudou?" compara a tag também com o prefixo do Docker Hub que o Podman põe (`sameRef`).
