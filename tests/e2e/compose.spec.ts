@@ -22,7 +22,8 @@ test('cabeçalho do projeto mostra só a ação principal, Logs e o ⋯', async 
   await expect(page.getByRole('button', { name: 'compose up do projeto shop', exact: true })).toBeHidden();
   await projectMenu(page).click();
   await expect(head.getByRole('button').filter({ visible: true }))
-    .toHaveText(['Iniciar api', 'Logs', 'Reiniciar db', 'Parar db', 'compose up', 'compose up --build', 'compose pull', 'compose down…']);
+    .toHaveText(['Iniciar api', 'Logs', 'Reiniciar db', 'Parar db', 'compose up', 'compose up --build', 'compose pull',
+                 'Copiar caminho da pasta', 'compose down…']);
   await page.keyboard.press('Escape');
 
   // tudo rodando: a principal vira Parar tudo
@@ -359,4 +360,22 @@ test('a espera normal do compose up não acende a faixa', async ({ page, gui }) 
   await expect(page.getByRole('button', { name: 'Logs api' })).toBeVisible();
   expect(await rowKeys(page)).not.toContain('h:attn');
   await expect(row(page, 'api')).not.toContainText('depende de');
+});
+
+test('o menu do projeto copia o caminho da pasta (web)', async ({ page, context, gui }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await gui.open({ containers: containers() });
+  await projectMenu(page).click();
+  const item = page.getByRole('button', { name: 'Copiar caminho da pasta' });
+  await expect(item).toHaveAttribute('title', '/srv/shop');
+  await item.click();
+  await expect(page.locator('#toast')).toHaveText('Caminho copiado: /srv/shop');
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('/srv/shop');
+});
+
+test('com daemon remoto, o menu do projeto não oferece a pasta', async ({ page, gui }) => {
+  await gui.open({ containers: containers(), context: { Name: 'prod', Host: 'tcp://10.0.0.5:2376' } });
+  await projectMenu(page).click();
+  await expect(page.getByRole('button', { name: 'compose pull do projeto shop' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Copiar caminho da pasta' })).toHaveCount(0);
 });

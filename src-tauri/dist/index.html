@@ -390,6 +390,7 @@
     "Abrir logs de {0}": "Open logs of {0}",
     "Abrir no navegador": "Open in the browser",
     "Abrir os logs. Última linha:": "Open the logs. Last line:",
+    "Abrir pasta": "Open folder",
     "Abrir terminal": "Open terminal",
     "Abrir {0}:{1} em nova aba (porta {2} do container)": "Open {0}:{1} in a new tab (container port {2})",
     "Acompanhar ao vivo": "Follow live",
@@ -420,6 +421,7 @@
     "Baixar imagem": "Pull image",
     "Build cache": "Build cache",
     "CLI de containers": "Container CLI",
+    "Caminho copiado: {0}": "Path copied: {0}",
     "Cancela sozinho em 8 s.": "Cancels by itself in 8 s.",
     "Cancela sozinho em 8 segundos.": "Cancels by itself in 8 seconds.",
     Cancelar: "Cancel",
@@ -447,6 +449,7 @@
     "Copiado: {0}": "Copied: {0}",
     Copiar: "Copy",
     "Copiar a saída do probe das {0}": "Copy the output of the {0} probe",
+    "Copiar caminho da pasta": "Copy folder path",
     "Copiar docker exec": "Copy docker exec",
     "Copiar {0}:{1}": "Copy {0}:{1}",
     "Copiar {0}:{1} (porta {2}/{3} do container)": "Copy {0}:{1} (container port {2}/{3})",
@@ -567,6 +570,7 @@
     "Não consegui carregar os logs. O servidor do Stivo está rodando?": "Could not load the logs. Is the Stivo server running?",
     "Não consegui conectar ao servidor do Stivo.": "Could not connect to the Stivo server.",
     "Não consegui copiar.": "Could not copy.",
+    "Não consegui copiar. O caminho é: {0}": "Could not copy. The path is: {0}",
     "Não consegui copiar. O comando é: {0}": "Could not copy. The command is: {0}",
     "Não consegui falar com o Docker.": "Could not talk to Docker.",
     "Não consegui ler a lista de volumes; o prune leva os sem uso.": "Could not read the volume list; the prune takes the unused ones.",
@@ -11648,10 +11652,13 @@ ${WIDE.matches ? "" : `
     const upSvc = missing.map((s15) => `<button data-id="stack-${ek}" data-a="m-svcup-${esc(s15)}" data-p="${ek}" data-s="${esc(s15)}" ${off}
       aria-label="${t`compose up ${esc(s15)} do projeto ${ek}`}" onclick="menuPick(this); composeAct('svcup', this.dataset.p, this.dataset.s)"
       class="${MENU_ITEM} text-fg">compose up ${esc(s15)}</button>`).join("");
+    const dirItem = dir && !REMOTE ? `<button data-id="stack-${ek}" data-a="m-dir" data-p="${ek}" title="${esc(dir)}"
+      onclick="menuPick(this); projectDir(this.dataset.p)" class="${MENU_ITEM} text-fg">${T.openDir ? t`Abrir pasta` : t`Copiar caminho da pasta`}</button>` : "";
     const groups = [
       STACK.filter(([a]) => a !== prim).map(([a, text]) => sbtn(a, text, MENU_ITEM + " text-fg")).join(""),
       dir ? cbtn("up", "compose up") + cbtn("rebuild", "compose up --build") + cbtn("pull", "compose pull") : "",
       upSvc,
+      dirItem,
       dir ? cbtn("down", "compose down…", MENU_ITEM + " text-bad-fg") : ""
     ].filter(Boolean);
     const verb = composing.get(k);
@@ -12013,6 +12020,15 @@ ${WIDE.matches ? "" : `
     }
     if (ok && now.length) return confirmUp(now);
     if (a === "down") $2("#q").focus();
+  }
+  async function projectDir(p) {
+    const c = data.find((c2) => project(c2) === p), dir = c && workingDir(c);
+    if (!dir) return;
+    if (!T.openDir) {
+      return navigator.clipboard.writeText(dir).then(() => toast(t`Caminho copiado: ${dir}`, true), () => toast(t`Não consegui copiar. O caminho é: ${dir}`));
+    }
+    const err = await T.openDir(p, dir);
+    if (err) toast(err);
   }
   var svcs = /* @__PURE__ */ new Map();
   async function loadSvcs(p, dir, key) {
@@ -13070,6 +13086,7 @@ ${WIDE.matches ? "" : `
     openShell,
     pickTab,
     placeMenu,
+    projectDir,
     projectLogs,
     pullImage,
     prune,

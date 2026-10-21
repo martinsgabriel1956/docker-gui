@@ -672,9 +672,13 @@ function groupHead(k: string, label: string) {
   const upSvc = missing.map(s => `<button data-id="stack-${ek}" data-a="m-svcup-${esc(s)}" data-p="${ek}" data-s="${esc(s)}" ${off}
       aria-label="${t`compose up ${esc(s)} do projeto ${ek}`}" onclick="menuPick(this); composeAct('svcup', this.dataset.p, this.dataset.s)"
       class="${MENU_ITEM} text-fg">compose up ${esc(s)}</button>`).join('');
+  // a pasta do projeto: o desktop abre no gerenciador de arquivos, a web copia o caminho (pode estar por SSH ou no
+  // celular). Com daemon remoto a pasta é da outra máquina, então nenhum dos dois
+  const dirItem = dir && !REMOTE ? `<button data-id="stack-${ek}" data-a="m-dir" data-p="${ek}" title="${esc(dir)}"
+      onclick="menuPick(this); projectDir(this.dataset.p)" class="${MENU_ITEM} text-fg">${T.openDir ? t`Abrir pasta` : t`Copiar caminho da pasta`}</button>` : '';
   const groups = [STACK.filter(([a]) => a !== prim).map(([a, text]) => sbtn(a, text, MENU_ITEM + ' text-fg')).join(''),
                   dir ? cbtn('up', 'compose up') + cbtn('rebuild', 'compose up --build') + cbtn('pull', 'compose pull') : '', upSvc,
-                  dir ? cbtn('down', 'compose down…', MENU_ITEM + ' text-bad-fg') : ''].filter(Boolean);
+                  dirItem, dir ? cbtn('down', 'compose down…', MENU_ITEM + ' text-bad-fg') : ''].filter(Boolean);
   const verb = composing.get(k);
   // a faixa de estado: um bloco por container do projeto, na cor do estado, como uma calha de processos
   const strip = k ? `<span aria-hidden="true" data-strip class="flex items-center gap-0.5">${[...all].sort((a, b) => a.Names.localeCompare(b.Names)).map(c =>
@@ -1075,6 +1079,17 @@ async function composeAct(a: ComposeAction, p: string, svc = '', sure = false): 
   }
   if (ok && now.length) return confirmUp(now);
   if (a === 'down') $('#q').focus();
+}
+
+// "Abrir pasta" (desktop) ou "Copiar caminho da pasta" (web) do projeto: a pasta vem dos labels, como no up e no down
+async function projectDir(p: string) {
+  const c = data.find(c => project(c) === p), dir = c && workingDir(c);
+  if (!dir) return;
+  if (!T.openDir) {
+    return navigator.clipboard.writeText(dir).then(() => toast(t`Caminho copiado: ${dir}`, true), () => toast(t`Não consegui copiar. O caminho é: ${dir}`));
+  }
+  const err = await T.openDir(p, dir);
+  if (err) toast(err);
 }
 
 // serviços do arquivo do compose (config --services), para mostrar os que não têm container (nunca subiram, ou
@@ -2135,7 +2150,7 @@ if (T.prefs) {
 
 Object.assign(window, {
   ackFail, act, afterClose, askNotify, confirmArm, bulkAct, clearFilters, clearSel, closeOut, closePull, composeAct, copyAddr, copyDiff, copyExec, copyLogs, copyProbe, disarm, downloadLogs,
-  filterBy, followClick, loadDiff, loadHealth, loadHistory, loadInspect, loadMore, loadTop, logPick, menuPick, openCreate, openPrefs, openProcs, openShell, pickTab, placeMenu, projectLogs, pullImage,
+  filterBy, followClick, loadDiff, loadHealth, loadHistory, loadInspect, loadMore, loadTop, logPick, menuPick, openCreate, openPrefs, openProcs, openShell, pickTab, placeMenu, projectDir, projectLogs, pullImage,
   prune, refreshLogs, reloadHealth, rmObj, serviceAct, runToastAction, selectAll, sinceChange, stackAct, toggleSel,
 });
 
