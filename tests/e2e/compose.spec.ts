@@ -315,6 +315,10 @@ test('a faixa diz qual dependência segura o serviço, com a causa-raiz primeiro
   await expect(page.getByRole('button', { name: 'Logs api' })).toBeVisible();
   await page.locator('#count button[data-a="filter"]', { hasText: 'com problema' }).click();
 
+  // no modal da api, a anotação vem junto do status
+  await page.getByRole('button', { name: 'Logs api' }).click();
+  await expect(page.locator('#dlg-status')).toContainText('depende de db, que está com healthcheck falhando');
+  await page.keyboard.press('Escape');
   await row(page, 'api').getByRole('button', { name: 'Abrir logs de db' }).click();
   await expect(page.locator('#lt')).toHaveText('db');
   await page.keyboard.press('Escape');

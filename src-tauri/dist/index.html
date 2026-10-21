@@ -11399,8 +11399,8 @@ ${h2.join(`
     stopped: (s15) => t`depende de ${s15}, que está parado`,
     missing: (s15) => t`depende de ${s15}, que não tem container`
   };
-  function depHtml(bl2, hd) {
-    return bl2.map((b2) => `<span class="block text-xs text-fg-soft">${DEP_TXT[b2.state](b2.c ? `<button data-id="${b2.c.ID}" data-a="dep" onclick="act('logs','${b2.c.ID}')" aria-label="${t`Abrir logs de ${esc(b2.service)}`}"
+  function depHtml(bl2, hd, link = true) {
+    return bl2.map((b2) => `<span class="block text-xs text-fg-soft">${DEP_TXT[b2.state](b2.c && link ? `<button data-id="${b2.c.ID}" data-a="dep" onclick="act('logs','${b2.c.ID}')" aria-label="${t`Abrir logs de ${esc(b2.service)}`}"
         class="font-mono underline underline-offset-4 rounded hover:text-fg-strong focus-visible:outline-2 focus-visible:outline-accent">${esc(b2.service)}</button>` : mono(esc(b2.service)))}</span>`).join("") + (hd.length ? `<span class="block text-xs text-fg-soft">${t`segurando ${mono(esc(names(hd)))}`}</span>` : "");
   }
   function rowHtml(c, withProject, bl2, hd) {
@@ -11995,7 +11995,7 @@ ${WIDE.matches ? "" : `
     if (hasHealth(c) && !h2) loadHealth(c.ID);
     const s15 = c.State === "running" && !b2 ? stats[sid(c.ID)] : void 0, u = s15 && usage(s15), hs2 = series.get(sid(c.ID)) ?? [];
     const again2 = mark && c.State === "running" && !b2 ? `<span class="text-muted"> · ${esc(mark.label)}</span>` : "";
-    $2("#dlg-status").innerHTML = `<span class="${tn2[1]}">${b2 ? busyText(c, b2) : esc(st2[0])}</span>${st2[1] && !b2 ? `<span class="text-muted"> · ${st2[1]}</span>` : ""}${again2}${b2 ? "" : errHtml(c)}${h2 ? `<div id="dlg-health" class="mt-2 text-xs">${healthHtml(c.ID, h2)}</div>` : ""}${s15 && u ? `<div id="dlg-usage" class="mt-1 text-xs text-muted">${usageLine(s15, u, hs2)}</div>` : ""}`;
+    $2("#dlg-status").innerHTML = `<span class="${tn2[1]}">${b2 ? busyText(c, b2) : esc(st2[0])}</span>${st2[1] && !b2 ? `<span class="text-muted"> · ${st2[1]}</span>` : ""}${again2}${b2 ? "" : errHtml(c) + depHtml(blockers(c, data), holds(c, data), false)}${h2 ? `<div id="dlg-health" class="mt-2 text-xs">${healthHtml(c.ID, h2)}</div>` : ""}${s15 && u ? `<div id="dlg-usage" class="mt-1 text-xs text-muted">${usageLine(s15, u, hs2)}</div>` : ""}`;
     const prim = PRIMARY[c.State], sec = SECONDARY[c.State];
     const more = [sec && sec !== "restart" && [sec, LABEL[sec]], c.State === "running" && ["exec", t`Copiar docker exec`]].filter((x) => !!x);
     $2("#dlg-acts").innerHTML = (sec === "restart" ? `<button data-id="dlg" data-a="restart" ${b2 ? 'aria-disabled="true"' : ""} aria-label="${t`Reiniciar ${esc(c.Names)}`}" title="${t`Reiniciar (r)`}"

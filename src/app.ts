@@ -492,9 +492,10 @@ function ackFail(id: string) {
 const DEP_TXT: Record<DepState, (s: string) => string> = {
   unhealthy: s => t`depende de ${s}, que está com healthcheck falhando`, exited: s => t`depende de ${s}, que saiu com erro`,
   stopped: s => t`depende de ${s}, que está parado`, missing: s => t`depende de ${s}, que não tem container`};
-// "depende de db, que …" (o nome abre os logs do db) e "segurando api e worker"
-function depHtml(bl: Blocker[], hd: Container[]) {
-  return bl.map(b => `<span class="block text-xs text-fg-soft">${DEP_TXT[b.state](b.c
+// "depende de db, que …" (na linha, o nome abre os logs do db; no modal fica só o texto, porque trocar de container com
+// o modal aberto é fechar e abrir de novo) e "segurando api e worker"
+function depHtml(bl: Blocker[], hd: Container[], link = true) {
+  return bl.map(b => `<span class="block text-xs text-fg-soft">${DEP_TXT[b.state](b.c && link
     ? `<button data-id="${b.c.ID}" data-a="dep" onclick="act('logs','${b.c.ID}')" aria-label="${t`Abrir logs de ${esc(b.service)}`}"
         class="font-mono underline underline-offset-4 rounded hover:text-fg-strong focus-visible:outline-2 focus-visible:outline-accent">${esc(b.service)}</button>`
     : mono(esc(b.service)))}</span>`).join('')
@@ -1169,7 +1170,7 @@ function renderDlg() {
   // uma linha para cada coisa: status, último healthcheck (inteiro no title) e uso, com rede e disco no fim (fora do celular)
   // depois de reiniciar daqui, o status diz quando foi: a marca no log só aparece se o container escrever algo novo
   const again = mark && c.State === 'running' && !b ? `<span class="text-muted"> · ${esc(mark.label)}</span>` : '';
-  $('#dlg-status').innerHTML = `<span class="${tn[1]}">${b ? busyText(c, b) : esc(st[0])}</span>${st[1] && !b ? `<span class="text-muted"> · ${st[1]}</span>` : ''}${again}${b ? '' : errHtml(c)}${
+  $('#dlg-status').innerHTML = `<span class="${tn[1]}">${b ? busyText(c, b) : esc(st[0])}</span>${st[1] && !b ? `<span class="text-muted"> · ${st[1]}</span>` : ''}${again}${b ? '' : errHtml(c) + depHtml(blockers(c, data), holds(c, data), false)}${
     h ? `<div id="dlg-health" class="mt-2 text-xs">${healthHtml(c.ID, h)}</div>` : ''}${
     s && u ? `<div id="dlg-usage" class="mt-1 text-xs text-muted">${usageLine(s, u, hs)}</div>` : ''}`;
   // Reiniciar à vista e primeiro (é o ciclo: reiniciar e ver o log novo), depois a ação principal; o resto no "⋯"
