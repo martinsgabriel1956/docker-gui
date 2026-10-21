@@ -37,7 +37,7 @@ class CoverageTest(unittest.TestCase):
                *(f"/api/{r}/{ID}" for r in ("logs", "health", "history", "top", "diff", "inspect")), f"/api/inspect/{ID}/env",
                "/api/compose/logs", "/api/compose/services"]
         post = [*(f"/api/{a}/{ID}" for a in docker_gui.ACTIONS), *(f"/api/prune/{k}" for k in docker_gui.PRUNE),
-                *(f"/api/rm/{k}/" for k in docker_gui.REMOVE), "/api/run",
+                *(f"/api/rm/{k}/" for k in docker_gui.REMOVE), "/api/run", "/api/pull",
                 *(f"/api/compose/{a}" for a in [*docker_gui.COMPOSE, *docker_gui.COMPOSE_SERVICE])]
         return [("GET", p) for p in get] + [("POST", p) for p in post]
 

@@ -448,6 +448,11 @@ def summary(info, reveal=False):
     }
 
 
+def image_ok(image):
+    """A regra de referência de imagem do run e do pull: repo[:tag] ou repo@sha256:..., até MAX_IMAGE."""
+    return isinstance(image, str) and len(image) <= MAX_IMAGE and bool(IMAGE_RE.fullmatch(image))
+
+
 def run_argv(body):
     """Corpo do POST /api/run -> argv do `docker run -d`; ValueError ou TypeError, com a mensagem para a página, se
     algo não bater. Cada valor é conferido por regex ou lista fixa e vai num item só do argv: nada passa por shell,
@@ -468,7 +473,7 @@ def run_argv(body):
 
     image, name, volume = field("image", str, ""), field("name", str, ""), field("volume", str, "")
     restart, public = field("restart", str, "no"), field("all_interfaces", bool, False)
-    if len(image) > MAX_IMAGE or not IMAGE_RE.fullmatch(image):
+    if not image_ok(image):
         raise ValueError(tr("imagem inválida: use repo[:tag] ou repo@sha256:…"))
     if name and not NAME_RE.fullmatch(name):
         raise ValueError(tr("nome inválido: 2 a 128 caracteres entre letras, números, _ . e -, começando por letra ou número"))
@@ -811,6 +816,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(403, '"forbidden"')
         if not self.token_ok():
             return self.send(401, json.dumps(tr("token ausente ou inválido")))
+        if self.path == "/api/pull":
+            return self.pull()
         m = re.fullmatch(r"/api/compose/(\w+)", self.path)
         if m and (m[1] in COMPOSE or m[1] in COMPOSE_SERVICE):
             return self.compose(m[1])
@@ -1059,6 +1066,17 @@ class Handler(BaseHTTPRequestHandler):
         args = [*COMPOSE_SERVICE[action], "--", key[2]] if service else COMPOSE[action]
         return self.compose_stream([*base, *args])
 
+    def pull(self):
+        """docker pull da imagem do corpo {image}, com a saída em stream como a do compose: segue até o fim mesmo que a
+        página feche, e só o prazo de 10 min o interrompe. O "--" fecha as opções, mesmo com a regex já impedindo o "-"."""
+        try:
+            image = self.json_body().get("image")
+        except (ValueError, AttributeError):
+            image = None
+        if not image_ok(image):
+            return self.send(400, json.dumps(tr("imagem inválida: use repo[:tag] ou repo@sha256:…")))
+        return self.compose_stream(["pull", "--", image])
+
     def compose_stream(self, args):
         """Roda o compose e manda a saída enquanto ela sai (o progresso e o build vão para o stderr, que vem junto):
         um JSON por linha, cada linha da saída como string e, no fim, {"code": <código de saída>}. O compose vai até
@@ -1092,7 +1110,7 @@ class Handler(BaseHTTPRequestHandler):
         timer.cancel()
         if late:
             out(tr("{cli} {cmd} não respondeu em {timeout}s. O daemon está travado?").format(
-                cli=CLI[0], cmd="compose", timeout=COMPOSE_TIMEOUT))
+                cli=CLI[0], cmd=args[0], timeout=COMPOSE_TIMEOUT))
         out({"code": 124 if late else p.returncode})
 
     def log_tail(self, qs):

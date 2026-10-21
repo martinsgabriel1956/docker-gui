@@ -45,6 +45,8 @@ export type DockerState = {
   context?: { Name: string; Host: string };  // o que o `context inspect` responde (padrão: default em unix://)
   compose_services?: Record<string, string[]>;  // o `compose config --services` de cada projeto
   mem_total?: number;  // a RAM total do `docker info` (padrão: 16 GiB)
+  registry?: Record<string, string>;  // o que o `docker pull` acha: {ref com tag: ID da imagem}
+  pull_delay?: number;  // segundos que o pull leva, espalhados na saída
 };
 
 // ID estável por nome: o mesmo container tem o mesmo ID em todo teste

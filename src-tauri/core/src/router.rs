@@ -210,6 +210,14 @@ async fn get(ctx: &Ctx, req: &Request) -> Step<Response> {
 
 async fn post(ctx: &Ctx, req: &Request) -> Reply {
     let full = req.full();
+    if full == "/api/pull" {
+        let image = req.body.as_ref().and_then(|b| b.get("image")?.as_str()).unwrap_or("");
+        if !v::image_ok(image) {
+            return Reply::Json(reply(400, tr(ctx.lang, "imagem inválida: use repo[:tag] ou repo@sha256:…")));
+        }
+        // o stream do compose (segue até o fim sem leitor, prazo de 10 min); o "--" fecha as opções
+        return Reply::Ndjson(crate::compose::stream(ctx, vec!["pull".into(), "--".into(), image.into()]));
+    }
     if let Some(m) = caps(r"/api/compose/(\w+)", &full)
         && (v::compose_project(&m[1]).is_some() || v::compose_service(&m[1]).is_some())
     {

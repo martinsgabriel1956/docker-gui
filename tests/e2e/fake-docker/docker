@@ -35,6 +35,8 @@ recusa o que está em uso, com a mensagem do docker, e cada rm que deu certo fic
 faz o run falhar com esse stderr, "run_delay" o faz demorar (segundos) e "run_after" ({State, Status}) é o estado
 do container criado (ex.: um que sobe e cai).
 "context" ({Name, Host}) é o que o `context inspect` responde (padrão: default em unix://).
+`pull -- <ref>` consulta "registry" ({ref com tag: ID}): fora dele, falha como uma imagem que não existe ou pede
+login; "pull_delay" (segundos) espalha a saída no tempo.
 O `docker exec -it` do terminal vira um sh local; o `docker exec -i` do modo do Windows roda o comando do
 container aqui mesmo (com o `script` local), e "noscript": true simula uma imagem sem `script` (alpine).
 O `docker events` manda uma linha por container que mudou
@@ -267,6 +269,31 @@ def run(state, args):
     return full, None
 
 
+def pull(path, ref):
+    """docker pull: o "registry" ({ref: ID}) diz o que existe lá; "pull_delay" espalha as linhas no tempo. Sem tag, vale
+    a latest. A imagem entra em "images" (a antiga com a mesma tag fica sem tag, como no docker); com o mesmo ID, o
+    pull só diz que já estava em dia."""
+    full = ref if re.search(r"@sha256:|:[^/]*$", ref) else f"{ref}:latest"
+    repo, tag = full.rsplit(":", 1)
+    with locked(path, exclusive=False) as (_, state):
+        new, delay = state.get("registry", {}).get(full), state.get("pull_delay", 0)
+    if not new:
+        fail(f"Error response from daemon: pull access denied for {repo}, repository does not exist or may require 'docker login'")
+    for line in (f"{tag}: Pulling from library/{repo}", f"{new[7:19]}: Pull complete", f"Digest: {new}"):
+        print(line, flush=True)
+        time.sleep(delay / 3)
+    with locked(path, exclusive=True) as (f, state):
+        imgs = state.setdefault("images", [])
+        old = next((i for i in imgs if i["Repository"] == repo and i["Tag"] == tag), None)
+        if old and old["ID"] == new:
+            return print(f"Status: Image is up to date for {full}")
+        if old:
+            old["Repository"] = old["Tag"] = "<none>"
+        imgs.append({"ID": new, "Repository": repo, "Tag": tag, "Size": "100MB", "CreatedAt": "2026-10-21 00:00:00 +0000 UTC"})
+        save(f, state)
+    return print(f"Status: Downloaded newer image for {full}")
+
+
 def main(args):
     path = os.environ["FAKE_DOCKER_STATE"]
     cmd, ref = args[0], args[-1]
@@ -313,6 +340,9 @@ def main(args):
             os.environ["PATH"] = nobin
         cmd = args[3:] if args[1] == "-i" else args[2:]
         os.execvp(cmd[0], cmd)
+
+    if cmd == "pull":  # pull -- <ref>: as linhas saem aos poucos, fora do lock
+        return pull(path, ref)
 
     if cmd == "run":  # dorme fora do lock, como as ações
         with locked(path, exclusive=False) as (_, state):
