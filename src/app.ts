@@ -1,9 +1,9 @@
 import {
   type Bucket, type Container, type ContainerState, type DiskUsage, type Facts, type HistoryEvent, type Image, type LogLevel,
-  type Network, type Port, type RunErrors, type RunField, type Sample, type Stats, type Tone, type Volume, HISTORY, age, anonVolume,
-  bucket, bulkSummary, bytes, continues, errHint, esc, eventText, fmtBytes, hasHealth, healthChanges, historySummary, io, isProblem,
-  logFilter, logLevel, logServices, newProblems, percent, ports, project, prunedVolumes, pushSample, reclaimShare, runSpec, service, shortImage,
-  sparkPoints, status, tone, topTable, trend, usage, workingDir,
+  type Network, type Port, type Probe, type RunErrors, type RunField, type Sample, type Stats, type Tone, type Volume, HISTORY, age, anonVolume,
+  bucket, bulkSummary, bytes, continues, errHint, esc, eventText, fmtBytes, hasHealth, healthChanges, healthSummary, historySummary, io, isProblem,
+  logFilter, logLevel, logServices, newProblems, percent, ports, probeDuration, probeResult, probeTime, project, prunedVolumes, pushSample,
+  reclaimShare, runSpec, service, shortImage, sparkPoints, status, tone, topTable, trend, usage, workingDir,
 } from './format';
 import {LOCALE, t, translatePage} from './i18n';
 import {T} from '#transport';
@@ -35,7 +35,7 @@ type ComposeAction = 'up' | 'rebuild' | 'down' | 'pull' | 'restart' | 'build' | 
 type Arming = {id: string; name: string; a: 'remove' | 'down' | 'prune' | 'rm'; note: string; run: () => unknown; at: number; timer: number};
 // saída do compose de um projeto, enquanto roda (code null) e, se falhou, até fechar (code -1: o stream caiu no meio)
 type Out = {what: string; text: string; code: number | null};
-type Health = {Log?: {ExitCode: number; Output: string}[]} | null;
+type Health = {Log?: Probe[]} | null;
 // resumo do /api/inspect; o valor do env vem null (mascarado) até o usuário pedir para revelar
 type Inspect = {Restart: string; Networks: Record<string, string>; Env: [key: string, value: string | null][];
                 Mounts: {Type: string; Name: string; Source: string; Destination: string; RW: boolean}[]};
@@ -394,20 +394,28 @@ function errHtml(c: Container) {
     hint ? `<p class="[contain:inline-size] font-sans text-xs text-bad-soft">${esc(hint)}</p>` : ''}`;
 }
 
-const health: Record<string, string> = {};  // ID+Status -> texto do último probe (o cache vence quando o Status muda)
+// ID+Status -> os probes, do mais novo para o mais velho, ou o texto do erro. O cache vence quando o Status muda: numa
+// mudança de saúde e a cada minuto ("Up 5 minutes" -> "Up 6 minutes"); o ↻ do modal relê na hora
+const health: Record<string, Probe[] | string> = {};
 
 async function loadHealth(id: string) {
   const c = data.find(c => c.ID === id);
   if (!c || health[id + c.Status]) return;
-  let txt: string;
+  let v: Probe[] | string;
   try {
-    const r = await api('/api/health/' + id), h: unknown = await r.json(), last = r.ok ? (h as Health)?.Log?.at(-1) : undefined;
-    txt = !r.ok ? t`Não consegui ler o healthcheck: ${h}`
-        : last ? t`código ${last.ExitCode} · ${last.Output.trim() || t`(sem saída)`}` : t`Nenhum probe rodou ainda.`;
-  } catch { txt = t`Não consegui ler o healthcheck.`; }
-  health[id + c.Status] = txt;
+    const r = await api('/api/health/' + id), h: unknown = await r.json();
+    v = r.ok ? [...((h as Health)?.Log ?? [])].reverse() : t`Não consegui ler o healthcheck: ${h}`;
+  } catch { v = t`Não consegui ler o healthcheck.`; }
+  health[id + c.Status] = v;
   render();
 }
+function reloadHealth(id: string) {
+  const c = data.find(c => c.ID === id);
+  if (c) { delete health[id + c.Status]; loadHealth(id); }
+}
+// a linha da lista mostra só o último probe
+const lastProbe = (v: Probe[] | string) => typeof v === 'string' ? v
+  : v[0] ? t`código ${v[0].ExitCode} · ${v[0].Output.trim() || t`(sem saída)`}` : t`Nenhum probe rodou ainda.`;
 
 // última linha do log de quem caiu (saiu com erro ou está em loop): o motivo costuma estar ali, sem abrir o modal.
 // Uma consulta por queda (estado + código de saída), não por poll: o "há 10 min" do Status muda sozinho
@@ -501,7 +509,7 @@ function rowHtml(c: Container, withProject: boolean) {
   // [contain:inline-size]: o healthcheck aberto quebra dentro da coluna, sem alargá-la (a tabela inteira se mexia)
   const healthBox = hasHealth(c) && !b ? `<details data-keep="health" class="mt-1 text-xs [contain:inline-size]" ontoggle="this.open && loadHealth('${c.ID}')">
       <summary class="cursor-pointer w-fit py-1 coarse:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent text-muted hover:text-fg">${t`Ver último healthcheck`}</summary>
-      <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-fg-soft">${esc(health[c.ID + c.Status] || t`Carregando…`)}</pre></details>` : '';
+      <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-fg-soft">${esc(health[c.ID + c.Status] ? lastProbe(health[c.ID + c.Status]) : t`Carregando…`)}</pre></details>` : '';
   const tail = fell(c) && !b ? tails[tailKey(c)] : '';
   // na faixa, a última linha do log é o atalho para o diagnóstico: abre os logs
   const tailBtn = tail ? `<button data-id="${c.ID}" data-a="tail" onclick="act('logs','${c.ID}')" title="${esc(tail)}"
@@ -1142,7 +1150,7 @@ function renderDlg() {
   // depois de reiniciar daqui, o status diz quando foi: a marca no log só aparece se o container escrever algo novo
   const again = mark && c.State === 'running' && !b ? `<span class="text-muted"> · ${esc(mark.label)}</span>` : '';
   $('#dlg-status').innerHTML = `<span class="${tn[1]}">${b ? busyText(c, b) : esc(st[0])}</span>${st[1] && !b ? `<span class="text-muted"> · ${st[1]}</span>` : ''}${again}${b ? '' : errHtml(c)}${
-    h ? `<div class="mt-1 text-xs text-muted sm:truncate" title="${esc(h)}"><span class="font-sans">${t`Último healthcheck:`}</span> <span class="text-fg-soft">${esc(h)}</span></div>` : ''}${
+    h ? `<div id="dlg-health" class="mt-2 text-xs">${healthHtml(c.ID, h)}</div>` : ''}${
     s && u ? `<div id="dlg-usage" class="mt-1 text-xs text-muted">${usageLine(s, u, hs)}</div>` : ''}`;
   // Reiniciar à vista e primeiro (é o ciclo: reiniciar e ver o log novo), depois a ação principal; o resto no "⋯"
   // (remover fica na lista, onde a confirmação aparece)
@@ -1468,6 +1476,39 @@ function refreshLogs() {
 
 function copyLogs() {
   navigator.clipboard.writeText($('#lb').textContent ?? '').then(() => toast(t`Logs copiados.`, true), () => toast(t`Não consegui copiar.`));
+}
+function copyProbe(id: string, i: number) {
+  const c = data.find(c => c.ID === id), v = c && health[id + c.Status];
+  if (!Array.isArray(v) || !v[i]) return;
+  navigator.clipboard.writeText(v[i].Output).then(() => toast(t`Saída do probe copiada.`, true), () => toast(t`Não consegui copiar.`));
+}
+
+// os probes do healthcheck no modal, do mais novo para o mais velho: horário, duração, resultado (cor e texto) e a saída,
+// com 3 linhas à vista e o resto num "mais N linhas"
+const PROBE: Record<ReturnType<typeof probeResult>, [string, Tone]> =
+  {ok: [t`passou`, 'ok'], fail: [t`falhou`, 'bad'], error: [t`não rodou como esperado`, 'warn']};
+const SMALL_BTN = 'px-2 py-0.5 coarse:min-h-11 coarse:px-4 rounded font-sans font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent';
+function healthHtml(id: string, v: Probe[] | string) {
+  const head = (sum: string) => `<div class="flex items-center gap-2"><span class="font-sans text-muted">${t`Healthcheck`}</span>${
+    sum ? `<span class="text-fg-soft">${esc(sum)}</span>` : ''}<button onclick="reloadHealth('${id}')" aria-label="${t`Atualizar o healthcheck`}" class="${SMALL_BTN}">↻</button></div>`;
+  if (typeof v === 'string') return head('') + `<p class="mt-1 text-bad-fg">${esc(v)}</p>`;
+  if (!v.length) return head('') + `<p class="mt-1 text-muted">${t`Nenhum probe rodou ainda.`}</p>`;
+  const time = (s: string) => {
+    const d = new Date(probeTime(s));
+    return isNaN(+d) ? '' : d.toLocaleTimeString(LOCALE, {hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false});
+  };
+  const dur = (d: number | null) => d === null ? '' : d < 1000 ? `${d} ms` : `${(d / 1000).toLocaleString(LOCALE, {maximumFractionDigits: 1})} s`;
+  const rows = v.map((p, i) => {
+    const [txt, tn] = PROBE[probeResult(p)], lines = p.Output.trimEnd().split('\n'), shown = esc(lines.slice(0, 3).join('\n'));
+    const rest = lines.length > 3 ? `<details><summary class="w-fit cursor-pointer font-sans text-muted hover:text-fg rounded focus-visible:outline-2 focus-visible:outline-accent">${
+      t`mais ${lines.length - 3} linhas`}</summary><pre class="whitespace-pre-wrap [overflow-wrap:anywhere]">${esc(lines.slice(3).join('\n'))}</pre></details>` : '';
+    return `<tr class="align-top"><td class="pr-3 py-0.5 text-muted whitespace-nowrap">${time(p.Start)}</td><td class="pr-3 py-0.5 text-muted whitespace-nowrap text-right">${dur(probeDuration(p))}</td>
+      <td class="pr-3 py-0.5 whitespace-nowrap ${TONE[tn][1]}">${txt} · ${p.ExitCode}</td>
+      <td class="pr-3 py-0.5 w-full [overflow-wrap:anywhere]"><pre class="whitespace-pre-wrap text-fg-soft">${shown || `<span class="font-sans text-muted">${t`(sem saída)`}</span>`}</pre>${rest}</td>
+      <td class="py-0.5">${p.Output ? `<button onclick="copyProbe('${id}', ${i})" aria-label="${t`Copiar a saída do probe das ${time(p.Start)}`}" class="${SMALL_BTN}">${t`Copiar`}</button>` : ''}</td></tr>`;
+  }).join('');
+  return head(healthSummary(v)) + `<div class="mt-1 max-h-48 overflow-auto"><table class="w-full font-mono"><caption class="sr-only">${
+    t`Últimos probes do healthcheck, do mais novo para o mais velho`}</caption><tbody>${rows}</tbody></table></div>`;
 }
 
 // o mesmo texto do select do "Novo container"
@@ -1919,9 +1960,9 @@ if (T.prefs) {
 }
 
 Object.assign(window, {
-  ackFail, act, afterClose, askNotify, confirmArm, bulkAct, clearFilters, clearSel, closeOut, composeAct, copyAddr, copyExec, copyLogs, disarm, downloadLogs,
+  ackFail, act, afterClose, askNotify, confirmArm, bulkAct, clearFilters, clearSel, closeOut, composeAct, copyAddr, copyExec, copyLogs, copyProbe, disarm, downloadLogs,
   filterBy, followClick, loadHealth, loadHistory, loadInspect, loadMore, loadTop, logPick, menuPick, openCreate, openPrefs, openShell, pickTab, placeMenu, projectLogs,
-  prune, refreshLogs, rmObj, serviceAct, runToastAction, selectAll, sinceChange, stackAct, toggleSel,
+  prune, refreshLogs, reloadHealth, rmObj, serviceAct, runToastAction, selectAll, sinceChange, stackAct, toggleSel,
 });
 
 $('#dlg').addEventListener('close', afterClose);
