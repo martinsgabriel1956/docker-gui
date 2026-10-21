@@ -1,7 +1,7 @@
 import {
-  type Bucket, type Container, type ContainerState, type DiskUsage, type Facts, type HistoryEvent, type Image, type LogLevel,
+  type Blocker, type Bucket, type Container, type ContainerState, type DepState, type DiskUsage, type Facts, type HistoryEvent, type Image, type LogLevel,
   type Network, type Port, type Probe, type RunErrors, type RunField, type Sample, type Stats, type Tone, type Volume, HISTORY, age, anonVolume,
-  bucket, bulkSummary, bytes, continues, errHint, esc, eventText, fmtBytes, hasHealth, healthChanges, healthSummary, historySummary, io, isProblem,
+  blockers, bucket, bulkSummary, bytes, continues, errHint, esc, eventText, fmtBytes, hasHealth, healthChanges, healthSummary, held, historySummary, holds, io, isProblem,
   logFilter, logLevel, logServices, newProblems, percent, ports, probeDuration, probeResult, probeTime, project, prunedVolumes, pushSample,
   reclaimShare, runSpec, service, shortImage, sparkPoints, status, tone, topTable, trend, usage, workingDir,
 } from './format';
@@ -146,8 +146,8 @@ async function load() {
       for (const id of sel) if (!data.some(c => c.ID === id)) sel.delete(id);
       if (selectingRows()) dirty = true; else render();
     }
-    notify(newProblems(seen, data));
-    seen = new Set(data.filter(isProblem).map(c => c.ID));
+    notify(newProblems(seen, data, attention));
+    seen = new Set(data.filter(attention).map(c => c.ID));
     showProblem(null);
   } catch (e) {
     showProblem([lastOk ? t`O servidor do Stivo parou de responder.` : t`Não consegui conectar ao servidor do Stivo.`,
@@ -209,6 +209,7 @@ async function askNotify() {
 }
 function notify(cs: Container[]) {
   if (!cs.length || !notifying() || (!document.hidden && document.hasFocus())) return;
+  cs = rootsFirst([...cs]);
   T.notify(cs.length === 1 ? t`${cs[0].Names} precisa de atenção` : t`${cs.length} containers precisam de atenção`,
     // o clique traz a página e põe o foco no Logs de quem caiu (a linha dele na faixa de atenção, que vem primeiro)
     cs.length === 1 ? status(cs[0])[0] : cs.map(c => c.Names).join(', '),
@@ -440,11 +441,13 @@ async function loadTail(c: Container) {
 const rowCache = new Map<string, {sig: string; html: string}>();
 function row(c: Container, withProject = false) {
   if (fell(c)) loadTail(c);
-  const sig = JSON.stringify([c, withProject, tails[tailKey(c)], facts[tailKey(c)], busy.get(c.ID), arming?.id === c.ID, errors.get(c.ID), health[c.ID + c.Status], stats[sid(c.ID)],
+  // a anotação da dependência vem de outros containers: entra na assinatura, senão a linha não muda quando o db muda
+  const bl = blockers(c, data), hd = holds(c, data);
+  const sig = JSON.stringify([c, withProject, bl.map(b => [b.service, b.state, b.c?.ID]), hd.map(x => x.ID), tails[tailKey(c)], facts[tailKey(c)], busy.get(c.ID), arming?.id === c.ID, errors.get(c.ID), health[c.ID + c.Status], stats[sid(c.ID)],
                               series.get(sid(c.ID))?.at(-1)?.t, composing.has(project(c)), TOUCH, WIDE.matches, sel.has(c.ID), quiet(c), fallKey(c)]);
   const hit = rowCache.get(c.ID);
   if (hit?.sig === sig) return hit.html;
-  const html = rowHtml(c, withProject);
+  const html = rowHtml(c, withProject, bl, hd);
   rowCache.set(c.ID, {sig, html});
   return html;
 }
@@ -467,8 +470,12 @@ const SEEN_KEY = 'docker-gui-seen';
 let seenFails = new Set<string>((() => { try { return JSON.parse(localStorage.getItem(SEEN_KEY) || '[]'); } catch { return []; } })());
 const fallKey = (c: Container) => { const f = facts[tailKey(c)]; return f?.FinishedAt ? `${c.ID}@${f.FinishedAt}` : ''; };
 const quiet = (c: Container) => (c.State === 'exited' || c.State === 'dead') && seenFails.has(fallKey(c));
-// na faixa de atenção: o que está com problema, menos a queda antiga que alguém marcou como vista
-const inBand = (c: Container) => isProblem(c) && !quiet(c);
+// na faixa de atenção: o que está com problema (menos a queda antiga que alguém marcou como vista) e o "Created" que uma
+// dependência quebrada segura. attention é o mesmo sem o "visto", para as notificações
+const attention = (c: Container) => isProblem(c) || held(c, data);
+const inBand = (c: Container) => (isProblem(c) && !quiet(c)) || held(c, data);
+// quem segura outros vem antes (consertar o db conserta a api); o sort é estável, então o resto segue por nome
+const rootsFirst = (cs: Container[]) => cs.sort((a, b) => +(holds(b, data).length > 0) - +(holds(a, data).length > 0));
 function saveSeen() {
   try { localStorage.setItem(SEEN_KEY, JSON.stringify([...seenFails].slice(-200))); } catch { /* aba privada: vale só agora */ }
   render();
@@ -480,7 +487,18 @@ function ackFail(id: string) {
   toast(t`${c.Names} saiu da faixa de atenção. Volta para lá se cair de novo.`, true, [t`Desfazer`, () => { seenFails.delete(k); saveSeen(); }]);
   document.querySelector<HTMLElement>(`[data-id="${id}"][data-a="logs"]`)?.focus();
 }
-function rowHtml(c: Container, withProject: boolean) {
+const DEP_TXT: Record<DepState, (s: string) => string> = {
+  unhealthy: s => t`depende de ${s}, que está com healthcheck falhando`, exited: s => t`depende de ${s}, que saiu com erro`,
+  stopped: s => t`depende de ${s}, que está parado`, missing: s => t`depende de ${s}, que não tem container`};
+// "depende de db, que …" (o nome abre os logs do db) e "segurando api e worker"
+function depHtml(bl: Blocker[], hd: Container[]) {
+  return bl.map(b => `<span class="block text-xs text-fg-soft">${DEP_TXT[b.state](b.c
+    ? `<button data-id="${b.c.ID}" data-a="dep" onclick="act('logs','${b.c.ID}')" aria-label="${t`Abrir logs de ${esc(b.service)}`}"
+        class="font-mono underline underline-offset-4 rounded hover:text-fg-strong focus-visible:outline-2 focus-visible:outline-accent">${esc(b.service)}</button>`
+    : mono(esc(b.service)))}</span>`).join('')
+    + (hd.length ? `<span class="block text-xs text-fg-soft">${t`segurando ${mono(esc(names(hd)))}`}</span>` : '');
+}
+function rowHtml(c: Container, withProject: boolean, bl: Blocker[], hd: Container[]) {
   const b = busy.get(c.ID), tn = TONE[b ? 'busy' : tone(c)], st = status(c, facts[tailKey(c)]), pp = ports(c.Ports), p = project(c), bt = b && busyText(c, b);
   const armed = arming?.id === c.ID, prim = PRIMARY[c.State], sec = SECONDARY[c.State];
   const u = c.State === 'running' && !b && stats[sid(c.ID)] ? usage(stats[sid(c.ID)]) : null, h = series.get(sid(c.ID)) ?? [];
@@ -533,7 +551,7 @@ ${WIDE.matches ? '' : `
         chips ? `<div class="mt-0.5 flex flex-wrap gap-1 -ml-1 coarse:gap-x-2 coarse:-ml-2">${chips}</div>` : ''}`}</div></div></th>
     <td role="cell" class="${cell} font-mono text-xs text-muted pr-4 max-xl:hidden">${WIDE.matches ? `<div class="truncate [direction:rtl] text-left" title="${esc(c.Image)}">${image}</div>` : ''}</td>
     <td role="cell" class="${cell} font-mono text-data pr-4 sm:min-w-[20ch] max-sm:block max-sm:p-0 max-sm:pl-12 max-sm:coarse:pl-14" title="${esc(c.Status)}">
-      <span id="st-${c.ID}" class="${tn[1]}">${bt || esc(st[0])}${st[1] && !b ? `<span class="block text-xs text-muted">${st[1]}</span>` : ''}</span>${tailBtn}${
+      <span id="st-${c.ID}" class="${tn[1]}">${bt || esc(st[0])}${st[1] && !b ? `<span class="block text-xs text-muted">${st[1]}</span>` : ''}</span>${tailBtn}${b ? '' : depHtml(bl, hd)}${
       u ? `<span id="us-${c.ID}" class="block text-xs font-mono text-muted" title="${esc(u[2])}"><span class="whitespace-nowrap">${esc(u[0])} ${spark(h, 'cpu')}</span> <span class="whitespace-nowrap max-xl:block"><span class="max-xl:hidden">· </span>${esc(u[1])} ${spark(h, 'mem')}</span></span>` : ''}${b ? '' : errHtml(c) + healthBox}${seenBtn}</td>
     <td role="cell" class="${cell} pr-4 max-xl:hidden">${WIDE.matches && chips ? `<div class="flex flex-wrap gap-1">${chips}</div>` : ''}</td>
     <td role="cell" class="py-2.5 align-top pr-4 max-sm:block max-sm:p-0 max-sm:pt-2"><div class="flex justify-end max-sm:justify-start items-center gap-1.5 coarse:gap-2">
@@ -581,7 +599,7 @@ function closeMenus(except?: Element | null) {
 document.addEventListener('click', e => closeMenus(e.target instanceof Element ? e.target.closest('details[data-keep="menu"]') : null));
 
 const bandHead = (text: string, cls: string) => `<tr data-key="h:attn" role="row" class="max-sm:block"><th role="columnheader" colspan="5" scope="colgroup"
-  class="max-sm:block px-4 pt-4 pb-2 text-left font-mono text-xs font-semibold uppercase border-t border-line ${cls}">${text}<span class="ml-3 font-sans font-normal normal-case text-bad-soft/80">${t`healthcheck falhando, loop de reinício ou saída com erro`}</span></th></tr>`;
+  class="max-sm:block px-4 pt-4 pb-2 text-left font-mono text-xs font-semibold uppercase border-t border-line ${cls}">${text}<span class="ml-3 font-sans font-normal normal-case text-bad-soft/80">${t`healthcheck falhando, loop de reinício, saída com erro ou dependência quebrada`}</span></th></tr>`;
 
 // cabeçalho do projeto compose: contagem e ações para o stack inteiro (sempre sobre todos os containers do projeto).
 // Como na linha: uma ação principal (Iniciar tudo se algo está parado, senão Parar tudo), Logs e o resto no "⋯"
@@ -666,7 +684,7 @@ function render() {
   const rows = data.filter(c => (!only || bucket(c) === only) && [c.Names, c.Image, project(c)].join(' ').toLowerCase().includes(q))
                    .sort((a, b) => a.Names.localeCompare(b.Names));
   visible = rows.map(c => c.ID);
-  const attn = rows.filter(inBand), groups = new Map<string, Container[]>();
+  const attn = rootsFirst(rows.filter(inBand)), groups = new Map<string, Container[]>();
   for (const c of rows) if (!inBand(c)) groups.set(project(c), [...(groups.get(project(c)) || []), c]);
   // projeto com todos os containers na faixa ainda precisa do cabeçalho (e das ações do stack)
   for (const c of attn) if (project(c) && !groups.has(project(c))) groups.set(project(c), []);

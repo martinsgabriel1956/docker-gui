@@ -1574,6 +1574,7 @@ PAGE = r"""<!doctype html>
     "A porta {0} do host aparece duas vezes.": "Host port {0} appears twice.",
     "A rede do container não existe mais: recrie o container (no compose, compose up).": "The container's network no longer exists: recreate the container (with compose, compose up).",
     "Abra o link com {0} que aparece no terminal onde você rodou {1}. O token muda a cada execução.": "Open the link with {0} shown in the terminal where you ran {1}. The token changes on every run.",
+    "Abrir logs de {0}": "Open logs of {0}",
     "Abrir no navegador": "Open in the browser",
     "Abrir os logs. Última linha:": "Open the logs. Last line:",
     "Abrir terminal": "Open terminal",
@@ -1893,6 +1894,10 @@ PAGE = r"""<!doctype html>
     "código {0} · {1}": "code {0} · {1}",
     "da última hora": "from the last hour",
     "das últimas 24 h": "from the last 24 h",
+    "depende de {0}, que está com healthcheck falhando": "depends on {0}, whose healthcheck is failing",
+    "depende de {0}, que está parado": "depends on {0}, which is stopped",
+    "depende de {0}, que não tem container": "depends on {0}, which has no container",
+    "depende de {0}, que saiu com erro": "depends on {0}, which exited with an error",
     "desde que o container subiu": "since the container started",
     "desfaz a última ação (Iniciar de novo, Retomar)": "undoes the last action (Start again, Resume)",
     docker: "docker",
@@ -1914,7 +1919,7 @@ PAGE = r"""<!doctype html>
     "falhou (código {0})": "failed (exit code {0})",
     "ficou sem memória (OOM)": "ran out of memory (OOM)",
     "healthcheck começou a falhar": "healthcheck started failing",
-    "healthcheck falhando, loop de reinício ou saída com erro": "failing healthcheck, restart loop or exit with an error",
+    "healthcheck falhando, loop de reinício, saída com erro ou dependência quebrada": "failing healthcheck, restart loop, exit with an error or a broken dependency",
     "healthcheck voltou a passar": "healthcheck passing again",
     "healthcheck: {0}": "healthcheck: {0}",
     "há {0}": "{0} ago",
@@ -1980,6 +1985,7 @@ PAGE = r"""<!doctype html>
     "rodando…": "running…",
     "saiu com código {0}": "exited with code {0}",
     "se sair com erro": "if it exits with an error",
+    "segurando {0}": "holding {0}",
     selecionado: "selected",
     selecionados: "selected",
     sem: "wk",
@@ -2117,6 +2123,38 @@ PAGE = r"""<!doctype html>
   var service = (c) => (c.Labels || "").match(/(?:^|,)com\.docker\.compose\.service=([^,]*)/)?.[1] || "";
   var DEP = "[^,=:]+:[^,=:]+(?::(?:true|false))?";
   var DEPS_RE = new RegExp(`(?:^|,)com\\.docker\\.compose\\.depends_on=(${DEP}(?:,${DEP})*)`);
+  var CONDS = ["service_started", "service_healthy", "service_completed_successfully"];
+  function dependsOn(c) {
+    const v2 = (c.Labels || "").match(DEPS_RE)?.[1];
+    return !v2 ? [] : v2.split(",").map((d) => {
+      const [service2, cond] = d.split(":");
+      return { service: service2, cond: CONDS.includes(cond) ? cond : "service_started" };
+    });
+  }
+  function oneState(c, cond) {
+    if (c.State === "running") return cond === "service_healthy" && /\(unhealthy\)/.test(c.Status) ? "unhealthy" : null;
+    if (cond === "service_completed_successfully" && /^Exited \(0\)/.test(c.Status)) return null;
+    if (c.State === "restarting" && !restartCode(c)) return null;
+    return tone(c) === "bad" ? "exited" : "stopped";
+  }
+  function depState(d, p, cs2) {
+    const st2 = cs2.filter((c) => project(c) === p && service(c) === d.service).map((c) => oneState(c, d.cond));
+    if (!st2.length) return "missing";
+    return st2.includes(null) ? null : st2.find((s15) => s15 === "unhealthy" || s15 === "exited") ?? st2[0];
+  }
+  function blockers(c, cs2) {
+    const p = project(c);
+    if (!p || c.State === "running" && !isProblem(c)) return [];
+    return dependsOn(c).flatMap((d) => {
+      const state = depState(d, p, cs2);
+      return state ? [{ service: d.service, state, c: cs2.find((x) => project(x) === p && service(x) === d.service) }] : [];
+    });
+  }
+  var held = (c, cs2) => c.State === "created" && blockers(c, cs2).length > 0;
+  function holds(c, cs2) {
+    const p = project(c), s15 = service(c);
+    return !p ? [] : cs2.filter((d) => d.ID !== c.ID && project(d) === p && blockers(d, cs2).some((b2) => b2.service === s15));
+  }
   function logServices(p, cs2) {
     const m = /* @__PURE__ */ new Map();
     for (const c of cs2) {
@@ -12017,8 +12055,8 @@ ${h2.join(`
         if (selectingRows()) dirty = true;
         else render();
       }
-      notify(newProblems(seen, data));
-      seen = new Set(data.filter(isProblem).map((c) => c.ID));
+      notify(newProblems(seen, data, attention));
+      seen = new Set(data.filter(attention).map((c) => c.ID));
       showProblem(null);
     } catch (e) {
       showProblem([
@@ -12103,6 +12141,7 @@ ${h2.join(`
   }
   function notify(cs2) {
     if (!cs2.length || !notifying() || !document.hidden && document.hasFocus()) return;
+    cs2 = rootsFirst([...cs2]);
     T.notify(
       cs2.length === 1 ? t`${cs2[0].Names} precisa de atenção` : t`${cs2.length} containers precisam de atenção`,
       // o clique traz a página e põe o foco no Logs de quem caiu (a linha dele na faixa de atenção, que vem primeiro)
@@ -12311,9 +12350,12 @@ ${h2.join(`
   var rowCache = /* @__PURE__ */ new Map();
   function row(c, withProject = false) {
     if (fell(c)) loadTail(c);
+    const bl2 = blockers(c, data), hd = holds(c, data);
     const sig = JSON.stringify([
       c,
       withProject,
+      bl2.map((b2) => [b2.service, b2.state, b2.c?.ID]),
+      hd.map((x) => x.ID),
       tails[tailKey(c)],
       facts[tailKey(c)],
       busy.get(c.ID),
@@ -12331,7 +12373,7 @@ ${h2.join(`
     ]);
     const hit = rowCache.get(c.ID);
     if (hit?.sig === sig) return hit.html;
-    const html = rowHtml(c, withProject);
+    const html = rowHtml(c, withProject, bl2, hd);
     rowCache.set(c.ID, { sig, html });
     return html;
   }
@@ -12354,7 +12396,9 @@ ${h2.join(`
     return f?.FinishedAt ? `${c.ID}@${f.FinishedAt}` : "";
   };
   var quiet = (c) => (c.State === "exited" || c.State === "dead") && seenFails.has(fallKey(c));
-  var inBand = (c) => isProblem(c) && !quiet(c);
+  var attention = (c) => isProblem(c) || held(c, data);
+  var inBand = (c) => isProblem(c) && !quiet(c) || held(c, data);
+  var rootsFirst = (cs2) => cs2.sort((a, b2) => +(holds(b2, data).length > 0) - +(holds(a, data).length > 0));
   function saveSeen() {
     try {
       localStorage.setItem(SEEN_KEY, JSON.stringify([...seenFails].slice(-200)));
@@ -12373,7 +12417,17 @@ ${h2.join(`
     }]);
     document.querySelector(`[data-id="${id}"][data-a="logs"]`)?.focus();
   }
-  function rowHtml(c, withProject) {
+  var DEP_TXT = {
+    unhealthy: (s15) => t`depende de ${s15}, que está com healthcheck falhando`,
+    exited: (s15) => t`depende de ${s15}, que saiu com erro`,
+    stopped: (s15) => t`depende de ${s15}, que está parado`,
+    missing: (s15) => t`depende de ${s15}, que não tem container`
+  };
+  function depHtml(bl2, hd) {
+    return bl2.map((b2) => `<span class="block text-xs text-fg-soft">${DEP_TXT[b2.state](b2.c ? `<button data-id="${b2.c.ID}" data-a="dep" onclick="act('logs','${b2.c.ID}')" aria-label="${t`Abrir logs de ${esc(b2.service)}`}"
+        class="font-mono underline underline-offset-4 rounded hover:text-fg-strong focus-visible:outline-2 focus-visible:outline-accent">${esc(b2.service)}</button>` : mono(esc(b2.service)))}</span>`).join("") + (hd.length ? `<span class="block text-xs text-fg-soft">${t`segurando ${mono(esc(names(hd)))}`}</span>` : "");
+  }
+  function rowHtml(c, withProject, bl2, hd) {
     const b2 = busy.get(c.ID), tn2 = TONE[b2 ? "busy" : tone(c)], st2 = status(c, facts[tailKey(c)]), pp = ports(c.Ports), p = project(c), bt2 = b2 && busyText(c, b2);
     const armed = arming?.id === c.ID, prim = PRIMARY[c.State], sec = SECONDARY[c.State];
     const u = c.State === "running" && !b2 && stats[sid(c.ID)] ? usage(stats[sid(c.ID)]) : null, h2 = series.get(sid(c.ID)) ?? [];
@@ -12422,7 +12476,7 @@ ${WIDE.matches ? "" : `
         <div class="font-mono text-xs text-muted sm:truncate sm:max-w-[28ch] sm:[direction:rtl] sm:text-left [overflow-wrap:anywhere]" title="${esc(c.Image)}"><span class="sr-only">${t`Imagem:`} </span>${image}</div>${chips ? `<div class="mt-0.5 flex flex-wrap gap-1 -ml-1 coarse:gap-x-2 coarse:-ml-2">${chips}</div>` : ""}`}</div></div></th>
     <td role="cell" class="${cell} font-mono text-xs text-muted pr-4 max-xl:hidden">${WIDE.matches ? `<div class="truncate [direction:rtl] text-left" title="${esc(c.Image)}">${image}</div>` : ""}</td>
     <td role="cell" class="${cell} font-mono text-data pr-4 sm:min-w-[20ch] max-sm:block max-sm:p-0 max-sm:pl-12 max-sm:coarse:pl-14" title="${esc(c.Status)}">
-      <span id="st-${c.ID}" class="${tn2[1]}">${bt2 || esc(st2[0])}${st2[1] && !b2 ? `<span class="block text-xs text-muted">${st2[1]}</span>` : ""}</span>${tailBtn}${u ? `<span id="us-${c.ID}" class="block text-xs font-mono text-muted" title="${esc(u[2])}"><span class="whitespace-nowrap">${esc(u[0])} ${spark(h2, "cpu")}</span> <span class="whitespace-nowrap max-xl:block"><span class="max-xl:hidden">· </span>${esc(u[1])} ${spark(h2, "mem")}</span></span>` : ""}${b2 ? "" : errHtml(c) + healthBox}${seenBtn}</td>
+      <span id="st-${c.ID}" class="${tn2[1]}">${bt2 || esc(st2[0])}${st2[1] && !b2 ? `<span class="block text-xs text-muted">${st2[1]}</span>` : ""}</span>${tailBtn}${b2 ? "" : depHtml(bl2, hd)}${u ? `<span id="us-${c.ID}" class="block text-xs font-mono text-muted" title="${esc(u[2])}"><span class="whitespace-nowrap">${esc(u[0])} ${spark(h2, "cpu")}</span> <span class="whitespace-nowrap max-xl:block"><span class="max-xl:hidden">· </span>${esc(u[1])} ${spark(h2, "mem")}</span></span>` : ""}${b2 ? "" : errHtml(c) + healthBox}${seenBtn}</td>
     <td role="cell" class="${cell} pr-4 max-xl:hidden">${WIDE.matches && chips ? `<div class="flex flex-wrap gap-1">${chips}</div>` : ""}</td>
     <td role="cell" class="py-2.5 align-top pr-4 max-sm:block max-sm:p-0 max-sm:pt-2"><div class="flex justify-end max-sm:justify-start items-center gap-1.5 coarse:gap-2">
       ${prim ? btn(prim, prim === "start" ? "text-ok-fg hover:bg-ok/10" : void 0) : slot()}${restart}${logsBtn}
@@ -12459,7 +12513,7 @@ ${WIDE.matches ? "" : `
   }
   document.addEventListener("click", (e) => closeMenus(e.target instanceof Element ? e.target.closest('details[data-keep="menu"]') : null));
   var bandHead = (text, cls) => `<tr data-key="h:attn" role="row" class="max-sm:block"><th role="columnheader" colspan="5" scope="colgroup"
-  class="max-sm:block px-4 pt-4 pb-2 text-left font-mono text-xs font-semibold uppercase border-t border-line ${cls}">${text}<span class="ml-3 font-sans font-normal normal-case text-bad-soft/80">${t`healthcheck falhando, loop de reinício ou saída com erro`}</span></th></tr>`;
+  class="max-sm:block px-4 pt-4 pb-2 text-left font-mono text-xs font-semibold uppercase border-t border-line ${cls}">${text}<span class="ml-3 font-sans font-normal normal-case text-bad-soft/80">${t`healthcheck falhando, loop de reinício, saída com erro ou dependência quebrada`}</span></th></tr>`;
   function groupHead(k, label) {
     const all = data.filter((c) => project(c) === k), on2 = all.filter((c) => c.State === "running").length;
     const anyBusy = composing.has(k) || all.some((c) => busy.has(c.ID)), dir = k && workingDir(all[0]), armed = arming?.id === `stack-${k}`;
@@ -12535,7 +12589,7 @@ ${WIDE.matches ? "" : `
     const q2 = $2("#q").value.trim().toLowerCase();
     const rows = data.filter((c) => (!only || bucket(c) === only) && [c.Names, c.Image, project(c)].join(" ").toLowerCase().includes(q2)).sort((a, b2) => a.Names.localeCompare(b2.Names));
     visible = rows.map((c) => c.ID);
-    const attn = rows.filter(inBand), groups = /* @__PURE__ */ new Map();
+    const attn = rootsFirst(rows.filter(inBand)), groups = /* @__PURE__ */ new Map();
     for (const c of rows) if (!inBand(c)) groups.set(project(c), [...groups.get(project(c)) || [], c]);
     for (const c of attn) if (project(c) && !groups.has(project(c))) groups.set(project(c), []);
     const keys = [...groups.keys()].sort((a, b2) => Number(a === "") - Number(b2 === "") || a.localeCompare(b2));
@@ -13642,8 +13696,8 @@ ${WIDE.matches ? "" : `
     }
     cells.push(o2.Containers.length ? `<span class="text-fg-soft">${esc(o2.Containers.join(", "))}</span>` : t`nenhum container`);
     const canRm = k !== "networks" || !o2.Builtin && !!o2.ID;
-    const holds = k === "networks" ? o2.Containers.filter((n) => data.some((c) => c.Names === n && c.State === "running")) : o2.Containers;
-    const held = holds.length ? esc(holds.join(", ")) : "";
+    const holds2 = k === "networks" ? o2.Containers.filter((n) => data.some((c) => c.Names === n && c.State === "running")) : o2.Containers;
+    const held2 = holds2.length ? esc(holds2.join(", ")) : "";
     const cls = armed ? "ring-bad/60 text-bad-fg hover:bg-bad/10" : "text-fg hover:bg-hover";
     const cols = OBJ_COLS[k].slice(1);
     return `<tr class="border-t border-line/70 ${armed ? "bg-bad/10" : ""} max-sm:block max-sm:py-3">
@@ -13652,8 +13706,8 @@ ${WIDE.matches ? "" : `
       ${err ? `<div class="mt-1 [contain:inline-size] max-sm:[contain:none] text-xs text-bad-fg">${hint ? `<p class="font-sans">${hint}</p>` : ""}
         <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-bad-soft">${esc(err)}</pre></div>` : ""}</th>
     ${cells.map((c, i) => `<td class="py-2.5 pr-4 max-sm:block max-sm:p-0 max-sm:px-4 align-top font-mono text-xs leading-5 text-muted [overflow-wrap:anywhere]"><span class="sm:sr-only">${cols[i]}: </span>${c}</td>`).join("")}
-    <td class="py-2 pr-4 max-sm:block max-sm:p-0 max-sm:px-4 max-sm:pt-2 align-top"><div class="flex justify-end max-sm:justify-start items-center gap-1.5">${!canRm ? "" : held ? `<button data-id="${esc(id)}" data-a="rm" aria-disabled="true" aria-label="${t`Remover (indisponível: em uso por ${held})`}"
-      title="${k === "networks" ? t`Em uso por ${held}: pare o container antes` : t`Em uso por ${held}: remova o container antes`}" class="${BTN} text-muted cursor-not-allowed">${t`Remover…`}</button>` : `<button data-id="${esc(id)}" data-a="rm" data-k="${k}" data-r="${esc(r)}" ${objBusy ? 'aria-disabled="true"' : ""} ${armed ? 'aria-expanded="true"' : ""}
+    <td class="py-2 pr-4 max-sm:block max-sm:p-0 max-sm:px-4 max-sm:pt-2 align-top"><div class="flex justify-end max-sm:justify-start items-center gap-1.5">${!canRm ? "" : held2 ? `<button data-id="${esc(id)}" data-a="rm" aria-disabled="true" aria-label="${t`Remover (indisponível: em uso por ${held2})`}"
+      title="${k === "networks" ? t`Em uso por ${held2}: pare o container antes` : t`Em uso por ${held2}: remova o container antes`}" class="${BTN} text-muted cursor-not-allowed">${t`Remover…`}</button>` : `<button data-id="${esc(id)}" data-a="rm" data-k="${k}" data-r="${esc(r)}" ${objBusy ? 'aria-disabled="true"' : ""} ${armed ? 'aria-expanded="true"' : ""}
       onclick="rmObj(this.dataset.k, this.dataset.r)" aria-label="${t`Remover ${esc(what)}`}"
       class="${BTN} ${cls}">${objBusy === id ? t`Removendo…` : t`Remover…`}</button>`}</div></td></tr>`;
   }
