@@ -1,6 +1,15 @@
 /// Comandos do app: só a janela main pode chamá-los (capabilities/main.json)
-const COMMANDS: &[&str] =
-    &["api", "stream_open", "stream_close", "term_open", "term_input", "term_resize", "term_close"];
+const COMMANDS: &[&str] = &[
+    "api",
+    "stream_open",
+    "stream_close",
+    "term_open",
+    "term_input",
+    "term_resize",
+    "term_close",
+    "attention",
+    "notify",
+];
 
 fn main() {
     tauri_build::try_build(

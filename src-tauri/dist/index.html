@@ -383,7 +383,6 @@
     "Detalhes técnicos": "Technical details",
     "Disco cheio: libere espaço (aba Imagens, Limpar…).": "Disk full: free some space (Images tab, Clean up…).",
     "Disco: {0} lidos · {1} gravados": "Disk: {0} read · {1} written",
-    Stivo: "Stivo",
     "Docker fora do ar": "Docker is down",
     "Dá para baixar de novo.": "It can be pulled again.",
     "Em uso por": "Used by",
@@ -566,6 +565,9 @@
     "Seu usuário não tem acesso ao Docker.": "Your user has no access to Docker.",
     Seções: "Sections",
     Status: "Status",
+    Stivo: "Stivo",
+    "Stivo · sem dados atualizados do Docker": "Stivo · no fresh data from Docker",
+    "Stivo · {0} na faixa de atenção": "Stivo · {0} need attention",
     "Subindo…": "Bringing up…",
     "Só erros": "Errors only",
     "Só no loopback do daemon remoto {0}: não abre daqui": "Only on the loopback of the remote daemon {0}: can't be opened from here",
@@ -1168,6 +1170,45 @@
     }
   };
 
+  // node_modules/@tauri-apps/api/event.js
+  var TauriEvent;
+  (function(TauriEvent2) {
+    TauriEvent2["WINDOW_RESIZED"] = "tauri://resize";
+    TauriEvent2["WINDOW_MOVED"] = "tauri://move";
+    TauriEvent2["WINDOW_CLOSE_REQUESTED"] = "tauri://close-requested";
+    TauriEvent2["WINDOW_DESTROYED"] = "tauri://destroyed";
+    TauriEvent2["WINDOW_FOCUS"] = "tauri://focus";
+    TauriEvent2["WINDOW_BLUR"] = "tauri://blur";
+    TauriEvent2["WINDOW_SCALE_FACTOR_CHANGED"] = "tauri://scale-change";
+    TauriEvent2["WINDOW_THEME_CHANGED"] = "tauri://theme-changed";
+    TauriEvent2["WINDOW_CREATED"] = "tauri://window-created";
+    TauriEvent2["WINDOW_SUSPENDED"] = "tauri://suspended";
+    TauriEvent2["WINDOW_RESUMED"] = "tauri://resumed";
+    TauriEvent2["WEBVIEW_CREATED"] = "tauri://webview-created";
+    TauriEvent2["DRAG_ENTER"] = "tauri://drag-enter";
+    TauriEvent2["DRAG_OVER"] = "tauri://drag-over";
+    TauriEvent2["DRAG_DROP"] = "tauri://drag-drop";
+    TauriEvent2["DRAG_LEAVE"] = "tauri://drag-leave";
+  })(TauriEvent || (TauriEvent = {}));
+  async function _unlisten(event, eventId) {
+    window.__TAURI_EVENT_PLUGIN_INTERNALS__.unregisterListener(event, eventId);
+    await invoke("plugin:event|unlisten", {
+      event,
+      eventId
+    });
+  }
+  async function listen(event, handler, options) {
+    var _a;
+    const target = typeof (options === null || options === void 0 ? void 0 : options.target) === "string" ? { kind: "AnyLabel", label: options.target } : (_a = options === null || options === void 0 ? void 0 : options.target) !== null && _a !== void 0 ? _a : { kind: "Any" };
+    return invoke("plugin:event|listen", {
+      event,
+      target,
+      handler: transformCallback(handler)
+    }).then((eventId) => {
+      return async () => _unlisten(event, eventId);
+    });
+  }
+
   // src/transport-desktop.ts
   async function request(method, path, body) {
     const r = await invoke("api", { method, path, body: body ?? null });
@@ -1241,16 +1282,37 @@
       }
     };
   }
+  function png(svg) {
+    return new Promise((resolve, reject) => {
+      const img = new Image(), size = 64;
+      img.onload = () => {
+        const c = Object.assign(document.createElement("canvas"), { width: size, height: size });
+        c.getContext("2d").drawImage(img, 0, 0, size, size);
+        c.toBlob((b2) => b2 ? b2.arrayBuffer().then((a) => resolve(new Uint8Array(a)), reject) : reject(new Error("toBlob")), "image/png");
+      };
+      img.onerror = reject;
+      img.src = "data:image/svg+xml," + encodeURIComponent(svg);
+    });
+  }
+  var lastIcon = "";
+  var onNotificationClick = null;
+  void listen("notification-click", () => onNotificationClick?.());
   var T = {
     desktop: true,
     request,
     stream,
     ndjson,
     terminal,
-    // a bandeja e a notificação do sistema entram com o segundo plano
-    attention() {
+    attention(badge, svg) {
+      if (svg === lastIcon) return;
+      lastIcon = svg;
+      const tooltip = badge === "!" ? t`Stivo · sem dados atualizados do Docker` : badge ? t`Stivo · ${badge} na faixa de atenção` : "Stivo";
+      png(svg).then((icon) => invoke("attention", { badge, tooltip, icon: [...icon] }), () => {
+      });
     },
-    notify() {
+    notify(title, body, onClick) {
+      onNotificationClick = onClick;
+      void invoke("notify", { title, body });
     }
   };
 

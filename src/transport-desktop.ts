@@ -1,6 +1,8 @@
 // Transporte do app desktop: a IPC do Tauri com o núcleo em Rust (src-tauri/core), sem porta aberta. Os comandos têm
 // o formato da API HTTP da versão web (método, caminho, corpo), então o app.ts é o mesmo nas duas.
 import {Channel, invoke} from '@tauri-apps/api/core';
+import {listen} from '@tauri-apps/api/event';
+import {t} from './i18n.ts';
 import type {ApiResponse, Closer, NdjsonResult, StreamHandlers, Term, TermHandlers, Transport} from './transport';
 
 type Reply = {status: number; body: unknown};
@@ -62,10 +64,36 @@ function terminal(cid: string, on: TermHandlers): Term {
   };
 }
 
+// a bandeja recebe o mesmo ícone do favicon, em PNG (a bandeja do sistema não desenha SVG). 64 px: nítido em telas
+// com escala 2x, e o sistema reduz para o tamanho da bandeja
+function png(svg: string): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    const img = new Image(), size = 64;
+    img.onload = () => {
+      const c = Object.assign(document.createElement('canvas'), {width: size, height: size});
+      c.getContext('2d')!.drawImage(img, 0, 0, size, size);
+      c.toBlob(b => b ? b.arrayBuffer().then(a => resolve(new Uint8Array(a)), reject) : reject(new Error('toBlob')), 'image/png');
+    };
+    img.onerror = reject;
+    img.src = 'data:image/svg+xml,' + encodeURIComponent(svg);
+  });
+}
+
+let lastIcon = '', onNotificationClick: (() => void) | null = null;
+// o clique na notificação: o Rust já trouxe a janela; a página faz o resto, como no onclick da versão web
+void listen('notification-click', () => onNotificationClick?.());
+
 export const T: Transport = {
   desktop: true,
   request, stream, ndjson, terminal,
-  // a bandeja e a notificação do sistema entram com o segundo plano
-  attention() {},
-  notify() {},
+  attention(badge, svg) {
+    if (svg === lastIcon) return;  // a página redesenha a contagem a cada poll; a bandeja só muda quando ela muda
+    lastIcon = svg;
+    const tooltip = badge === '!' ? t`Stivo · sem dados atualizados do Docker` : badge ? t`Stivo · ${badge} na faixa de atenção` : 'Stivo';
+    png(svg).then(icon => invoke('attention', {badge, tooltip, icon: [...icon]}), () => {});
+  },
+  notify(title, body, onClick) {
+    onNotificationClick = onClick;
+    void invoke('notify', {title, body});
+  },
 };
