@@ -21,6 +21,7 @@ this context in the report.
 ## When SOLID Analysis Applies
 
 Perform SOLID analysis when the project exhibits **at least 2** of:
+
 - Domain entities or value objects (not just DTOs)
 - Bounded contexts or explicit module boundaries
 - Repository pattern or ports/adapters architecture
@@ -35,16 +36,18 @@ Perform SOLID analysis when the project exhibits **at least 2** of:
 ### S — Single Responsibility Principle (SRP)
 
 **Detection heuristics**:
+
 - A class/module changes for multiple unrelated reasons (= Divergent Change smell)
 - File has imports from many unrelated domains
 - Class name includes "And", "Manager", "Handler" doing multiple things
-- >5 public methods that group into 2+ unrelated clusters
+- > 5 public methods that group into 2+ unrelated clusters
 
 **Refactoring**: Extract Class, Split Phase, Move Function
 
 ### O — Open/Closed Principle (OCP)
 
 **Detection heuristics**:
+
 - Adding a new variant (e.g., payment type, notification channel) requires modifying
   existing code instead of extending
 - Switch/if chains on type codes that grow with each new variant
@@ -59,6 +62,7 @@ are frequently added.
 ### L — Liskov Substitution Principle (LSP)
 
 **Detection heuristics**:
+
 - Subclass overrides a method to throw `NotImplementedError` or return `null`
   (= Refused Bequest smell)
 - Subclass narrows the contract (rejects inputs the parent accepts)
@@ -69,6 +73,7 @@ are frequently added.
 ### I — Interface Segregation Principle (ISP)
 
 **Detection heuristics**:
+
 - Interfaces with >7 methods where implementers stub or no-op several of them
 - "Fat" interfaces that force unrelated capabilities together
 - Classes implementing an interface but only using 2-3 of its methods
@@ -81,6 +86,7 @@ domain event handlers.
 ### D — Dependency Inversion Principle (DIP)
 
 **Detection heuristics**:
+
 - High-level domain modules directly importing low-level infrastructure
   (database drivers, HTTP clients, file system)
 - Domain logic coupled to specific framework or library APIs
@@ -99,20 +105,24 @@ In a flat Express/Next.js handler, DIP may be over-engineering.
 When the project uses DDD patterns, also evaluate:
 
 ### Aggregate Boundaries
+
 - Aggregates that are too large (>5 entities) — consider splitting
 - Aggregates that reference other aggregates by object reference instead of ID
 - Cross-aggregate transactions that should be eventual consistency
 
 ### Value Objects
+
 - Domain concepts represented as primitives that should be Value Objects
   (= Primitive Obsession, but in DDD context)
 - Mutable objects that should be immutable Value Objects
 
 ### Domain Events
+
 - Direct coupling between bounded contexts that should communicate via events
 - Synchronous calls across context boundaries that should be async
 
 ### Anti-Corruption Layer
+
 - External system models leaking into the domain
 - Missing translation layer between contexts
 
@@ -131,10 +141,11 @@ When SOLID analysis is performed, add a section to the report:
 ### Findings
 
 | Principle | Finding | Location | Severity | Recommendation |
-|-----------|---------|----------|----------|----------------|
-| SRP | ... | ... | ... | ... |
+| --------- | ------- | -------- | -------- | -------------- |
+| SRP       | ...     | ...      | ...      | ...            |
 
 ### Domain Model Health
+
 - Aggregate boundaries: [assessment]
 - Value object coverage: [assessment]
 - Cross-context coupling: [assessment]

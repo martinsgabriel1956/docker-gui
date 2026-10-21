@@ -38,7 +38,7 @@ def validate_metadata(name, description):
         print("\n".join(errors), file=sys.stderr)
         sys.exit(1)
     else:
-        print("SUCCESS: Metadata passed static checks.")
+        print("SUCCESS: Metadata is valid and optimized for discovery.")
         sys.exit(0)
 
 if __name__ == "__main__":
