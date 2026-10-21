@@ -342,6 +342,8 @@ def main(args):
         os.execvp(cmd[0], cmd)
 
     if cmd == "pull":  # pull -- <ref>: as linhas saem aos poucos, fora do lock
+        if args[1:2] != ["--"] or len(args) != 3:  # o servidor sempre fecha as opções antes da imagem
+            fail(f"pull inesperado: {args}")
         return pull(path, ref)
 
     if cmd == "run":  # dorme fora do lock, como as ações

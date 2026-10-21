@@ -47,7 +47,7 @@ A feature traz o `docker pull` para a aba Imagens, para os dois casos.
 
 1. **RF3.1** Enquanto baixa, a imagem mostra o progresso (o que o docker informa, por camada ou resumido), no estilo da saída ao vivo do compose.
 2. **RF3.2** Dá para baixar mais de uma imagem ao mesmo tempo; cada uma mostra o seu progresso.
-3. **RF3.3** Falhas usam as causas traduzidas de hoje; o erro do docker fica no "ver erro".
+3. **RF3.3** Falhas usam as causas traduzidas de hoje no aviso; o erro do docker fica na saída do pull, que continua aberta até o ×.
 4. **RF3.4** O download tem o mesmo prazo das outras ações que baixam imagem (10 min).
 
 ## Experiência do usuário
@@ -76,3 +76,5 @@ A feature traz o `docker pull` para a aba Imagens, para os dois casos.
 ## Histórico
 
 **2026-10-21**. Documento criado. Decisão: entram os dois fluxos, baixar pelo nome e atualizar uma tag existente.
+
+**2026-10-21**. Reconciliação do sdd-review. RF3.3: o erro do docker fica na saída do pull, aberta até o ×, que é onde ele já aparece inteiro; não há um "ver erro" à parte.
