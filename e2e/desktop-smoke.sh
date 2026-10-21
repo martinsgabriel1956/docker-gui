@@ -51,14 +51,15 @@ run() {
 sleep 1
 run >"$work/app.log" 2>&1 & app=$!; pids+=($app)
 
-visible() { DISPLAY=$display xdotool search --onlyvisible --name '^Stivo$'; }
+visible() { DISPLAY=$display xdotool search --onlyvisible --name '^Stivo( ·|$)'; }
 wait_for 30 visible || fail "a janela não abriu"
 wait_for 15 grep -q "bandeja: -" "$work/app.log" || fail "a página não mandou a contagem para a bandeja"
 echo "ok: o app abriu e a bandeja recebeu a contagem"
 
 win=$(visible | head -1)
+echo "ok: título da janela: $(DISPLAY=$display xdotool getwindowname "$win")"
 DISPLAY=$display python3 "$ROOT/e2e/x11-close.py" "$win"
-wait_for 10 sh -c "! DISPLAY=$display xdotool search --onlyvisible --name '^Stivo\$'" || fail "fechar não escondeu a janela"
+wait_for 10 sh -c "! DISPLAY=$display xdotool search --onlyvisible --name '^Stivo( ·|\$)'" || fail "fechar não escondeu a janela"
 kill -0 "$app" 2>/dev/null || fail "fechar a janela encerrou o app"
 grep -q "continua na bandeja" "$work/notifications" || fail "sem o aviso da primeira vez que a janela fecha"
 echo "ok: fechar escondeu a janela e o app continua"

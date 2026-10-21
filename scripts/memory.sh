@@ -56,7 +56,7 @@ env -u WAYLAND_DISPLAY DISPLAY="$display" GDK_BACKEND=x11 XDG_CONFIG_HOME="$work
   PATH="$ROOT/tests/e2e/fake-docker:$PATH" FAKE_DOCKER_STATE="$work/state.json" "$bin" >"$work/app.log" 2>&1 &
 app=$!; procs+=($app)
 for _ in $(seq 60); do
-  win=$(DISPLAY=$display xdotool search --onlyvisible --name '^Stivo$' 2>/dev/null | head -1) && [ -n "$win" ] && break
+  win=$(DISPLAY=$display xdotool search --onlyvisible --name '^Stivo( ·|$)' 2>/dev/null | head -1) && [ -n "$win" ] && break
   sleep 0.5
 done
 [ -n "${win:-}" ] || { echo "a janela não abriu" >&2; exit 1; }

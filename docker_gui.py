@@ -1824,6 +1824,7 @@ PAGE = r"""<!doctype html>
     "Rodando há {0}{1}": "Up for {0}{1}",
     "Rode {0} de novo; a página volta sozinha.": "Run {0} again; the page comes back by itself.",
     "Rode {0} e entre de novo na sessão.": "Run {0} and log in again.",
+    "Saia do Stivo pelo menu da bandeja e abra de novo.": "Quit Stivo from the tray menu and open it again.",
     "Saiu com código {0} há {1}": "Exited with code {0} {1} ago",
     Salvar: "Save",
     "Saída do {0}": "{0} output",
@@ -12000,7 +12001,7 @@ ${h2.join(`
     } catch (e) {
       showProblem([
         lastOk ? t`O servidor do Stivo parou de responder.` : t`Não consegui conectar ao servidor do Stivo.`,
-        t`Rode ${code("python3 docker_gui.py")} de novo; a página volta sozinha.`,
+        T.desktop ? t`Saia do Stivo pelo menu da bandeja e abra de novo.` : t`Rode ${code("python3 docker_gui.py")} de novo; a página volta sozinha.`,
         e.message,
         "server"
       ]);
@@ -12082,8 +12083,12 @@ ${h2.join(`
     if (!cs2.length || !notifying() || !document.hidden && document.hasFocus()) return;
     T.notify(
       cs2.length === 1 ? t`${cs2[0].Names} precisa de atenção` : t`${cs2.length} containers precisam de atenção`,
+      // o clique traz a página e põe o foco no Logs de quem caiu (a linha dele na faixa de atenção, que vem primeiro)
       cs2.length === 1 ? status(cs2[0])[0] : cs2.map((c) => c.Names).join(", "),
-      () => focus()
+      () => {
+        focus();
+        document.querySelector(`[data-id="${cs2[0].ID}"][data-a="logs"]`)?.focus();
+      }
     );
   }
   var ICON = '<rect x="1" y="1" width="22" height="22" rx="5" fill="#141a22"/><rect x="5" y="5.4" width="14" height="3.6" rx="1" fill="#3fd0dc"/><rect x="5" y="10.2" width="14" height="3.6" rx="1" fill="#566273"/><rect x="5" y="15" width="8.6" height="3.6" rx="1" fill="#566273"/><rect x="15.2" y="15" width="2.6" height="3.6" rx="0.6" fill="#3fd0dc"/>';

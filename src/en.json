@@ -280,6 +280,7 @@
  "Rodando há {0}{1}": "Up for {0}{1}",
  "Rode {0} de novo; a página volta sozinha.": "Run {0} again; the page comes back by itself.",
  "Rode {0} e entre de novo na sessão.": "Run {0} and log in again.",
+ "Saia do Stivo pelo menu da bandeja e abra de novo.": "Quit Stivo from the tray menu and open it again.",
  "Saiu com código {0} há {1}": "Exited with code {0} {1} ago",
  "Salvar": "Save",
  "Saída do {0}": "{0} output",

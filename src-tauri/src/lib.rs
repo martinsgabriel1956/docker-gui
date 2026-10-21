@@ -96,6 +96,10 @@ pub fn run() {
                 .title("Stivo")
                 .inner_size(1280.0, 820.0)
                 .min_inner_size(480.0, 420.0)
+                // o título da página (contexto e contagens, como a aba da versão web) vira o da janela (PRD RF3.3)
+                .on_document_title_changed(|w, title| {
+                    let _ = w.set_title(&title);
+                })
                 .build()?;
             lean_webview(&window);
             Ok(())

@@ -151,7 +151,8 @@ async function load() {
     showProblem(null);
   } catch (e) {
     showProblem([lastOk ? t`O servidor do Stivo parou de responder.` : t`Não consegui conectar ao servidor do Stivo.`,
-      t`Rode ${code('python3 docker_gui.py')} de novo; a página volta sozinha.`, (e as Error).message, 'server']);
+      T.desktop ? t`Saia do Stivo pelo menu da bandeja e abra de novo.` : t`Rode ${code('python3 docker_gui.py')} de novo; a página volta sozinha.`,
+      (e as Error).message, 'server']);
   }
 }
 
@@ -209,7 +210,9 @@ async function askNotify() {
 function notify(cs: Container[]) {
   if (!cs.length || !notifying() || (!document.hidden && document.hasFocus())) return;
   T.notify(cs.length === 1 ? t`${cs[0].Names} precisa de atenção` : t`${cs.length} containers precisam de atenção`,
-    cs.length === 1 ? status(cs[0])[0] : cs.map(c => c.Names).join(', '), () => focus());
+    // o clique traz a página e põe o foco no Logs de quem caiu (a linha dele na faixa de atenção, que vem primeiro)
+    cs.length === 1 ? status(cs[0])[0] : cs.map(c => c.Names).join(', '),
+    () => { focus(); document.querySelector<HTMLElement>(`[data-id="${cs[0].ID}"][data-a="logs"]`)?.focus(); });
 }
 
 // ícone do Stivo (src-tauri/icons/stivo.svg: a pilha de contêineres com o cursor na última linha), com a contagem da

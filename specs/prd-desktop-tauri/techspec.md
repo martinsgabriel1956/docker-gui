@@ -13,41 +13,47 @@ A paridade entre os dois backends é garantida por dois mecanismos. O primeiro s
 ```
 src/ (um front só)
   app.ts            lógica da página; importa o transporte de '#transport'
-  transport.ts      interface Transport
+  transport.ts      interface Transport (e as preferências, só no desktop)
   transport-web.ts  fetch / EventSource / WebSocket (o que existe hoje)    → build.py → docker_gui.py
-  transport-desktop.ts  invoke / Channel do Tauri                         → build.py --desktop → src-tauri/dist/index.html
-  (package.json "imports": '#transport' → web por padrão, desktop com a condição "desktop" do esbuild)
+  transport-desktop.ts  invoke / Channel do Tauri                         → build.py → src-tauri/dist/index.html
+  (package.json "imports": '#transport' → web por padrão, desktop com a condição "desktop" do esbuild;
+   o build.py gera as duas páginas sempre, e o --check confere as duas)
 
 docker_gui.py       inalterado na lógica; ganha só o replay das fixtures de contrato nos testes
 
-src-tauri/src/
-  core/             sem Tauri, sem HTTP: o equivalente ao backend Python
-    cli.rs          executa o binário (docker|podman + --context), com prazo e kill ao soltar
-    normalize.rs    podman → formato docker; images/volumes/networks/stats/history/summary
-    validate.rs     regex e listas fixas (IMAGE_RE, NAME_RE, PORT_RE…), run_argv, compose_base
-    router.rs       handle(Request) -> Response: as rotas de /api/* de hoje
-    streams.rs      logs -f, compose logs -f, events, compose NDJSON: Stream de linhas
-    terminal.rs     docker exec -it num PTY (portable-pty: Unix PTY e ConPTY)
-    i18n.rs         mensagens do backend em pt e en (as mesmas do EN do Python)
-  ipc.rs            comandos Tauri: casca fina sobre core::router, streams e terminal
+src-tauri/core/     crate stivo-core: sem Tauri, sem HTTP, o equivalente ao backend Python
+  src/cli.rs        Runner (executa o binário com prazo e kill ao soltar, sem console no Windows) e Ctx
+  src/router.rs     handle(Request) -> Reply: as rotas de /api/* (Json ou o Ndjson do compose)
+  src/normalize.rs  podman → formato docker; images/volumes/networks/stats/history/summary
+  src/validate.rs   regex e listas fixas (IMAGE_RE, NAME_RE, PORT_RE…), run_argv
+  src/compose.rs    o compose em stream: linhas e {"code"}, segue até o fim mesmo sem leitor
+  src/streams.rs    logs -f, compose logs -f e events como Stream (soltar mata o docker)
+  src/terminal.rs   docker exec -it num PTY (portable-pty: Unix PTY e ConPTY)
+  src/page.rs       where() e os data-* da página (o mesmo para o app e para o harness)
+  src/i18n.rs       mensagens em pt e en, a tabela EN do Python (i18n_en.rs, conferida por teste)
+  src/pyfmt.rs      repr(), %g e parse_qs do Python, para a resposta sair igual
+  src/bin/harness.rs  SÓ TESTE (feature "harness"): o núcleo servido por HTTP, mesmo contrato do Python
+  tests/contract.rs   os casos de tests/contract/ no cargo test
+
+src-tauri/src/      o app Tauri (crate stivo)
+  ipc.rs            comandos: api, stream_*, term_*, prefs_get, prefs_set
   page.rs           protocolo dg:// que serve a página com os data-* injetados
-  tray.rs           bandeja: ícone, tooltip, menu (Abrir, Preferências, Sair)
-  notify.rs         notificação nativa com clique → mostrar a janela e focar o alvo
-  prefs.rs          preferências em <app_config>/prefs.json
-  lib.rs / main.rs  montagem: single-instance, window-state, fechar → esconder
-  bin/harness.rs    SÓ TESTE (feature "harness"): core servido por HTTP, mesmo contrato do Python
+  background.rs     bandeja (ícone, tooltip, menu Abrir/Preferências/Sair), notificação e fechar → esconder
+  prefs.rs          preferências em <app_config>/prefs.json, com a validação do que vem da tela
+  lib.rs / main.rs  montagem: single-instance, window-state, log, título da janela, ajustes de memória
 ```
 
 **Fluxo de dado (desktop):**
 
-1. O Rust abre a janela em `dg://localhost/`. O `page.rs` serve o HTML gerado pelo `build.py --desktop` com os `data-cli`, `data-where`, `data-host`, `data-remote` e `data-lang` injetados a partir das preferências, como o `main()` do Python faz hoje.
-2. O `app.ts` chama `transport.request('GET', '/api/containers')`. O `transport-desktop` vira `invoke('api', {method, path, body})`, o `ipc.rs` chama `core::router::handle` e o roteador executa o CLI, normaliza a saída e devolve `{status, body}`.
-3. Os streams (eventos, logs, NDJSON do compose) abrem com `invoke('stream_open', {path, body, channel})`. O Rust empurra linhas pelo `Channel` até o fim ou até `stream_close`.
-4. O terminal abre com `invoke('term_open', {id, cols, rows, channel})`. A saída do PTY vai pelo `Channel`; a entrada e o resize voltam por `term_input` e `term_resize`.
-5. Quando a faixa de atenção muda, a página chama `invoke('attention', {count, stale, icon})`. O `icon` é o PNG que o código do favicon já desenha; o `tray.rs` troca o ícone e o tooltip.
-6. Para notificar, a página chama `invoke('notify', {title, body, target})` no lugar de `new Notification`. As regras de quando notificar continuam todas no front.
+1. O Rust abre a janela em `dg://localhost/` (no Windows, `http://dg.localhost/`). O `page.rs` serve o `src-tauri/dist/index.html` gerado pelo `build.py` com os `data-cli`, `data-where`, `data-host`, `data-remote` e `data-lang` injetados a partir das preferências, como o `main()` do Python faz hoje.
+2. O `app.ts` chama `T.request('GET', '/api/containers')`. O `transport-desktop` vira `invoke('api', {method, path, body})`, o `ipc.rs` chama `stivo_core::handle` e o roteador executa o CLI, normaliza a saída e devolve `{status, body}`.
+3. Os streams abrem com `invoke('stream_open', {method, path, query, body, channel})`: GET para eventos e logs (mensagens `{data}` e `{end}`, o mesmo do SSE), POST para o compose (mensagens `{line}` e `{end}`, o mesmo do NDJSON). O Rust empurra pelo `Channel` até o fim ou até `stream_close`; a recusa antes de abrir volta como `{status, body}`.
+4. O terminal abre com `invoke('term_open', {id, cols, rows, channel})` no primeiro resize que a página faz. A saída do PTY vai pelo `Channel` em bytes crus (ArrayBuffer) e o fim como `{closed: true}`; a entrada (`term_input`, síncrono, para as teclas não se embaralharem) e o resize voltam por comandos.
+5. Quando a faixa de atenção muda, a página chama `invoke('attention', {badge, tooltip, icon})`. O `icon` é o SVG do favicon passado a PNG de 64 px num canvas; o `background.rs` troca o ícone e o tooltip da bandeja.
+6. Para notificar, a página chama `invoke('notify', {title, body})` no lugar de `new Notification`. As regras de quando notificar continuam todas no front. O clique (ação default no Linux) traz a janela e manda o evento `notification-click`; a página põe o foco no Logs de quem caiu, como no clique da versão web.
+7. O `<title>` da página (contexto e contagens) vira o título da janela (`on_document_title_changed`).
 
-**Fluxo de teste (harness):** o `bin/harness.rs` imprime `Docker GUI em http://127.0.0.1:<porta>/#t=<token>`, como o Python. Ele serve a página da web (`entry-web`) e aplica nas rotas o mesmo `core::router`, com SSE para os streams e WebSocket para o terminal. O `fixtures.ts` escolhe o binário por `GUI_BACKEND=python|rust`.
+**Fluxo de teste (harness):** o `src-tauri/core/src/bin/harness.rs` imprime `Stivo em http://localhost:<porta>/#t=<token>`, como o Python. Ele serve a página da web (o `PAGE` do `docker_gui.py`) e aplica nas rotas o mesmo `core::router`, com SSE para os streams e WebSocket para o terminal. O `fixtures.ts` escolhe o binário por `GUI_BACKEND=python|rust`.
 
 ## Design de implementação
 
@@ -70,53 +76,55 @@ export interface Transport {   // src/transport.ts
 }
 ```
 
-Comandos Tauri (`ipc.rs`). A janela `main` é a única com permissão para usá-los (capability).
+Comandos Tauri (`ipc.rs` e `background.rs`). A janela `main` é a única com permissão para usá-los (capability).
 
 ```rust
-#[tauri::command] async fn api(method: Method, path: String, body: Option<Value>) -> ApiResponse;
-#[tauri::command] async fn stream_open(path: String, body: Option<Value>, channel: Channel<StreamMsg>) -> StreamId;
-#[tauri::command] fn stream_close(id: StreamId);
-#[tauri::command] async fn term_open(id: String, cols: u16, rows: u16, channel: Channel<TermMsg>) -> TermId;
-#[tauri::command] fn term_input(term: TermId, data: String);
-#[tauri::command] fn term_resize(term: TermId, cols: u16, rows: u16);
-#[tauri::command] fn term_close(term: TermId);
-#[tauri::command] fn attention(count: u32, stale: bool, icon: Vec<u8>);
-#[tauri::command] fn notify(title: String, body: String, target: String);
-#[tauri::command] fn prefs_get() -> Prefs;
-#[tauri::command] fn prefs_set(prefs: Prefs) -> Result<(), String>;   // valida, salva e recarrega a página
-#[tauri::command] async fn contexts() -> Vec<String>;                  // docker context ls (para a tela)
+#[tauri::command] async fn api(method: String, path: String, body: Option<Value>) -> Result<ApiReply, String>;
+#[tauri::command] async fn stream_open(method: String, path: String, query: String, body: Option<Value>,
+                                       channel: Channel<Value>) -> Result<u32, ApiReply>;
+#[tauri::command] fn stream_close(id: u32);
+#[tauri::command] fn term_open(id: String, cols: u16, rows: u16, channel: Channel<InvokeResponseBody>) -> Result<u32, String>;
+#[tauri::command] fn term_input(term: u32, data: String);      // síncrono: as teclas na ordem
+#[tauri::command] fn term_resize(term: u32, cols: u16, rows: u16);
+#[tauri::command] fn term_close(term: u32);
+#[tauri::command] fn attention(badge: String, tooltip: String, icon: Vec<u8>);
+#[tauri::command] fn notify(title: String, body: String);
+#[tauri::command] async fn prefs_get() -> Result<PrefsView, String>;   // as preferências e os contextos do docker
+#[tauri::command] async fn prefs_set(prefs: Choice) -> Result<(), String>;  // valida, salva, aplica e recarrega
 ```
 
 Núcleo (`core`), testável sem Tauri:
 
 ```rust
-pub struct Cli { pub argv: Vec<String> }                     // ["docker"] | ["podman"] | [.., "--context", c]
+#[async_trait::async_trait]
 pub trait Runner: Send + Sync {                              // trocado por um falso nos testes de contrato
-    async fn run(&self, cli: &Cli, args: &[&str], timeout: Duration) -> Output;
-    fn spawn(&self, cli: &Cli, args: &[&str]) -> io::Result<Child>;
+    async fn run(&self, cli: &[String], args: &[String], timeout: Duration) -> Result<Output, RunError>;
+    fn command(&self, cli: &[String], args: &[String]) -> tokio::process::Command;  // streams, compose e testes
 }
-pub struct Request { pub method: Method, pub path: String, pub query: Vec<(String, String)>, pub body: Option<Value> }
-pub struct Response { pub status: u16, pub body: Value }
-pub async fn handle(ctx: &Ctx, req: Request) -> Response;   // Ctx = Cli + Runner + Lang
-pub fn stream(ctx: &Ctx, req: Request) -> Result<impl Stream<Item = StreamMsg>, Response>;
+pub struct Ctx { pub cli: Vec<String>, pub lang: Lang, pub runner: Arc<dyn Runner>, pub now: Clock }
+pub struct Request { pub method: Method, pub path: String, pub query: String, pub body: Option<Value> }
+pub enum Reply { Json(Response), Ndjson(BoxStream<'static, Value>) }
+pub async fn handle(ctx: &Ctx, req: Request) -> Reply;
+pub async fn streams::open(ctx: &Ctx, path: &str, query: &str) -> Result<BoxStream<'static, StreamMsg>, Response>;
+pub fn terminal::open(cli: &[String], id: &str, cols: u16, rows: u16, on_data, on_close) -> io::Result<Arc<Terminal>>;
 ```
 
 ### Modelos de dado
 
 - **`ApiResponse { status: u16, body: Value }`**: o corpo é o mesmo JSON que o Python devolve, com as mesmas mensagens de erro traduzidas.
-- **`StreamMsg`**: `Data(String)` | `End` | `Error(String)`. Corresponde ao `data:` / `event: end` do SSE e a uma linha do NDJSON.
-- **`TermMsg`**: `Output(Vec<u8>)` | `Closed { code: Option<i32> }`.
-- **`Prefs { cli: Option<String>, context: Option<String>, lang: Option<Lang>, notifications: bool, close_hint_shown: bool }`**: `None` significa "o padrão de hoje" (`DOCKER_GUI_CLI` ou docker; `DOCKER_CONTEXT` ou o contexto atual; locale). O arquivo é JSON em `<app_config>/prefs.json`. `cli` só aceita `docker` ou `podman` (nome ou caminho absoluto de um binário com esse nome), e `context` só um nome que o `docker context ls` devolveu.
+- **`StreamMsg`**: `Data(String)` | `End`, o `data:` / `event: end` do SSE (nos logs, a linha em JSON; nos eventos, `1`). O NDJSON do compose é um `Stream<Value>` (strings e, no fim, `{"code": n}`).
+- **Terminal pelo canal**: bytes crus (`InvokeResponseBody::Raw`) e, no fim, `{"closed": true}`.
+- **`Prefs { cli: Option<String>, context: Option<String>, lang: Option<String>, notifications: Option<bool>, close_hint_shown: bool }`**: `None` significa "o padrão de hoje" (`DOCKER_GUI_CLI` ou docker; `DOCKER_CONTEXT` ou o contexto atual; locale). O arquivo é JSON em `<app_config>/prefs.json`. `cli` só aceita `docker` ou `podman` (nome ou caminho absoluto de um binário com esse nome), e `context` só um nome que o `docker context ls` devolveu.
 - **Fixture de contrato** (`tests/contract/<rota>/<caso>.json`):
 
 ```json
-{ "lang": "pt", "cli": ["docker"],
+{ "desc": "o que o caso confere", "lang": "pt", "cli": ["docker"], "now": 1700000000.5,
   "calls": [{ "args": ["ps", "-a", "--format", "{{json .}}"], "stdout": "…", "stderr": "", "code": 0 }],
   "request": { "method": "GET", "path": "/api/containers", "body": null },
   "response": { "status": 200, "body": [] } }
 ```
 
-O runner falso confere que as chamadas saíram nessa ordem e com esses argumentos. Isso cobre também a validação: um caso de "argumento recusado" tem `calls: []`.
+O runner falso confere que as chamadas saíram nessa ordem e com esses argumentos. Isso cobre também a validação: um caso de "argumento recusado" tem `calls: []`. O `now` (opcional) fixa o relógio do `--until` do histórico. O `tests/contract/play.py --record` grava os `args` e a `response` de um caso novo a partir do Python, para revisar no diff.
 
 ### Endpoints de API
 
@@ -146,7 +154,7 @@ Nenhum endpoint novo. O contrato são as rotas que existem hoje no `Handler` do 
 
 ## Sequenciamento
 
-1. **Transporte no front.** Extrair o `Transport` do `app.ts` e criar o `transport-web` e o `entry-web`. O `build.py` gera o mesmo `docker_gui.py`. Os testes atuais provam que nada mudou. Isso destrava todo o resto e entra sozinho, sem Rust.
+1. **Transporte no front.** Extrair o `Transport` do `app.ts` e criar o `transport-web` (escolhido pelo `#transport` do `package.json`). O `build.py` gera o mesmo `docker_gui.py`. Os testes atuais provam que nada mudou. Isso destrava todo o resto e entra sozinho, sem Rust.
 2. **Fixtures de contrato + replay no Python.** Formalizam o comportamento antes de copiá-lo.
 3. **`core` em Rust + harness**, rota por rota, na ordem das fixtures: listas e ações, depois logs e streams, compose, run e remoções, e por fim o terminal. Cada grupo fica pronto quando passa nas fixtures e nos specs Playwright dele contra o harness.
 4. **Casca Tauri:** `page.rs`, `ipc.rs` e `transport-desktop`. A janela funciona com paridade.
@@ -173,12 +181,15 @@ A etapa 1 bloqueia a 4, a 2 bloqueia a 3 e a 4 bloqueia a 5 e a 6.
 - **Dois builds no esbuild, não detecção em tempo de execução.** O `app.ts` importa `'#transport'`, e o campo `imports` do `package.json` resolve para o `transport-web.ts` por padrão ou para o `transport-desktop.ts` com a condição `desktop` do esbuild (`--conditions=desktop`). O `docker_gui.py` não carrega nenhum byte do Tauri, e o desktop não carrega o caminho de token e `EventSource`. Rejeitado: um arquivo de entrada por versão com o `app.ts` virando uma função `start(transport)`, que obrigaria a mover todo o código de topo das 1.900 linhas para dentro dela.
 - **O Tauri usa o `npm`, não o `pnpm` do Paddock.** Este repositório já tem `package.json` e lockfile com `npm`, com versões fixas. Os pacotes `@tauri-apps/api` e `@tauri-apps/cli` também entram com versão exata. O Tauri fica fixo no minor `~2.12`, como no Paddock.
 - **Nome Stivo só onde é visível.** O `productName` e o identificador do app (`io.github.martinsgabriel1956.Stivo`, usado também no Flathub e no winget) usam o nome novo, e os textos da página trocam "Docker GUI" por "Stivo". O `docker_gui.py`, as variáveis `DOCKER_GUI_*`, o cabeçalho `X-Docker-GUI-Token` e as chaves `docker-gui-*` do `localStorage` ficam: não são nome de produto, e trocar quebraria quem já usa a versão web (RF6.3). O e2e da versão web que espera "Docker GUI em http…" na saída do terminal passa a esperar o nome novo; o harness imprime o mesmo.
+- **Núcleo num crate à parte (`src-tauri/core`, `stivo-core`), não um módulo do app.** O `cargo test`, o contrato e o harness rodam sem compilar o Tauri e sem o WebKit instalado, e o CI do núcleo fica leve. O app (`src-tauri`) depende dele.
+- **Título da janela pela página.** O Tauri não copia o `<title>`, então o `on_document_title_changed` faz isso: o contexto e as contagens aparecem como na aba da versão web (RF3.3).
 - **Tamanho medido pelo `.deb`, `.rpm`, `.msi` e `.exe` (NSIS).** O AppImage leva o WebKitGTK dentro, passa de 70 MB e fica fora dos formatos publicados.
 
 ### Riscos conhecidos
 
 - **Bandeja no GNOME:** sem a extensão AppIndicator, o ícone não aparece. Fechar a janela deixaria o app invisível. Mitigação: o aviso da primeira vez que a janela fecha também diz que abrir o app de novo traz a janela de volta (single-instance), e o README documenta a extensão. A investigar: detectar se existe um host de bandeja (`StatusNotifierWatcher` no D-Bus) e, se não existir, fechar passa a minimizar.
-- **Clique na notificação no Windows (RF2.6):** o toast traz o app à frente, mas levar ao container específico depende do argumento de ativação. A investigar na etapa 5; o mínimo aceitável é abrir a janela.
+- **Clique na notificação no Windows (RF2.6):** no Linux o clique traz a janela e leva o foco ao Logs de quem caiu. No Windows o `notify-rust` não devolve o clique: o toast traz o app à frente pela instância única, sem levar ao container. Falta conferir num Windows de verdade, junto com a memória (checklist manual da release).
+- **Dependências do `.rpm`:** declaradas à mão (`libayatana-appindicator-gtk3`) e ainda não conferidas num Fedora; o `.deb` foi conferido (`dpkg-deb -f`).
 - **Flathub e Snap (resolvido na T15: fora da primeira entrega):** o app executa o CLI do host. No Flatpak isso exige `flatpak-spawn --host` e `--talk-name=org.freedesktop.Flatpak`, um contorno do sandbox que as regras do Flathub recusam; no Snap, o confinamento `classic` é reservado a publicadores maduros, e o `strict` com a interface `docker` só alcança o Docker do próprio snap. O RF7.2 voltou ao PRD com essas fontes. Embutir um docker CLI no pacote foi descartado (seria um contorno, e quebraria o Podman e os contextos).
 - **Memória com a janela escondida:** medido na T10 com o `scripts/memory.sh --idle` (binário de release, 6 containers, 2 min com a janela fechada, PSS do app e dos processos do WebKit, sem o docker): 163,6 MB sem ajuste, 150,2 MB com o WebKitGTK no modo de cache de visualizador de documentos e sem aceleração por GPU, e 140,8 MB limitando as arenas do malloc da glibc a duas (`mallopt(M_ARENA_MAX, 2)` no `main`). A decisão "esconder em vez de destruir" fica, com uns 9 MB de folga. No Windows (WebView2) a medição ainda falta: entra no checklist manual da release.
 - **Divergência silenciosa entre os backends:** algo que não está nas fixtures nem nos specs pode divergir. Mitigação: um teste de cobertura falha se alguma rota do `Handler` não tiver pelo menos um caso de contrato.
@@ -213,7 +224,7 @@ O repositório não tem `CLAUDE.md` nem diretório de regras. As regras vêm do 
 - `tests/e2e/fake-docker/docker`: compartilhado pelos dois backends.
 - `.github/workflows/ci.yml`: job Rust, E2E em matriz python/rust, build de Linux e Windows e tetos de tamanho.
 - `package.json`: `@tauri-apps/api`, `@tauri-apps/cli` e scripts.
-- Novos: `src/transport*.ts`, `src/entry-*.ts`, `src-tauri/**`, `tests/contract/**`, `tests/test_contract.py`, `e2e/desktop-smoke.sh` e `scripts/size.sh`, `scripts/memory.sh`.
+- Novos: `src/transport*.ts`, `src-tauri/**` (o app e o crate `core`), `tests/contract/**` (com o `play.py`), `tests/test_contract.py`, `tests/transport-desktop.test.js`, `e2e/desktop-smoke.sh` (com o `notify-server.py` e o `x11-close.py`), `scripts/size.sh`, `scripts/memory.sh`, `packaging/` (AUR e winget) e `.github/workflows/release.yml`.
 
 ## Histórico
 
@@ -226,3 +237,5 @@ O repositório não tem `CLAUDE.md` nem diretório de regras. As regras vêm do 
 **2026-10-21**. T10: medida a memória com a janela fechada (140,8 MB de PSS, dentro do teto de 150 MB) depois de dois ajustes no Linux, o cache e a aceleração do WebKitGTK e as arenas do malloc; a decisão de esconder a janela em vez de destruir a página continua. Notificações com o `notify-rust` direto (no Linux, o clique traz a janela pela ação default) e a bandeja do próprio Tauri, com o ícone em PNG desenhado pela página.
 
 **2026-10-21**. T14 e T15: AUR (`stivo-bin`, a partir do `.deb`) e winget (`MartinsGabriel.Stivo`, a partir do `.msi`) em `packaging/`; Flathub e Snap fora da primeira entrega, pelo PRD. O `.deb` deixa de declarar o AppIndicator à mão (o bundler já o acrescenta por causa da bandeja); o `.rpm` continua declarando.
+
+**2026-10-21**. Reconciliação do sdd-review: a visão de componentes, os comandos, os tipos e o fluxo de dado passam a descrever o que foi construído (o núcleo no crate `stivo-core`, o compose em `compose.rs`, a bandeja e a notificação em `background.rs`, os comandos `stream_open` com método e query, `attention` com badge e tooltip, `notify` sem alvo, `prefs_get` trazendo os contextos, o terminal em bytes crus, o `build.py` gerando as duas páginas sem flag). Decisões novas: o núcleo em crate à parte e o título da janela pela página. Na revisão entraram três correções: o título da janela (RF3.3), o foco no Logs de quem caiu ao clicar na notificação (RF2.6) e o aviso de "servidor caiu" sem mandar rodar o Python no desktop.
