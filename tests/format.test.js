@@ -563,3 +563,42 @@ test('newProblems aceita outro critério de entrada na faixa', () => {
   assert.deepEqual(f.newProblems(new Set(), [api]), []);
   assert.deepEqual(f.newProblems(new Set(), [api], () => true), [api]);
 });
+
+const mst = (used, limit, perc) => ({ID: 'x', CPUPerc: '1%', MemUsage: `${used} / ${limit}`, MemPerc: perc});
+const GiB = 2 ** 30;
+
+test('memLimit e memPct leem o uso e o limite do stats', () => {
+  assert.deepEqual(f.memLimit(mst('476MiB', '512MiB', '92.97%')), {used: 476 * 2 ** 20, limit: 512 * 2 ** 20});
+  assert.equal(f.memLimit(mst('--', '--', '--')), null);
+  assert.equal(f.memPct(mst('476MiB', '512MiB', '92.97%')), 92.97);
+  assert.equal(f.memPct(mst('256MiB', '512MiB', '--')), 50);  // sem o MemPerc, a conta
+});
+
+test('memWatch: 2 leituras para entrar, abaixo de 85% para sair, sem limite nunca', () => {
+  const s = p => ({x: mst(`${p * 5.12}MiB`, '512MiB', `${p}%`)}), T = 16 * GiB;
+  let m = f.memWatch(new Map(), s(95), T);
+  assert.equal(f.memHot(m, 'x'), false);  // 1ª leitura: ainda não
+  m = f.memWatch(m, s(96), T);
+  assert.equal(f.memHot(m, 'x'), true);
+  m = f.memWatch(m, s(87), T);
+  assert.equal(f.memHot(m, 'x'), true);   // entre 85 e 90: fica
+  m = f.memWatch(m, s(80), T);
+  assert.equal(f.memHot(m, 'x'), false);  // abaixo de 85: sai
+  m = f.memWatch(f.memWatch(new Map(), s(95), T), s(88), T);
+  assert.equal(f.memHot(f.memWatch(m, s(95), T), 'x'), false);  // pico, queda, pico: não são 2 seguidas
+  const noLimit = {x: mst('15.5GiB', '15.6GiB', '99.36%')};     // o "limite" é a RAM toda (arredondada)
+  assert.equal(f.memHot(f.memWatch(f.memWatch(new Map(), noLimit, T), noLimit, T), 'x'), false);
+  assert.equal(f.memHot(f.memWatch(f.memWatch(new Map(), s(95), null), s(95), null), 'x'), false);  // sem RAM total
+  assert.equal(f.memHot(f.memWatch(new Map(), s(95), T, true), 'x'), true);  // base: quente já na 1ª leitura
+  assert.equal(f.memWatch(f.memWatch(new Map(), s(95), T), {}, T).size, 0);  // parou: sai
+});
+
+test('memText diz a porcentagem e os números', () => {
+  assert.equal(f.memText(mst('476MiB', '512MiB', '92.97%')), 'Memória em 93% do limite (476 MiB de 512 MiB)');
+});
+
+test('newProblems compara pela chave', () => {
+  const a = c('running', 'Up 1 minute', {ID: 'a'});
+  assert.deepEqual(f.newProblems(new Set(['a:mem']), [a], () => true, x => x.ID), [a]);  // mem -> queda: entra de novo
+  assert.deepEqual(f.newProblems(new Set(['a']), [a], () => true, x => x.ID), []);
+});

@@ -497,6 +497,7 @@
     "Marcar a queda de {0} como vista: sai da faixa de atenção": "Mark the crash of {0} as seen: it leaves the attention band",
     "Marcar como visto": "Mark as seen",
     Memória: "Memory",
+    "Memória em {0}% do limite ({1} de {2})": "Memory at {0}% of the limit ({1} of {2})",
     "Memória: {0} ({1})": "Memory: {0} ({1})",
     "Morto · só dá para remover": "Dead · can only be removed",
     "Nada nas últimas 24 h. O docker guarda só os eventos mais recentes.": "Nothing in the last 24 h. Docker only keeps the most recent events.",
@@ -904,7 +905,7 @@
   var BUCKET_OF_STATE = { running: "rodando", paused: "pausado", restarting: "reiniciando" };
   var bucket = (c) => ["bad", "warn"].includes(tone(c)) ? "problema" : BUCKET_OF_STATE[c.State] || "parado";
   var isProblem = (c) => bucket(c) === "problema";
-  var newProblems = (before, cs2, is2 = isProblem) => before ? cs2.filter((c) => is2(c) && !before.has(c.ID)) : [];
+  var newProblems = (before, cs2, is2 = isProblem, key = (c) => c.ID) => before ? cs2.filter((c) => is2(c) && !before.has(key(c))) : [];
   var project = (c) => (c.Labels || "").match(/(?:^|,)com\.docker\.compose\.project=([^,]*)/)?.[1] || "";
   var workingDir = (c) => (c.Labels || "").match(/(?:^|,)com\.docker\.compose\.project\.working_dir=([^,]*)/)?.[1] || "";
   var service = (c) => (c.Labels || "").match(/(?:^|,)com\.docker\.compose\.service=([^,]*)/)?.[1] || "";

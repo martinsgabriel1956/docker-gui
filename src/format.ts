@@ -59,8 +59,10 @@ export const bucket = (c: Container): Bucket =>
 export const isProblem = (c: Container): boolean => bucket(c) === 'problema';
 // quem entrou na faixa de atenção desde a leitura anterior (IDs que já estavam nela); null = primeira leitura,
 // que só serve de base: o que já estava com problema ao abrir a página não vira notificação
-export const newProblems = (before: Set<string> | null, cs: Container[], is: (c: Container) => boolean = isProblem): Container[] =>
-  before ? cs.filter(c => is(c) && !before.has(c.ID)) : [];
+// is: o critério de entrada na faixa; key: o que o before guarda (uma chave por causa faz a troca de causa contar como entrada)
+export const newProblems = (before: Set<string> | null, cs: Container[], is: (c: Container) => boolean = isProblem,
+                            key: (c: Container) => string = c => c.ID): Container[] =>
+  before ? cs.filter(c => is(c) && !before.has(key(c))) : [];
 // depends_on tem vírgulas no valor, então não dá para fazer split nos Labels; regex só no project
 export const project = (c: Pick<Container, 'Labels'>): string =>
   (c.Labels || '').match(/(?:^|,)com\.docker\.compose\.project=([^,]*)/)?.[1] || '';
@@ -223,6 +225,38 @@ export function fmtBytes(n: number): string {
   for (; n >= 1024 && i < u.length - 1; i++) n /= 1024;
   return `${i && n < 100 ? n.toFixed(1) : Math.round(n)} ${u[i]}`;
 }
+
+// memória: uso e limite do "476MiB / 512MiB" do stats. Sem limite, o docker põe a RAM toda do daemon no lugar do limite
+export function memLimit(s: Stats): {used: number; limit: number} | null {
+  const [u, l] = s.MemUsage.split(' / ').map(x => bytes(x ?? ''));
+  return u !== null && l ? {used: u, limit: l} : null;
+}
+// o MemPerc do docker vem das contas exatas; sem ele ("--" no podman), a conta com o que veio
+export const memPct = (s: Stats): number | null => {
+  const m = memLimit(s);
+  return percent(s.MemPerc) ?? (m && m.used / m.limit * 100);
+};
+// container quente: 2 leituras seguidas em 90% ou mais do limite; sai abaixo de 85% (entre os dois, fica como está).
+// Limite acima de 95% da RAM total conta como sem limite (o stats arredonda a RAM: "7.6GiB" são 7,63 GiB). first: a
+// primeira leitura da página, que serve de base (quem já estava no alto fica quente sem esperar, e não notifica)
+export type MemState = Map<string, {n: number; on: boolean}>;
+const MEM_IN = 90, MEM_OUT = 85, MEM_READS = 2, NO_LIMIT = 0.95;
+export function memWatch(prev: MemState, stats: Record<string, Stats>, memTotal: number | null, first = false): MemState {
+  const next: MemState = new Map();
+  if (!memTotal) return next;
+  for (const [id, s] of Object.entries(stats)) {
+    const m = memLimit(s), pct = memPct(s), was = prev.get(id) ?? {n: 0, on: false};
+    if (!m || pct === null || m.limit >= NO_LIMIT * memTotal) continue;
+    if (pct >= MEM_IN) next.set(id, {n: was.n + 1, on: was.on || first || was.n + 1 >= MEM_READS});
+    else if (pct >= MEM_OUT && was.on) next.set(id, {n: 0, on: true});
+  }
+  return next;
+}
+export const memHot = (st: MemState, id: string): boolean => !!st.get(id)?.on;
+export const memText = (s: Stats): string => {
+  const m = memLimit(s)!;
+  return t`Memória em ${Math.round(memPct(s)!)}% do limite (${fmtBytes(m.used)} de ${fmtBytes(m.limit)})`;
+};
 
 // "1.2kB / 648B" -> ["1.2kB", "648B"]; null se faltar o campo ou um dos lados não for tamanho
 export function pair(s?: string): [string, string] | null {
