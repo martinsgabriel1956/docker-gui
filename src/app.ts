@@ -499,6 +499,8 @@ const bucketOf = (c: Container): Bucket => held(c, data) || memOn(c) ? 'problema
 // é estável, então dentro de cada grupo segue por nome
 const rank = (c: Container) => holds(c, data).length ? 0 : severe(c) ? 1 : 2;
 const attnSort = (cs: Container[]) => cs.sort((a, b) => rank(a) - rank(b));
+// rodando bem, mas perto do limite de memória: o tom de aviso (a bolinha, o status e o bloco do projeto)
+const toneOf = (c: Container): Tone => tone(c) === 'ok' && memOn(c) ? 'warn' : tone(c);
 const memLine = (c: Container) => memOn(c) && stats[sid(c.ID)] ? memText(stats[sid(c.ID)]) : '';
 // quem entrou na faixa desde a última vez (da lista ou do stats) vira notificação
 function checkAttention() {
@@ -541,7 +543,7 @@ function openProcs(id: string) {
   if (!d.hidden) d.open = true;  // o ontoggle chama o loadTop
 }
 function rowHtml(c: Container, withProject: boolean, bl: Blocker[], hd: Container[]) {
-  const b = busy.get(c.ID), tn = TONE[b ? 'busy' : tone(c)], st = status(c, facts[tailKey(c)]), pp = ports(c.Ports), p = project(c), bt = b && busyText(c, b);
+  const b = busy.get(c.ID), tn = TONE[b ? 'busy' : toneOf(c)], st = status(c, facts[tailKey(c)]), pp = ports(c.Ports), p = project(c), bt = b && busyText(c, b);
   const armed = arming?.id === c.ID, prim = PRIMARY[c.State], sec = SECONDARY[c.State];
   const u = c.State === 'running' && !b && stats[sid(c.ID)] ? usage(stats[sid(c.ID)]) : null, h = series.get(sid(c.ID)) ?? [];
   const slot = (w = 'w-20') => `<span aria-hidden="true" class="${w} shrink-0 max-sm:hidden"></span>`;
@@ -676,7 +678,7 @@ function groupHead(k: string, label: string) {
   const verb = composing.get(k);
   // a faixa de estado: um bloco por container do projeto, na cor do estado, como uma calha de processos
   const strip = k ? `<span aria-hidden="true" data-strip class="flex items-center gap-0.5">${[...all].sort((a, b) => a.Names.localeCompare(b.Names)).map(c =>
-    `<span title="${esc(c.Names)}: ${esc(status(c)[0])}" class="h-3 w-1.5 rounded-[1px] ${TONE[busy.has(c.ID) ? 'busy' : tone(c)][0]}"></span>`).join('')}</span>` : '';
+    `<span title="${esc(c.Names)}: ${esc(status(c)[0])}" class="h-3 w-1.5 rounded-[1px] ${TONE[busy.has(c.ID) ? 'busy' : toneOf(c)][0]}"></span>`).join('')}</span>` : '';
   return `<tr data-key="g:${ek}" role="row" class="max-sm:block"><th role="columnheader" colspan="5" scope="colgroup" class="max-sm:block px-4 pt-3 pb-2.5 text-left font-normal border-t border-line-strong bg-raised">
     <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
       <span class="font-mono text-group font-semibold ${k ? 'text-fg-strong' : 'text-fg-soft'}">${label}</span>${strip}
@@ -1200,7 +1202,7 @@ function renderDlg() {
     $('#dlg-acts').innerHTML = '';
     return;
   }
-  const b = busy.get(c.ID), tn = TONE[b ? 'busy' : tone(c)], st = status(c, facts[tailKey(c)]);
+  const b = busy.get(c.ID), tn = TONE[b ? 'busy' : toneOf(c)], st = status(c, facts[tailKey(c)]);
   $('#procs').hidden = c.State !== 'running';  // docker top só com o container de pé
   const h = hasHealth(c) && health[c.ID + c.Status];
   if (hasHealth(c) && !h) loadHealth(c.ID);

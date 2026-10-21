@@ -12471,6 +12471,7 @@ ${h2.join(`
   var bucketOf = (c) => held(c, data) || memOn(c) ? "problema" : bucket(c);
   var rank = (c) => holds(c, data).length ? 0 : severe(c) ? 1 : 2;
   var attnSort = (cs2) => cs2.sort((a, b2) => rank(a) - rank(b2));
+  var toneOf = (c) => tone(c) === "ok" && memOn(c) ? "warn" : tone(c);
   var memLine = (c) => memOn(c) && stats[sid(c.ID)] ? memText(stats[sid(c.ID)]) : "";
   function checkAttention() {
     notify(newProblems(seen, data, attention, alertKey));
@@ -12515,7 +12516,7 @@ ${h2.join(`
     if (!d.hidden) d.open = true;
   }
   function rowHtml(c, withProject, bl2, hd) {
-    const b2 = busy.get(c.ID), tn2 = TONE[b2 ? "busy" : tone(c)], st2 = status(c, facts[tailKey(c)]), pp = ports(c.Ports), p = project(c), bt2 = b2 && busyText(c, b2);
+    const b2 = busy.get(c.ID), tn2 = TONE[b2 ? "busy" : toneOf(c)], st2 = status(c, facts[tailKey(c)]), pp = ports(c.Ports), p = project(c), bt2 = b2 && busyText(c, b2);
     const armed = arming?.id === c.ID, prim = PRIMARY[c.State], sec = SECONDARY[c.State];
     const u = c.State === "running" && !b2 && stats[sid(c.ID)] ? usage(stats[sid(c.ID)]) : null, h2 = series.get(sid(c.ID)) ?? [];
     const slot = (w = "w-20") => `<span aria-hidden="true" class="${w} shrink-0 max-sm:hidden"></span>`;
@@ -12626,7 +12627,7 @@ ${WIDE.matches ? "" : `
       dir ? cbtn("down", "compose down…", MENU_ITEM + " text-bad-fg") : ""
     ].filter(Boolean);
     const verb = composing.get(k);
-    const strip = k ? `<span aria-hidden="true" data-strip class="flex items-center gap-0.5">${[...all].sort((a, b2) => a.Names.localeCompare(b2.Names)).map((c) => `<span title="${esc(c.Names)}: ${esc(status(c)[0])}" class="h-3 w-1.5 rounded-[1px] ${TONE[busy.has(c.ID) ? "busy" : tone(c)][0]}"></span>`).join("")}</span>` : "";
+    const strip = k ? `<span aria-hidden="true" data-strip class="flex items-center gap-0.5">${[...all].sort((a, b2) => a.Names.localeCompare(b2.Names)).map((c) => `<span title="${esc(c.Names)}: ${esc(status(c)[0])}" class="h-3 w-1.5 rounded-[1px] ${TONE[busy.has(c.ID) ? "busy" : toneOf(c)][0]}"></span>`).join("")}</span>` : "";
     return `<tr data-key="g:${ek}" role="row" class="max-sm:block"><th role="columnheader" colspan="5" scope="colgroup" class="max-sm:block px-4 pt-3 pb-2.5 text-left font-normal border-t border-line-strong bg-raised">
     <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
       <span class="font-mono text-group font-semibold ${k ? "text-fg-strong" : "text-fg-soft"}">${label}</span>${strip}
@@ -13100,7 +13101,7 @@ ${WIDE.matches ? "" : `
       $2("#dlg-acts").innerHTML = "";
       return;
     }
-    const b2 = busy.get(c.ID), tn2 = TONE[b2 ? "busy" : tone(c)], st2 = status(c, facts[tailKey(c)]);
+    const b2 = busy.get(c.ID), tn2 = TONE[b2 ? "busy" : toneOf(c)], st2 = status(c, facts[tailKey(c)]);
     $2("#procs").hidden = c.State !== "running";
     const h2 = hasHealth(c) && health[c.ID + c.Status];
     if (hasHealth(c) && !h2) loadHealth(c.ID);
