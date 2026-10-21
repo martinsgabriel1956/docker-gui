@@ -42,7 +42,7 @@ A feature baixa um arquivo, ou uma pasta, de dentro do container, a partir do ca
 
 ### 3. Limites e erros
 
-1. **RF3.1** Um limite de tamanho (na casa das centenas de MB) protege a página e o app. Acima dele, a recusa vem antes de transferir, quando o tamanho é conhecido, e a mensagem traz o `docker cp` pronto.
+1. **RF3.1** Um limite de 100 MB protege a página e o app. Acima dele, a recusa vem antes de transferir, quando o tamanho é conhecido, e a mensagem traz o `docker cp` pronto.
 2. **RF3.2** Erros traduzidos: caminho não existe, sem permissão, container sumiu, tamanho acima do limite. O erro do docker fica no "ver erro".
 3. **RF3.3** Um download em andamento mostra que está acontecendo e pode ser cancelado.
 
@@ -72,3 +72,5 @@ A feature baixa um arquivo, ou uma pasta, de dentro do container, a partir do ca
 ## Histórico
 
 **2026-10-21**. Documento criado. Decisões: caminho digitado; pasta sai como `.tar`; funciona com o container parado; limite de tamanho com o `docker cp` sugerido.
+
+**2026-10-21**. RF3.1: o limite passa a ser 100 MB, nas duas versões. Na web o arquivo passa pela memória da aba (o token fica no header, sem link direto com o token na URL), e o techspec fixou o valor por isso.
