@@ -5,9 +5,11 @@
 pub mod cli;
 pub mod i18n;
 mod i18n_en;
+pub mod normalize;
 pub mod page;
 pub mod pyfmt;
 pub mod router;
+pub mod validate;
 
 pub use cli::{Ctx, Output, RunError, Runner};
 pub use i18n::Lang;
