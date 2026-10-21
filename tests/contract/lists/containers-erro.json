@@ -1,0 +1,29 @@
+{
+  "desc": "daemon fora do ar: 500 com o stderr",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "",
+      "stderr": "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n",
+      "code": 1,
+      "args": [
+        "ps",
+        "-a",
+        "--format",
+        "{{json .}}"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/containers",
+    "body": null
+  },
+  "response": {
+    "status": 500,
+    "body": "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"
+  }
+}

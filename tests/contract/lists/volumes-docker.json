@@ -1,0 +1,86 @@
+{
+  "desc": "volume ls com quem usa e o tamanho do system df -v",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "{\"Name\": \"dados\", \"Driver\": \"local\"}\n{\"Name\": \"pg\", \"Driver\": \"local\"}\n{\"Name\": \"solto\"}\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "volume",
+        "ls",
+        "--format",
+        "{{json .}}"
+      ]
+    },
+    {
+      "stdout": "0123456789abfull\nabcdef012345full\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "ps",
+        "-a",
+        "-q",
+        "--no-trunc"
+      ]
+    },
+    {
+      "stdout": "[{\"Name\": \"/web\", \"Image\": \"sha256:f00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafebeef\", \"Mounts\": [{\"Type\": \"volume\", \"Name\": \"dados\"}, {\"Type\": \"bind\", \"Name\": \"\"}], \"NetworkSettings\": {\"Networks\": {\"bridge\": {}, \"loja_default\": {}}}}, {\"Name\": \"/db\", \"Image\": \"sha256:f00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafebeef\", \"Mounts\": [{\"Type\": \"volume\", \"Name\": \"pg\"}], \"NetworkSettings\": {\"Networks\": {\"loja_default\": {}}}}]",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "container",
+        "inspect",
+        "0123456789abfull",
+        "abcdef012345full"
+      ]
+    },
+    {
+      "stdout": "[{\"Name\": \"dados\", \"Size\": \"52.56MB\"}, {\"Name\": \"pg\", \"Size\": \"1GB\"}]\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "system",
+        "df",
+        "-v",
+        "--format",
+        "{{json .Volumes}}"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/volumes",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": [
+      {
+        "Name": "dados",
+        "Driver": "local",
+        "Size": "52.56MB",
+        "Containers": [
+          "web"
+        ]
+      },
+      {
+        "Name": "pg",
+        "Driver": "local",
+        "Size": "1GB",
+        "Containers": [
+          "db"
+        ]
+      },
+      {
+        "Name": "solto",
+        "Driver": "",
+        "Size": "",
+        "Containers": []
+      }
+    ]
+  }
+}

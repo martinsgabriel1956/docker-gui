@@ -1,0 +1,39 @@
+{
+  "desc": "podman stats --format json: cpu_percent, net_io… viram os nomes do docker",
+  "lang": "pt",
+  "cli": [
+    "podman"
+  ],
+  "calls": [
+    {
+      "stdout": "[{\"id\": \"9f8e7d6c5b4a\", \"name\": \"web\", \"cpu_percent\": \"1.50%\", \"mem_usage\": \"20MB / 8GB\", \"mem_percent\": \"0.25%\", \"net_io\": \"3kB / 1kB\", \"block_io\": \"0B / 0B\"}]",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "stats",
+        "--no-stream",
+        "--format",
+        "json"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/stats",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": [
+      {
+        "ID": "9f8e7d6c5b4a",
+        "Name": "web",
+        "CPUPerc": "1.50%",
+        "MemUsage": "20MB / 8GB",
+        "MemPerc": "0.25%",
+        "NetIO": "3kB / 1kB",
+        "BlockIO": "0B / 0B"
+      }
+    ]
+  }
+}

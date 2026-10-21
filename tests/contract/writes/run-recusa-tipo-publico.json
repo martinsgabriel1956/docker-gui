@@ -1,0 +1,20 @@
+{
+  "desc": "run recusado (tipo-publico): 400 sem chamar o docker",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [],
+  "request": {
+    "method": "POST",
+    "path": "/api/run",
+    "body": {
+      "image": "nginx",
+      "all_interfaces": "sim"
+    }
+  },
+  "response": {
+    "status": 400,
+    "body": "all_interfaces: tipo inválido"
+  }
+}

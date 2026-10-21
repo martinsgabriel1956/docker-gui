@@ -1,0 +1,34 @@
+{
+  "desc": "mensagem em inglês",
+  "lang": "en",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "[\"loja\", \"/srv/loja\", \"/srv/loja/compose.yml,/srv/loja/compose.override.yml\", \"api\"]\n[\"loja\", \"/srv/loja\", \"/srv/loja/compose.yml,/srv/loja/compose.override.yml\", \"db\"]\n[\"outro\", \"/srv/outro\", \"/srv/outro/docker-compose.yml\", \"web\"]\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "ps",
+        "-a",
+        "--filter",
+        "label=com.docker.compose.project",
+        "--format",
+        "[{{json (.Label \"com.docker.compose.project\")}},{{json (.Label \"com.docker.compose.project.working_dir\")}},{{json (.Label \"com.docker.compose.project.config_files\")}},{{json (.Label \"com.docker.compose.service\")}}]"
+      ]
+    }
+  ],
+  "request": {
+    "method": "POST",
+    "path": "/api/compose/down",
+    "body": {
+      "project": "x",
+      "dir": "/x"
+    }
+  },
+  "response": {
+    "status": 404,
+    "body": "compose project not found"
+  }
+}

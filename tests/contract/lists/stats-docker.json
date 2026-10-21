@@ -1,0 +1,40 @@
+{
+  "desc": "docker stats passa como veio",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "{\"ID\": \"0123456789ab\", \"Name\": \"web\", \"CPUPerc\": \"0.25%\", \"MemUsage\": \"12.5MiB / 7.6GiB\", \"MemPerc\": \"0.16%\", \"NetIO\": \"1.2kB / 0B\", \"BlockIO\": \"0B / 4.1kB\", \"PIDs\": \"3\"}\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "stats",
+        "--no-stream",
+        "--format",
+        "{{json .}}"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/stats",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": [
+      {
+        "ID": "0123456789ab",
+        "Name": "web",
+        "CPUPerc": "0.25%",
+        "MemUsage": "12.5MiB / 7.6GiB",
+        "MemPerc": "0.16%",
+        "NetIO": "1.2kB / 0B",
+        "BlockIO": "0B / 4.1kB",
+        "PIDs": "3"
+      }
+    ]
+  }
+}

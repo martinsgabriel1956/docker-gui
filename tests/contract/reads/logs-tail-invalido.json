@@ -1,0 +1,17 @@
+{
+  "desc": "tail fora da lista: 400 sem chamar o docker",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [],
+  "request": {
+    "method": "GET",
+    "path": "/api/logs/0123456789ab?tail=7",
+    "body": null
+  },
+  "response": {
+    "status": 400,
+    "body": "tail inválido"
+  }
+}

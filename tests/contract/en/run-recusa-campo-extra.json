@@ -1,0 +1,22 @@
+{
+  "desc": "mensagem em inglês",
+  "lang": "en",
+  "cli": [
+    "docker"
+  ],
+  "calls": [],
+  "request": {
+    "method": "POST",
+    "path": "/api/run",
+    "body": {
+      "image": "nginx",
+      "cap_add": [
+        "ALL"
+      ]
+    }
+  },
+  "response": {
+    "status": 400,
+    "body": "unsupported field: cap_add"
+  }
+}

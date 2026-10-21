@@ -1,0 +1,17 @@
+{
+  "desc": "ID que não é hex: 404 sem chamar o docker",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [],
+  "request": {
+    "method": "GET",
+    "path": "/api/logs/WEB",
+    "body": null
+  },
+  "response": {
+    "status": 404,
+    "body": "not found"
+  }
+}

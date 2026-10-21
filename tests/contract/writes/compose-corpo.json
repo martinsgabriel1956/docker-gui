@@ -1,0 +1,19 @@
+{
+  "desc": "compose sem dir: 400",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [],
+  "request": {
+    "method": "POST",
+    "path": "/api/compose/up",
+    "body": {
+      "project": "loja"
+    }
+  },
+  "response": {
+    "status": 400,
+    "body": "corpo inválido: esperado {project, dir}"
+  }
+}

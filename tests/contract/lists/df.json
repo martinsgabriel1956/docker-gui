@@ -1,0 +1,44 @@
+{
+  "desc": "system df: um JSON por linha vira array",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "{\"Type\": \"Images\", \"TotalCount\": \"3\", \"Active\": \"1\", \"Size\": \"1.2GB\", \"Reclaimable\": \"800MB (66%)\"}\n{\"Type\": \"Containers\", \"TotalCount\": \"2\", \"Active\": \"1\", \"Size\": \"10kB\", \"Reclaimable\": \"5kB (50%)\"}\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "system",
+        "df",
+        "--format",
+        "{{json .}}"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/df",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": [
+      {
+        "Type": "Images",
+        "TotalCount": "3",
+        "Active": "1",
+        "Size": "1.2GB",
+        "Reclaimable": "800MB (66%)"
+      },
+      {
+        "Type": "Containers",
+        "TotalCount": "2",
+        "Active": "1",
+        "Size": "10kB",
+        "Reclaimable": "5kB (50%)"
+      }
+    ]
+  }
+}

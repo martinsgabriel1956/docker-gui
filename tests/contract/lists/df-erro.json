@@ -1,0 +1,29 @@
+{
+  "desc": "system df que falha: 500",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "",
+      "stderr": "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n",
+      "code": 1,
+      "args": [
+        "system",
+        "df",
+        "--format",
+        "{{json .}}"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/df",
+    "body": null
+  },
+  "response": {
+    "status": 500,
+    "body": "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"
+  }
+}

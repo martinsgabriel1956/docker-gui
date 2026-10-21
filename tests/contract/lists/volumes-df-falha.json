@@ -1,0 +1,71 @@
+{
+  "desc": "system df -v que falha: volumes sem tamanho",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "{\"Name\": \"dados\", \"Driver\": \"local\"}\n{\"Name\": \"pg\", \"Driver\": \"local\"}\n{\"Name\": \"solto\"}\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "volume",
+        "ls",
+        "--format",
+        "{{json .}}"
+      ]
+    },
+    {
+      "stdout": "",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "ps",
+        "-a",
+        "-q",
+        "--no-trunc"
+      ]
+    },
+    {
+      "stdout": "",
+      "stderr": "boom",
+      "code": 1,
+      "args": [
+        "system",
+        "df",
+        "-v",
+        "--format",
+        "{{json .Volumes}}"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/volumes",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": [
+      {
+        "Name": "dados",
+        "Driver": "local",
+        "Size": "",
+        "Containers": []
+      },
+      {
+        "Name": "pg",
+        "Driver": "local",
+        "Size": "",
+        "Containers": []
+      },
+      {
+        "Name": "solto",
+        "Driver": "",
+        "Size": "",
+        "Containers": []
+      }
+    ]
+  }
+}

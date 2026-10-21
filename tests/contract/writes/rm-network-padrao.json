@@ -1,0 +1,30 @@
+{
+  "desc": "rede padrão: 403 sem chamar o rm",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "bridge\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "network",
+        "inspect",
+        "--format",
+        "{{.Name}}",
+        "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+      ]
+    }
+  ],
+  "request": {
+    "method": "POST",
+    "path": "/api/rm/network/a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+    "body": null
+  },
+  "response": {
+    "status": 403,
+    "body": "bridge é uma rede padrão e não pode ser removida"
+  }
+}

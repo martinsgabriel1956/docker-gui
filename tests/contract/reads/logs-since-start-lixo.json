@@ -1,0 +1,29 @@
+{
+  "desc": "since=start com StartedAt estranho: 500 com a explicação",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "\"ontem\"\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "inspect",
+        "--format",
+        "{{json .State.StartedAt}}",
+        "0123456789ab"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/logs/0123456789ab?since=start",
+    "body": null
+  },
+  "response": {
+    "status": 500,
+    "body": "não consegui ler quando o container subiu"
+  }
+}

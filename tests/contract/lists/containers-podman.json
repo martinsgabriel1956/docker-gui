@@ -1,0 +1,48 @@
+{
+  "desc": "podman ps: Names em lista, portas em range com tcp,udp, Labels dict, stopped vira exited",
+  "lang": "pt",
+  "cli": [
+    "podman"
+  ],
+  "calls": [
+    {
+      "stdout": "[{\"Id\": \"9f8e7d6c5b4a9f8e7d6c5b4a9f8e7d6c5b4a9f8e7d6c5b4a9f8e7d6c5b4a3210\", \"Names\": [\"web\"], \"Image\": \"docker.io/library/nginx:latest\", \"State\": \"running\", \"Status\": \"Up 3 minutes (starting)\", \"Labels\": {\"app\": \"loja\", \"tier\": \"front\"}, \"Ports\": [{\"host_ip\": \"\", \"container_port\": 80, \"host_port\": 8080, \"range\": 2, \"protocol\": \"tcp,udp\"}]}, {\"Id\": \"1111111111112222222222223333333333334444444444445555555555556666\", \"Names\": [\"job\"], \"Image\": \"alpine\", \"State\": \"stopped\", \"Status\": \"Exited (0) 1 hour ago\", \"Labels\": null, \"Ports\": null}]",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "ps",
+        "-a",
+        "--format",
+        "json"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/containers",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": [
+      {
+        "ID": "9f8e7d6c5b4a9f8e7d6c5b4a9f8e7d6c5b4a9f8e7d6c5b4a9f8e7d6c5b4a3210",
+        "Names": "web",
+        "Image": "docker.io/library/nginx:latest",
+        "State": "running",
+        "Status": "Up 3 minutes (health: starting)",
+        "Ports": "0.0.0.0:8080-8081->80-81/tcp, 0.0.0.0:8080-8081->80-81/udp",
+        "Labels": "app=loja,tier=front"
+      },
+      {
+        "ID": "1111111111112222222222223333333333334444444444445555555555556666",
+        "Names": "job",
+        "Image": "alpine",
+        "State": "exited",
+        "Status": "Exited (0) 1 hour ago",
+        "Ports": "",
+        "Labels": ""
+      }
+    ]
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "desc": "run sem corpo: 400",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [],
+  "request": {
+    "method": "POST",
+    "path": "/api/run",
+    "body": null
+  },
+  "response": {
+    "status": 400,
+    "body": "corpo inválido: esperado JSON de até 64 KiB"
+  }
+}

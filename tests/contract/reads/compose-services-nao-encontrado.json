@@ -1,0 +1,31 @@
+{
+  "desc": "par project/dir que não existe nos labels: 404",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "[\"loja\", \"/srv/loja\", \"/srv/loja/compose.yml,/srv/loja/compose.override.yml\", \"api\"]\n[\"loja\", \"/srv/loja\", \"/srv/loja/compose.yml,/srv/loja/compose.override.yml\", \"db\"]\n[\"outro\", \"/srv/outro\", \"/srv/outro/docker-compose.yml\", \"web\"]\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "ps",
+        "-a",
+        "--filter",
+        "label=com.docker.compose.project",
+        "--format",
+        "[{{json (.Label \"com.docker.compose.project\")}},{{json (.Label \"com.docker.compose.project.working_dir\")}},{{json (.Label \"com.docker.compose.project.config_files\")}},{{json (.Label \"com.docker.compose.service\")}}]"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/compose/services?project=loja&dir=%2Ftmp",
+    "body": null
+  },
+  "response": {
+    "status": 404,
+    "body": "projeto compose não encontrado"
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "desc": "histórico: só start/die/oom/health, com código e saúde; exec e lixo ficam de fora",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "{\"Action\": \"start\", \"time\": 1699990000, \"Actor\": {\"Attributes\": {\"name\": \"web\"}}}\n{\"Action\": \"exec_start: sh -c curl\", \"time\": 1699990001}\n{\"Action\": \"health_status: unhealthy\", \"time\": 1699990010}\n{\"Action\": \"die\", \"time\": 1699990020, \"Actor\": {\"Attributes\": {\"exitCode\": \"137\"}}}\n{\"status\": \"oom\", \"time\": 1699990019}\nlixo\n[1, 2]\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "events",
+        "--since",
+        "24h",
+        "--until",
+        "1700000001",
+        "--filter",
+        "container=0123456789ab",
+        "--filter",
+        "type=container",
+        "--format",
+        "{{json .}}"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/history/0123456789ab",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": [
+      {
+        "t": 1699990000,
+        "a": "start",
+        "code": null,
+        "health": ""
+      },
+      {
+        "t": 1699990010,
+        "a": "health_status",
+        "code": null,
+        "health": "unhealthy"
+      },
+      {
+        "t": 1699990020,
+        "a": "die",
+        "code": 137,
+        "health": ""
+      },
+      {
+        "t": 1699990019,
+        "a": "oom",
+        "code": null,
+        "health": ""
+      }
+    ]
+  }
+}

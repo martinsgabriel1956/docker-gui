@@ -1,0 +1,17 @@
+{
+  "desc": "tipo de limpeza fora da lista: 404",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [],
+  "request": {
+    "method": "POST",
+    "path": "/api/prune/system",
+    "body": null
+  },
+  "response": {
+    "status": 404,
+    "body": "not found"
+  }
+}

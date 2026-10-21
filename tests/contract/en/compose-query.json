@@ -1,0 +1,17 @@
+{
+  "desc": "mensagem em inglês",
+  "lang": "en",
+  "cli": [
+    "docker"
+  ],
+  "calls": [],
+  "request": {
+    "method": "GET",
+    "path": "/api/compose/logs?dir=%2Fx",
+    "body": null
+  },
+  "response": {
+    "status": 400,
+    "body": "invalid query: expected ?project=...&dir=..."
+  }
+}

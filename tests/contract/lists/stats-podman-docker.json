@@ -1,0 +1,39 @@
+{
+  "desc": "podman-docker ({{json .}}): struct crua com números vira o formato do docker",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "{\"ContainerID\": \"9f8e7d6c5b4a9f8e7d6c5b4a9f8e7d6c5b4a9f8e7d6c5b4a9f8e7d6c5b4a3210\", \"Name\": \"web\", \"CPU\": 2.345, \"MemUsage\": 10485760, \"MemLimit\": 8000000000, \"MemPerc\": 0.131, \"Network\": {\"eth0\": {\"RxBytes\": 1500, \"TxBytes\": 999}, \"eth1\": {\"RxBytes\": 500, \"TxBytes\": 1}}, \"BlockInput\": 0, \"BlockOutput\": 123456}\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "stats",
+        "--no-stream",
+        "--format",
+        "{{json .}}"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/stats",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": [
+      {
+        "ID": "9f8e7d6c5b4a",
+        "Name": "web",
+        "CPUPerc": "2.35%",
+        "MemUsage": "10.49MB / 8GB",
+        "MemPerc": "0.13%",
+        "NetIO": "2kB / 1kB",
+        "BlockIO": "0B / 123.5kB"
+      }
+    ]
+  }
+}

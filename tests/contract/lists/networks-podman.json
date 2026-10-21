@@ -1,0 +1,58 @@
+{
+  "desc": "podman 4: chaves minúsculas, sem escopo",
+  "lang": "pt",
+  "cli": [
+    "podman"
+  ],
+  "calls": [
+    {
+      "stdout": "[{\"id\": \"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\", \"name\": \"podman\", \"driver\": \"bridge\"}, {\"name\": \"semid\", \"driver\": \"macvlan\"}]",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "network",
+        "ls",
+        "--no-trunc",
+        "--format",
+        "json"
+      ]
+    },
+    {
+      "stdout": "",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "ps",
+        "-a",
+        "-q",
+        "--no-trunc"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/networks",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": [
+      {
+        "ID": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "Name": "podman",
+        "Driver": "bridge",
+        "Scope": "local",
+        "Builtin": true,
+        "Containers": []
+      },
+      {
+        "ID": "",
+        "Name": "semid",
+        "Driver": "macvlan",
+        "Scope": "local",
+        "Builtin": false,
+        "Containers": []
+      }
+    ]
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "desc": "mensagem em inglês",
+  "lang": "en",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "host\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "network",
+        "inspect",
+        "--format",
+        "{{.Name}}",
+        "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+      ]
+    }
+  ],
+  "request": {
+    "method": "POST",
+    "path": "/api/rm/network/a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+    "body": null
+  },
+  "response": {
+    "status": 403,
+    "body": "host is a default network and cannot be removed"
+  }
+}

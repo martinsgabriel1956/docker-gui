@@ -1,0 +1,28 @@
+{
+  "desc": "limpeza de volumes",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "Deleted: x\nTotal reclaimed space: 1.2GB\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "volume",
+        "prune",
+        "-f"
+      ]
+    }
+  ],
+  "request": {
+    "method": "POST",
+    "path": "/api/prune/volumes",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": "Deleted: x\nTotal reclaimed space: 1.2GB"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "desc": "compose pull sem project: 400",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [],
+  "request": {
+    "method": "POST",
+    "path": "/api/compose/pull",
+    "body": {
+      "dir": "/srv/loja"
+    }
+  },
+  "response": {
+    "status": 400,
+    "body": "corpo inválido: esperado {project, dir}"
+  }
+}

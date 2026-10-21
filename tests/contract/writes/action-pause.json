@@ -1,0 +1,27 @@
+{
+  "desc": "pause: docker pause <id>",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "0123456789ab\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "pause",
+        "0123456789ab"
+      ]
+    }
+  ],
+  "request": {
+    "method": "POST",
+    "path": "/api/pause/0123456789ab",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": ""
+  }
+}

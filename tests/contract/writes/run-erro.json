@@ -1,0 +1,37 @@
+{
+  "desc": "run que falha: 500 com o stderr",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "",
+      "stderr": "docker: Error response from daemon: port is already allocated.\n",
+      "code": 1,
+      "args": [
+        "run",
+        "-d",
+        "--restart=no",
+        "-p",
+        "127.0.0.1:80:80/tcp",
+        "--",
+        "nginx"
+      ]
+    }
+  ],
+  "request": {
+    "method": "POST",
+    "path": "/api/run",
+    "body": {
+      "image": "nginx",
+      "ports": [
+        "80:80"
+      ]
+    }
+  },
+  "response": {
+    "status": 500,
+    "body": "docker: Error response from daemon: port is already allocated."
+  }
+}
