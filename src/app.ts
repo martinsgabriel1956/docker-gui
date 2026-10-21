@@ -212,9 +212,13 @@ function notify(cs: Container[]) {
     cs.length === 1 ? status(cs[0])[0] : cs.map(c => c.Names).join(', '), () => focus());
 }
 
-// favicon: o prompt (>_) no ciano do acento, com a contagem da faixa de atenção por cima ("!" quando os dados estão velhos)
+// ícone do Stivo (src-tauri/icons/stivo.svg: a pilha de contêineres com o cursor na última linha), com a contagem da
+// faixa de atenção por cima ("!" quando os dados estão velhos). Na web vira o favicon; no desktop, a bandeja
+const ICON = '<rect x="1" y="1" width="22" height="22" rx="5" fill="#141a22"/><rect x="5" y="5.4" width="14" height="3.6" rx="1" fill="#3fd0dc"/>'
+  + '<rect x="5" y="10.2" width="14" height="3.6" rx="1" fill="#566273"/><rect x="5" y="15" width="8.6" height="3.6" rx="1" fill="#566273"/>'
+  + '<rect x="15.2" y="15" width="2.6" height="3.6" rx="0.6" fill="#3fd0dc"/>';
 function setIcon(badge: string) {
-  T.attention(badge, `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"><rect x="1" y="2.5" width="22" height="19" rx="3" fill="#141a22"/><path d="M5.5 8.5 9.5 12l-4 3.5M11.5 16h6" stroke="#3fd0dc" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>${badge
+  T.attention(badge, `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none">${ICON}${badge
     ? `<circle cx="16.5" cy="16.5" r="7.5" fill="#dc2626" stroke="none"/><text x="16.5" y="20" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="700" fill="#fff" stroke="none">${badge}</text>` : ''}</svg>`);
 }
 

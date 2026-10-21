@@ -38,7 +38,7 @@ Duas formas, o mesmo produto. A versão web é um arquivo Python só, que usa s�
 
 - Nome: **Stivo** (de "estiva", o ofício de arrumar contêineres no porto), nas duas versões. Substitui "Docker GUI", que as [diretrizes de marca da Docker](https://www.docker.com/legal/trademark-guidelines/) não permitem em nome de produto; "Docker" e "Podman" só aparecem como compatibilidade ("para Docker e Podman"), nunca no nome, e nada de baleia ou derivados. Pendente: busca de marca no INPI e no USPTO (classe 9) antes da primeira release. Identificadores técnicos (`docker_gui.py`, `DOCKER_GUI_*`, `X-Docker-GUI-Token`, chaves `docker-gui-*`) não são nome de produto e ficam como estão.
 - Sem logotipo (o nome não vira marca gráfica).
-- Ícone: decisão em aberto. O desktop precisa de um ícone próprio (menu do sistema e bandeja, com a contagem da faixa de atenção). Será um ícone novo, a desenhar; o favicon `>_` atual não é compromisso.
+- Ícone: "Estiva", uma pilha de contêineres em que a última linha é o cursor do terminal (`src-tauri/icons/stivo.svg`). É o mesmo desenho no app, no menu do sistema, na bandeja e no favicon da web; nada de baleia ou derivados.
 - Voz: pt-BR direto (em inglês, o mesmo tom), frases curtas, verbos do CLI literais nos menus, confirmações que dizem o que sai e o que fica.
 
 ## Evidence on Hand

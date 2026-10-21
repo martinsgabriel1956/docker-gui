@@ -129,3 +129,5 @@ O produto passa a se chamar **Stivo** nas duas versões, porque "Docker GUI" usa
 **2026-10-21**. Documento criado.
 
 **2026-10-21**. Nome do produto: Stivo (seção 6, RF6.1 a RF6.3), no lugar de "Docker GUI", por causa das diretrizes de marca da Docker; distribuição renumerada para a seção 7 (RF7.x). Busca de marca no INPI e no USPTO pendente.
+
+**2026-10-21**. Ícone escolhido: "Estiva" (pilha de contêineres com o cursor na última linha), entre três direções; registrado no PRODUCT.md e no DESIGN.md.
