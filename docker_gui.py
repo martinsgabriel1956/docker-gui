@@ -2111,10 +2111,12 @@ PAGE = r"""<!doctype html>
   var BUCKET_OF_STATE = { running: "rodando", paused: "pausado", restarting: "reiniciando" };
   var bucket = (c) => ["bad", "warn"].includes(tone(c)) ? "problema" : BUCKET_OF_STATE[c.State] || "parado";
   var isProblem = (c) => bucket(c) === "problema";
-  var newProblems = (before, cs2) => before ? cs2.filter((c) => isProblem(c) && !before.has(c.ID)) : [];
+  var newProblems = (before, cs2, is2 = isProblem) => before ? cs2.filter((c) => is2(c) && !before.has(c.ID)) : [];
   var project = (c) => (c.Labels || "").match(/(?:^|,)com\.docker\.compose\.project=([^,]*)/)?.[1] || "";
   var workingDir = (c) => (c.Labels || "").match(/(?:^|,)com\.docker\.compose\.project\.working_dir=([^,]*)/)?.[1] || "";
   var service = (c) => (c.Labels || "").match(/(?:^|,)com\.docker\.compose\.service=([^,]*)/)?.[1] || "";
+  var DEP = "[^,=:]+:[^,=:]+(?::(?:true|false))?";
+  var DEPS_RE = new RegExp(`(?:^|,)com\\.docker\\.compose\\.depends_on=(${DEP}(?:,${DEP})*)`);
   function logServices(p, cs2) {
     const m = /* @__PURE__ */ new Map();
     for (const c of cs2) {

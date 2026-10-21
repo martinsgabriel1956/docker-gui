@@ -514,3 +514,52 @@ test('healthSummary conta as falhas', () => {
   assert.equal(f.healthSummary([probe(0), probe(0)]), 'as 2 passaram');
   assert.equal(f.healthSummary([]), '');
 });
+
+const dep = (Names, State, Status, deps = '', svc = Names) => ({ID: Names, Names, State, Status,
+  Labels: `${deps ? `com.docker.compose.depends_on=${deps},` : ''}com.docker.compose.project=shop,com.docker.compose.service=${svc}`});
+
+test('dependsOn lê o depends_on com 2 ou 3 campos e para no próximo label', () => {
+  assert.deepEqual(f.dependsOn(dep('api', 'created', 'Created', 'db:service_healthy:false,redis:service_started:true')),
+    [{service: 'db', cond: 'service_healthy'}, {service: 'redis', cond: 'service_started'}]);
+  assert.deepEqual(f.dependsOn(dep('api', 'created', 'Created', 'migrate:service_completed_successfully')),
+    [{service: 'migrate', cond: 'service_completed_successfully'}]);
+  assert.deepEqual(f.dependsOn(dep('api', 'created', 'Created', 'db:outra_coisa:false')), [{service: 'db', cond: 'service_started'}]);
+  assert.deepEqual(f.dependsOn(dep('api', 'running', 'Up 1 minute')), []);
+  assert.deepEqual(f.dependsOn({Labels: 'xcom.docker.compose.depends_on=db:service_started:false'}), []);
+});
+
+test('depState confere a dependência contra a condição', () => {
+  const st = (cond, ...cs) => f.depState({service: 'db', cond}, 'shop', cs);
+  assert.equal(st('service_started', dep('db', 'running', 'Up 1 minute (unhealthy)')), null);
+  assert.equal(st('service_healthy', dep('db', 'running', 'Up 1 minute (unhealthy)')), 'unhealthy');
+  assert.equal(st('service_healthy', dep('db', 'running', 'Up 2 seconds (health: starting)')), null);  // espera normal do up
+  assert.equal(st('service_healthy', dep('db', 'running', 'Up 1 minute')), null);  // sem healthcheck
+  assert.equal(st('service_started', dep('db', 'exited', 'Exited (1) 1 minute ago')), 'exited');
+  assert.equal(st('service_started', dep('db', 'restarting', 'Restarting (1) 2 seconds ago')), 'exited');
+  assert.equal(st('service_started', dep('db', 'exited', 'Exited (0) 1 minute ago')), 'stopped');
+  assert.equal(st('service_completed_successfully', dep('db', 'exited', 'Exited (0) 1 minute ago')), null);
+  assert.equal(st('service_completed_successfully', dep('db', 'exited', 'Exited (2) 1 minute ago')), 'exited');
+  assert.equal(st('service_completed_successfully', dep('db', 'running', 'Up 3 seconds')), null);  // ainda migrando
+  assert.equal(st('service_started'), 'missing');
+  // réplicas: basta uma que cumpra
+  assert.equal(st('service_started', dep('db-1', 'exited', 'Exited (1) 1 minute ago', '', 'db'), dep('db-2', 'running', 'Up 1 minute', '', 'db')), null);
+});
+
+test('blockers, held e holds ligam o dependente à causa', () => {
+  const db = dep('db', 'running', 'Up 1 minute (unhealthy)');
+  const api = dep('api', 'created', 'Created', 'db:service_healthy:false,cache:service_started:false');
+  const web = dep('web', 'running', 'Up 1 minute', 'api:service_started:false');
+  const cs = [db, api, web];
+  assert.deepEqual(f.blockers(api, cs).map(b => [b.service, b.state, b.c?.ID]), [['db', 'unhealthy', 'db'], ['cache', 'missing', undefined]]);
+  assert.equal(f.held(api, cs), true);
+  assert.deepEqual(f.blockers(web, cs), []);  // de pé e bem: ninguém o segura
+  assert.equal(f.held(dep('api', 'created', 'Created'), cs), false);  // criado à mão, sem dependência quebrada
+  assert.deepEqual(f.holds(db, cs).map(c => c.Names), ['api']);
+  assert.deepEqual(f.holds(dep('solto', 'running', 'Up 1 minute (unhealthy)'), cs), []);
+});
+
+test('newProblems aceita outro critério de entrada na faixa', () => {
+  const api = c('created', 'Created', {ID: 'a'});
+  assert.deepEqual(f.newProblems(new Set(), [api]), []);
+  assert.deepEqual(f.newProblems(new Set(), [api], () => true), [api]);
+});

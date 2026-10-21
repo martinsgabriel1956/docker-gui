@@ -59,8 +59,8 @@ export const bucket = (c: Container): Bucket =>
 export const isProblem = (c: Container): boolean => bucket(c) === 'problema';
 // quem entrou na faixa de atenção desde a leitura anterior (IDs que já estavam nela); null = primeira leitura,
 // que só serve de base: o que já estava com problema ao abrir a página não vira notificação
-export const newProblems = (before: Set<string> | null, cs: Container[]): Container[] =>
-  before ? cs.filter(c => isProblem(c) && !before.has(c.ID)) : [];
+export const newProblems = (before: Set<string> | null, cs: Container[], is: (c: Container) => boolean = isProblem): Container[] =>
+  before ? cs.filter(c => is(c) && !before.has(c.ID)) : [];
 // depends_on tem vírgulas no valor, então não dá para fazer split nos Labels; regex só no project
 export const project = (c: Pick<Container, 'Labels'>): string =>
   (c.Labels || '').match(/(?:^|,)com\.docker\.compose\.project=([^,]*)/)?.[1] || '';
@@ -70,6 +70,55 @@ export const workingDir = (c: Pick<Container, 'Labels'>): string =>
 // serviço do compose (vai para o compose restart; o servidor confere contra os serviços do projeto)
 export const service = (c: Pick<Container, 'Labels'>): string =>
   (c.Labels || '').match(/(?:^|,)com\.docker\.compose\.service=([^,]*)/)?.[1] || '';
+
+// depends_on do compose: "db:service_healthy:false,redis:service_started:false". O 3º campo (restart) entrou no Compose 2.17
+// e é opcional. O valor tem vírgulas: a regex vai até o próximo ",chave=", que não casa com "nome:condição"
+const DEP = '[^,=:]+:[^,=:]+(?::(?:true|false))?';
+const DEPS_RE = new RegExp(`(?:^|,)com\\.docker\\.compose\\.depends_on=(${DEP}(?:,${DEP})*)`);
+export type Cond = 'service_started' | 'service_healthy' | 'service_completed_successfully';
+export type Dep = {service: string; cond: Cond};
+const CONDS: readonly string[] = ['service_started', 'service_healthy', 'service_completed_successfully'];
+export function dependsOn(c: Pick<Container, 'Labels'>): Dep[] {
+  const v = (c.Labels || '').match(DEPS_RE)?.[1];
+  return !v ? [] : v.split(',').map(d => {
+    const [service, cond] = d.split(':');
+    return {service, cond: (CONDS.includes(cond) ? cond : 'service_started') as Cond};  // condição desconhecida: a mais branda
+  });
+}
+
+// por que a dependência não cumpre a condição; null = cumpre. "verificando saúde" e um migrate ainda rodando são a espera
+// normal de um compose up: não seguram ninguém (senão cada up acenderia a faixa)
+export type DepState = 'unhealthy' | 'exited' | 'stopped' | 'missing';
+function oneState(c: Container, cond: Cond): DepState | null {
+  if (c.State === 'running') return cond === 'service_healthy' && /\(unhealthy\)/.test(c.Status) ? 'unhealthy' : null;
+  if (cond === 'service_completed_successfully' && /^Exited \(0\)/.test(c.Status)) return null;
+  if (c.State === 'restarting' && !restartCode(c)) return null;  // voltando, sem crash
+  return tone(c) === 'bad' ? 'exited' : 'stopped';
+}
+export function depState(d: Dep, p: string, cs: Container[]): DepState | null {
+  const st = cs.filter(c => project(c) === p && service(c) === d.service).map(c => oneState(c, d.cond));
+  if (!st.length) return 'missing';
+  return st.includes(null) ? null : st.find(s => s === 'unhealthy' || s === 'exited') ?? st[0];  // réplicas: basta uma
+}
+
+// as dependências diretas que seguram o container. Container de pé e bem não é segurado por ninguém.
+// ponytail: O(n) por container, O(n²) por render; listas locais têm dezenas de containers
+export type Blocker = {service: string; state: DepState; c?: Container};
+export function blockers(c: Container, cs: Container[]): Blocker[] {
+  const p = project(c);
+  if (!p || (c.State === 'running' && !isProblem(c))) return [];
+  return dependsOn(c).flatMap(d => {
+    const state = depState(d, p, cs);
+    return state ? [{service: d.service, state, c: cs.find(x => project(x) === p && service(x) === d.service)}] : [];
+  });
+}
+// "Created" esperando uma dependência quebrada: entra na faixa (o criado à mão, sem causa, continua parado)
+export const held = (c: Container, cs: Container[]): boolean => c.State === 'created' && blockers(c, cs).length > 0;
+// quem este container segura (no mesmo projeto)
+export function holds(c: Container, cs: Container[]): Container[] {
+  const p = project(c), s = service(c);
+  return !p ? [] : cs.filter(d => d.ID !== c.ID && project(d) === p && blockers(d, cs).some(b => b.service === s));
+}
 // prefixo do `docker compose logs` -> serviço, para os containers do projeto p. O compose escreve o nome do container
 // sem o projeto quando é o nome padrão ("shop-api-2" -> "api-2"), e o nome inteiro com container_name ("postgres-17"):
 // só o nome e o label dizem qual dos dois é, o "-<número>" no fim do prefixo não
