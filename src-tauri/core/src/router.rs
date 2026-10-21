@@ -449,6 +449,11 @@ pub(crate) async fn compose_query(ctx: &Ctx, query: &str) -> Step<Vec<String>> {
     compose_base(ctx, &project, &dir, None).await
 }
 
+/// O par {project, dir} existe nos labels dos containers? (o "Abrir pasta" do desktop: abre só o que o compose declarou)
+pub async fn compose_project(ctx: &Ctx, project: &str, dir: &str) -> Result<(), Response> {
+    compose_base(ctx, project, dir, None).await.map(|_| ())
+}
+
 /// Começo do argv (compose -p, --project-directory e os -f) montado só com os labels dos containers: o par
 /// {project, dir} tem que existir neles e o service, se veio, ser um dos serviços desse projeto
 pub(crate) async fn compose_base(ctx: &Ctx, project: &str, wd: &str, service: Option<&str>) -> Step<Vec<String>> {
@@ -489,4 +494,36 @@ pub(crate) async fn compose_services(ctx: &Ctx, base: &[String]) -> Step<Vec<Str
         return Err(reply(500, r.stderr.trim()));
     }
     Ok(r.stdout.split_whitespace().map(String::from).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use super::*;
+    use crate::cli::{Output, RunError, Runner};
+    use crate::i18n::Lang;
+
+    /// devolve sempre o mesmo `ps` (as linhas do COMPOSE_FORMAT)
+    struct Ps(&'static str);
+
+    #[async_trait::async_trait]
+    impl Runner for Ps {
+        async fn run(&self, _: &[String], _: &[String], _: Duration) -> Result<Output, RunError> {
+            Ok(Output { code: 0, stdout: self.0.into(), stderr: String::new() })
+        }
+        fn command(&self, _: &[String], _: &[String]) -> tokio::process::Command {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn compose_project_only_what_the_labels_say() {
+        let runner = Arc::new(Ps("[\"shop\",\"/srv/shop\",\"\",\"api\"]\n"));
+        let ctx = Ctx { cli: vec!["docker".into()], lang: Lang::Pt, runner, now: Arc::new(|| 0.0) };
+        assert!(compose_project(&ctx, "shop", "/srv/shop").await.is_ok());
+        assert_eq!(compose_project(&ctx, "shop", "/etc").await.unwrap_err().status, 404);
+        assert_eq!(compose_project(&ctx, "outro", "/srv/shop").await.unwrap_err().status, 404);
+    }
 }
