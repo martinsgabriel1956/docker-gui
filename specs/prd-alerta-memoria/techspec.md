@@ -136,3 +136,9 @@ Nada novo. A rota segue a regra de log do projeto (sem argumentos nem dados de c
 - A entrada na faixa no `app.ts` passou a ser `attention(c)` (`isProblem` ou "Created" segurado), e o `newProblems` recebe esse critério.
 - O filtro e as contagens usam o `bucketOf`.
 - As causas deste techspec (`causes`, `alertKey`) precisam partir desse critério, não só do `isProblem`, e o `bucketOf` precisa contar o `mem`.
+
+**2026-10-21**. Durante o sdd-tasks:
+- A rota lê `info --format {{json .}}` e pega `MemTotal` (Docker) ou `host.memTotal` (Podman). Um `--format` por CLI falharia no podman-docker, que o nome do binário não denuncia.
+- `causes`/`alertKey` viram o critério que já existe depois da dependência do compose: `attention` (grave ou memória), a chave `ID` ou `ID:mem`, e o `newProblems` com o parâmetro da chave.
+- A primeira leitura do stats com a RAM total é a base. Quem já está em 90% ou mais fica quente na hora e não notifica.
+- Entram também a T6 (README, inclusive das duas features anteriores, que ficaram sem ele) e a medição do desktop (T5).
