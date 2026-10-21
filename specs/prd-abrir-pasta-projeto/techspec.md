@@ -106,3 +106,8 @@ Nenhum. Na web não há rota (só clipboard). No desktop é um comando da IPC fo
 ## Histórico
 
 **2026-10-21**. Documento criado.
+
+**2026-10-21**. Durante o sdd-tasks:
+- A conferência dos labels vira `stivo_core::router::compose_project` (público, com teste unitário), em vez de testar o `open_dir` com o opener injetado.
+- O smoke do desktop não ganha o caso da pasta: ele dirige a janela só pelo X, e o item do menu por coordenada seria frágil. A chamada ao opener entra no checklist manual da release.
+- As mensagens do `open_dir` ficam no app, em pt e en, como as do `prefs.rs`.
