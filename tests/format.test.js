@@ -609,3 +609,31 @@ test('diffSummary conta por tipo, com singular e plural', () => {
   assert.equal(f.diffSummary([d('C'), d('C')]), '2 alterados');
   assert.equal(f.diffSummary([]), '');
 });
+
+test('withTag põe o latest quando falta tag (e respeita porta e digest)', () => {
+  assert.equal(f.withTag('postgres'), 'postgres:latest');
+  assert.equal(f.withTag('postgres:17'), 'postgres:17');
+  assert.equal(f.withTag('localhost:5000/app'), 'localhost:5000/app:latest');  // o ":5000" é a porta, não a tag
+  assert.equal(f.withTag('app@sha256:' + 'a'.repeat(64)), 'app@sha256:' + 'a'.repeat(64));
+});
+
+test('sameRef casa a tag da lista com a digitada, com o prefixo do Docker Hub do podman', () => {
+  assert.ok(f.sameRef('postgres:17', 'postgres:17'));
+  assert.ok(f.sameRef('docker.io/library/postgres:17', 'postgres:17'));
+  assert.ok(f.sameRef('docker.io/acme/api:1', 'acme/api:1'));
+  assert.ok(!f.sameRef('postgres:16', 'postgres:17'));
+});
+
+test('pullOutcome compara o ID da tag antes e depois', () => {
+  assert.equal(f.pullOutcome(null, 'sha256:a'), 'new');
+  assert.equal(f.pullOutcome('sha256:a', 'sha256:a'), 'same');
+  assert.equal(f.pullOutcome('sha256:a', 'sha256:b'), 'updated');
+  assert.equal(f.pullOutcome(null, null), 'missing');  // por digest, ou tag que a lista mostra de outro jeito
+});
+
+test('imageOk segue a regra do run', () => {
+  assert.ok(f.imageOk('postgres:17'));
+  assert.ok(!f.imageOk('Postgres'));
+  assert.ok(!f.imageOk('-v'));
+  assert.ok(!f.imageOk('a'.repeat(513)));
+});

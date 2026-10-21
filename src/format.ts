@@ -422,6 +422,17 @@ const PORT_RE = /^([0-9]{1,5}):([0-9]{1,5})(?:\/(tcp|udp))?$/;
 const ENV_RE = /^[A-Za-z_][A-Za-z0-9_]{0,255}$/;
 const VOLUME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{1,127}:((?:\/[A-Za-z0-9._@+-]+)+)$/;
 export const MAX_ENV_VALUE = 4096, MAX_ITEMS = 64;
+// a regra de referência de imagem do run e do pull (o image_ok dos servidores, que conferem de novo)
+export const imageOk = (image: string): boolean => image.length <= 512 && IMAGE_RE.test(image);
+// a referência com a tag explícita: sem tag (nem digest), o docker usa a latest. O ":" depois da última "/" é tag;
+// antes dela, é a porta do registry
+export const withTag = (ref: string): string => /@sha256:|:[^/]*$/.test(ref) ? ref : `${ref}:latest`;
+// a tag da lista é a digitada? O podman lista as do Docker Hub com o prefixo (docker.io/library/postgres:17)
+export const sameRef = (tag: string, ref: string): boolean =>
+  [ref, `docker.io/${ref}`, `docker.io/library/${ref}`].includes(tag);
+// o que o pull fez com a tag, pelo ID antes e depois (vale para docker e podman, sem ler o texto de status)
+export const pullOutcome = (before: string | null, after: string | null): 'new' | 'updated' | 'same' | 'missing' =>
+  !after ? 'missing' : !before ? 'new' : before === after ? 'same' : 'updated';
 
 // "8080:80, 5353:53/udp" -> ["8080:80", "5353:53/udp"]
 export const splitPorts = (s: string): string[] => s.split(/[\s,]+/).filter(Boolean);
@@ -433,7 +444,7 @@ export function runSpec(f: RunForm): {spec: RunSpec; errors: RunErrors} {
   const errors: RunErrors = {}, image = f.image.trim(), name = f.name.trim(), volume = f.volume.trim();
   const ports = splitPorts(f.ports), env = splitEnv(f.env);
   if (!image) errors.image = t`Informe a imagem, ex.: nginx:1.27 ou ghcr.io/acme/api:1.4.`;
-  else if (image.length > 512 || !IMAGE_RE.test(image)) errors.image = t`Imagem inválida: use repo[:tag] ou repo@sha256:…, com o caminho em minúsculas.`;
+  else if (!imageOk(image)) errors.image = t`Imagem inválida: use repo[:tag] ou repo@sha256:…, com o caminho em minúsculas.`;
   if (name && !NAME_RE.test(name)) errors.name = t`Nome inválido: 2 a 128 caracteres entre letras, números, _ . e -, começando por letra ou número.`;
 
   const seen = new Set<string>();

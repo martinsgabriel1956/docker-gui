@@ -1174,13 +1174,14 @@
   var VOLUME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{1,127}:((?:\/[A-Za-z0-9._@+-]+)+)$/;
   var MAX_ENV_VALUE = 4096;
   var MAX_ITEMS = 64;
+  var imageOk = (image) => image.length <= 512 && IMAGE_RE.test(image);
   var splitPorts = (s15) => s15.split(/[\s,]+/).filter(Boolean);
   var splitEnv = (s15) => s15.split(/\r?\n/).filter((l) => l.trim() && !l.trimStart().startsWith("#"));
   function runSpec(f) {
     const errors2 = {}, image = f.image.trim(), name = f.name.trim(), volume = f.volume.trim();
     const ports2 = splitPorts(f.ports), env = splitEnv(f.env);
     if (!image) errors2.image = t`Informe a imagem, ex.: nginx:1.27 ou ghcr.io/acme/api:1.4.`;
-    else if (image.length > 512 || !IMAGE_RE.test(image)) errors2.image = t`Imagem inválida: use repo[:tag] ou repo@sha256:…, com o caminho em minúsculas.`;
+    else if (!imageOk(image)) errors2.image = t`Imagem inválida: use repo[:tag] ou repo@sha256:…, com o caminho em minúsculas.`;
     if (name && !NAME_RE.test(name)) errors2.name = t`Nome inválido: 2 a 128 caracteres entre letras, números, _ . e -, começando por letra ou número.`;
     const seen2 = /* @__PURE__ */ new Set();
     for (const p of ports2) {
