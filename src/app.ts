@@ -1,7 +1,7 @@
 import {
-  type Blocker, type Bucket, type Container, type ContainerState, type DepState, type DiskUsage, type Facts, type HistoryEvent, type Image, type LogLevel, type MemState,
+  type Blocker, type Bucket, type Container, type ContainerState, type DepState, type DiffItem, type DiskUsage, type Facts, type HistoryEvent, type Image, type LogLevel, type MemState,
   type Network, type Port, type Probe, type RunErrors, type RunField, type Sample, type Stats, type Tone, type Volume, HISTORY, age, anonVolume,
-  blockers, bucket, bulkSummary, bytes, continues, errHint, esc, eventText, fmtBytes, hasHealth, healthChanges, healthSummary, held, historySummary, holds, io, memHot, memText, memWatch, isProblem,
+  DIFF_MAX, blockers, bucket, bulkSummary, bytes, continues, diffSummary, errHint, esc, eventText, fmtBytes, hasHealth, healthChanges, healthSummary, held, historySummary, holds, io, memHot, memText, memWatch, isProblem,
   logFilter, logLevel, logServices, newProblems, percent, ports, probeDuration, probeResult, probeTime, project, prunedVolumes, pushSample,
   reclaimShare, runSpec, service, shortImage, sparkPoints, status, tone, topTable, trend, usage, workingDir,
 } from './format';
@@ -1439,7 +1439,8 @@ function openLogs(title: string, running: boolean) {
   $<HTMLOptionElement>('#lsince-start').hidden = $<HTMLOptionElement>('#lsince-start').disabled = !!logProject;
   svcSet.clear(); renderSvcs();
   $('#lb').textContent = t`Carregando…`; $('#lmeta').textContent = hist().replace(/^./, c => c.toUpperCase()); $('#dlg-msg').innerHTML = '';
-  $('#insp').hidden = $('#hist').hidden = $('#procs').hidden = !!logProject;  // configuração, histórico e processos são de um container só
+  // configuração, histórico, processos e mudanças são de um container só
+  $('#insp').hidden = $('#hist').hidden = $('#procs').hidden = $('#diff').hidden = !!logProject;
   renderHits(); renderMore();
   // os probes são lidos de novo a cada abertura: um Status como "Up About an hour" seguraria o cache por uma hora
   const c = !logProject && data.find(c => c.ID === logId);
@@ -1653,6 +1654,48 @@ async function loadTop() {
   $('#procs-body').innerHTML = html;
 }
 
+// mudanças no filesystem (docker diff): a última leitura fica guardada para o filtro e o Copiar, que valem sobre todas
+let diffItems: DiffItem[] | null = null;
+const DIFF_KIND: Record<DiffItem['k'], [string, string]> =
+  {A: [t`adicionado`, 'text-ok-fg'], C: [t`alterado`, 'text-warn-fg'], D: [t`apagado`, 'text-bad-fg']};
+async function loadDiff() {
+  const id = logId;
+  let err: string | null = null, items: DiffItem[] | null = null;
+  try {
+    const r = await api(`/api/diff/${id}`), j: unknown = await r.json();
+    if (r.ok) items = j as DiffItem[]; else err = t`Não consegui ler as mudanças: ${j}`;
+  } catch { err = t`Não consegui ler as mudanças.`; }
+  if (id !== logId || !$<HTMLDetailsElement>('#diff').open) return;
+  diffItems = items;
+  if (err) $('#diff-body').textContent = err; else paintDiff();
+}
+const diffHits = () => {
+  const re = logFilter($<HTMLInputElement>('#diff-q').value.trim());
+  return {re, hits: re ? diffItems!.filter(d => re.test(d.p)) : diffItems!};
+};
+// o caminho vem do container: entra como texto (o markInto só cria <mark> com textContent), nunca como HTML
+function paintDiff() {
+  if (!diffItems) return;
+  const body = $('#diff-body');
+  if (!diffItems.length) { body.innerHTML = `<p class="text-muted">${t`Nada mudou em relação à imagem.`}</p>`; return; }
+  const {re, hits} = diffHits(), el = (tag: string, cls: string, text = '') =>
+    Object.assign(document.createElement(tag), {className: cls, textContent: text});
+  const ol = el('ol', 'font-mono space-y-0.5');
+  for (const d of hits.slice(0, DIFF_MAX)) {
+    const [txt, cls] = DIFF_KIND[d.k], li = el('li', '');
+    li.append(el('span', `inline-block w-24 font-sans ${cls}`, txt));
+    markInto(li, d.p, re);
+    ol.append(li);
+  }
+  body.replaceChildren(el('p', 'mb-1 text-fg-soft', diffSummary(diffItems) + (re ? ` · ${t`${hits.length} no filtro`}` : '')), ol,
+    ...(hits.length > DIFF_MAX ? [el('p', 'mt-1 text-muted', t`Mostrando ${DIFF_MAX} de ${hits.length}; use o filtro para achar o resto.`)] : []));
+}
+function copyDiff() {
+  if (!diffItems) return;
+  navigator.clipboard.writeText(diffHits().hits.map(d => `${d.k} ${d.p}`).join('\n'))
+    .then(() => toast(t`Mudanças copiadas.`, true), () => toast(t`Não consegui copiar.`));
+}
+
 // baixa o que está na tela (com os timestamps do docker), sem ir de novo ao servidor
 function downloadLogs() {
   const a = document.createElement('a');
@@ -1665,7 +1708,8 @@ function downloadLogs() {
 function afterClose() {
   toggleFollow(false);
   // fecha o "Configuração" (e o histórico e os processos) e apaga o que estava nele: env revelado não fica na página
-  for (const k of ['insp', 'hist', 'procs']) { $('#' + k).removeAttribute('open'); $(`#${k}-body`).textContent = t`Carregando…`; }
+  for (const k of ['insp', 'hist', 'procs', 'diff']) { $('#' + k).removeAttribute('open'); $(`#${k}-body`).textContent = t`Carregando…`; }
+  diffItems = null; $<HTMLInputElement>('#diff-q').value = '';
   // a linha pode ter sido redesenhada com o modal aberto; foca o botão Logs atual dela (ou o do cabeçalho do projeto)
   document.querySelector<HTMLElement>(logProject ? `[data-id="${CSS.escape(`stack-${logProject.project}`)}"][data-a="plogs"]`
                                                  : `[data-id="${logId}"][data-a="logs"]`)?.focus();
@@ -2026,8 +2070,8 @@ if (T.prefs) {
 }
 
 Object.assign(window, {
-  ackFail, act, afterClose, askNotify, confirmArm, bulkAct, clearFilters, clearSel, closeOut, composeAct, copyAddr, copyExec, copyLogs, copyProbe, disarm, downloadLogs,
-  filterBy, followClick, loadHealth, loadHistory, loadInspect, loadMore, loadTop, logPick, menuPick, openCreate, openPrefs, openProcs, openShell, pickTab, placeMenu, projectLogs,
+  ackFail, act, afterClose, askNotify, confirmArm, bulkAct, clearFilters, clearSel, closeOut, composeAct, copyAddr, copyDiff, copyExec, copyLogs, copyProbe, disarm, downloadLogs,
+  filterBy, followClick, loadDiff, loadHealth, loadHistory, loadInspect, loadMore, loadTop, logPick, menuPick, openCreate, openPrefs, openProcs, openShell, pickTab, placeMenu, projectLogs,
   prune, refreshLogs, reloadHealth, rmObj, serviceAct, runToastAction, selectAll, sinceChange, stackAct, toggleSel,
 });
 
@@ -2052,6 +2096,12 @@ $('#lf').oninput = paint;
 $('#lf').addEventListener('keydown', e => {
   const f = e.target as HTMLInputElement;
   if (e.key === 'Escape' && f.value) { e.preventDefault(); f.value = ''; paint(); }
+});
+// o filtro das mudanças funciona igual
+$('#diff-q').oninput = paintDiff;
+$('#diff-q').addEventListener('keydown', e => {
+  const f = e.target as HTMLInputElement;
+  if (e.key === 'Escape' && f.value) { e.preventDefault(); f.value = ''; paintDiff(); }
 });
 // aba escondida solta o stream de eventos (e o docker events do servidor); ao voltar, atualiza na hora
 document.addEventListener('visibilitychange', () => {

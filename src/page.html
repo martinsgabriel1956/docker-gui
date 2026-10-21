@@ -141,6 +141,20 @@
       <summary class="cursor-pointer w-fit py-1 coarse:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent text-muted hover:text-fg">Processos (docker top)</summary>
       <div id="procs-body" class="mt-1 max-h-48 overflow-auto text-fg-soft">Carregando…</div>
     </details>
+    <!-- o que mudou no filesystem do container em relação à imagem (docker diff): o "o que escreveu aqui dentro?" de quem
+         passou a falhar sem ser recriado. Só vai ao docker quando abre, e funciona com o container parado -->
+    <details id="diff" ontoggle="this.open && loadDiff()" class="text-xs">
+      <summary class="cursor-pointer w-fit py-1 coarse:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent text-muted hover:text-fg">Mudanças no filesystem (docker diff)</summary>
+      <div class="mt-1 flex flex-wrap items-center gap-2">
+        <label for="diff-q" class="sr-only">Filtrar caminhos</label>
+        <input id="diff-q" type="search" placeholder="Filtrar caminhos…" autocomplete="off" spellcheck="false"
+          class="flex-1 min-w-48 sm:max-w-72 rounded bg-canvas ring-1 ring-line-strong/80 px-2.5 py-1 coarse:py-3 text-xs coarse:text-sm text-fg-strong placeholder:text-muted focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+        <button onclick="loadDiff()" class="px-2.5 py-1 coarse:min-h-11 coarse:px-4 coarse:text-sm rounded text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Atualizar</button>
+        <button onclick="copyDiff()" class="px-2.5 py-1 coarse:min-h-11 coarse:px-4 coarse:text-sm rounded text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Copiar</button>
+      </div>
+      <p class="mt-1 text-muted">Volumes e bind mounts ficam de fora: o docker diff só vê a camada do container.</p>
+      <div id="diff-body" class="mt-1 max-h-48 overflow-auto">Carregando…</div>
+    </details>
   </div>
   <!-- ferramentas dos logs, coladas na caixa: filtro (só na página; / foca o campo, como a busca da lista) e o que fazer com o texto -->
   <div class="shrink-0 px-4 pt-3 pb-2 flex flex-wrap items-center gap-2">
