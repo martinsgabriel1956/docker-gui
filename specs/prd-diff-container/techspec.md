@@ -110,3 +110,5 @@ Nada novo.
 ## Histórico
 
 **2026-10-21**. Documento criado.
+
+**2026-10-21**. Durante o sdd-tasks: o `diffHtml` sai do `format.ts`. O `format.ts` fica com o `DiffItem`, o `DIFF_MAX` e o `diffSummary`, e a lista é desenhada no `app.ts` com DOM (`paintDiff`), marcando o filtro com o `markInto` dos logs. É o padrão do projeto: dados no `format.ts`, marcação no `app.ts`.
