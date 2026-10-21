@@ -56,7 +56,7 @@ O que justifica a versão desktop: o diagnóstico ("o que quebrou e por quê") c
 1. **RF2.1** Fechar a janela não encerra o app: ele vai para a bandeja e continua acompanhando os containers.
 2. **RF2.2** O ícone da bandeja mostra a contagem da faixa de atenção (`9+` acima de 9) e um estado de erro quando não consegue falar com o daemon, como o favicon faz hoje.
 3. **RF2.3** O menu da bandeja permite abrir a janela e sair do app.
-4. **RF2.4** As notificações do sistema vêm ligadas por padrão, sem o botão "Notificar quando algo der problema". As regras de quando notificar são as da versão web: só quem entra na faixa, sem repetir quem continua nela, sem avisar o que já estava quebrado ao abrir, e uma notificação agrupada quando vários entram juntos.
+4. **RF2.4** As notificações do sistema vêm ligadas por padrão, sem o botão "Notificar quando algo der problema". As regras de quando notificar são as da versão web: só quem entra na faixa, sem repetir quem continua nela, sem avisar o que já estava quebrado ao abrir, e uma notificação agrupada quando vários entram juntos. A exceção é a do [alerta de memória](../prd-alerta-memoria/prd.md) (RF3.3): quem estava na faixa por memória e cai notifica de novo.
 5. **RF2.5** As notificações saem com a janela fechada, minimizada ou sem foco, e não saem com a janela em primeiro plano.
 6. **RF2.6** Clicar na notificação abre a janela e leva ao container que entrou na faixa (o foco vai para o Logs dele). No Windows, nesta entrega, o clique só traz o app à frente.
 7. **RF2.7** Só uma instância do app roda por vez: abrir de novo traz a janela existente para a frente.
@@ -119,7 +119,7 @@ O produto passa a se chamar **Stivo** nas duas versões, porque "Docker GUI" usa
 - **Atualização automática.** Uma versão nova é instalada pelo canal de onde o app veio.
 - **Assinatura de código.** No Windows, o SmartScreen avisa na primeira execução. Isso será documentado no README.
 - **macOS.** Fica para depois, porque exige assinatura e notarização da Apple.
-- **Features novas** além de paridade, segundo plano, janela própria e preferências. Exemplos: vários daemons ao mesmo tempo, atalho global, iniciar com o sistema.
+- **Features novas** além de paridade, segundo plano, janela própria e preferências. Exemplos: vários daemons ao mesmo tempo, atalho global. (Iniciar com o sistema saiu daqui e tem [PRD próprio](../prd-iniciar-com-sistema/prd.md).)
 - **Layout de celular no desktop.**
 - **Telemetria** de qualquer tipo.
 - **Flathub e Snap**, por enquanto. O Stivo executa o `docker` (ou o `podman`) do host, e os dois canais isolam o app disso. No Flatpak, isso exige o `flatpak-spawn --host`, um contorno do sandbox que as [regras do Flathub](https://docs.flathub.org/docs/for-app-authors/requirements) recusam ("disabling or bypassing security mechanisms"), além de recusar apps que dependem de componentes do host e de considerar ferramentas de desenvolvimento geralmente inadequadas. No Snap, o confinamento `classic` é [reservado a apps maduros de publicadores conhecidos](https://snapcraft.io/docs/reference/administration/reviewing-classic-confinement-snaps/), e o `strict` com a interface `docker` só fala com o Docker do próprio snap, não com o docker-ce nem com o Podman. Empacotar um docker CLI próprio para contornar isso ficaria de fora do que o produto promete (usar o CLI que a pessoa já tem). Fica como consideração futura, se as regras mudarem ou com um pedido feito pelo próprio projeto.
@@ -135,3 +135,5 @@ O produto passa a se chamar **Stivo** nas duas versões, porque "Docker GUI" usa
 **2026-10-21**. RF7.2: Flathub e Snap saem da primeira entrega (vão para fora de escopo, com as fontes). As regras dos dois canais não aceitam um app que precisa executar o CLI do host, e contornar isso iria contra o produto. O app sai nas releases do GitHub, no AUR e no winget.
 
 **2026-10-21**. RF2.6 ajustado ao que a primeira entrega faz: no Linux o clique leva ao container; no Windows, só traz o app à frente (o toast não devolve o clique). Registrado também no techspec, nos riscos.
+
+**2026-10-21**. Duas mudanças vindas de PRDs novos. RF2.4 ganha uma exceção: um container na faixa por memória perto do limite que depois cai notifica de novo, porque a queda é mais grave que o aviso ([alerta de memória](../prd-alerta-memoria/prd.md)). "Iniciar com o sistema" sai do fora de escopo e passa a ter [PRD próprio](../prd-iniciar-com-sistema/prd.md).
