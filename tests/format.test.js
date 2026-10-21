@@ -602,3 +602,10 @@ test('newProblems compara pela chave', () => {
   assert.deepEqual(f.newProblems(new Set(['a:mem']), [a], () => true, x => x.ID), [a]);  // mem -> queda: entra de novo
   assert.deepEqual(f.newProblems(new Set(['a']), [a], () => true, x => x.ID), []);
 });
+
+test('diffSummary conta por tipo, com singular e plural', () => {
+  const d = (k, p = '/x') => ({k, p});
+  assert.equal(f.diffSummary([d('A'), d('A'), d('C'), d('D')]), '2 adicionados · 1 alterado · 1 apagado');
+  assert.equal(f.diffSummary([d('C'), d('C')]), '2 alterados');
+  assert.equal(f.diffSummary([]), '');
+});

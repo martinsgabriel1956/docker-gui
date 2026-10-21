@@ -390,6 +390,15 @@ export function healthSummary(log: Probe[]): string {
   return !log.length ? '' : bad ? t`${bad} de ${log.length} falharam` : t`as ${log.length} passaram`;
 }
 
+// uma linha do `docker diff`, já separada pelo servidor: A (adicionado), C (alterado), D (apagado)
+export type DiffItem = {k: 'A' | 'C' | 'D'; p: string};
+export const DIFF_MAX = 500;  // a lista mostra até aqui; o filtro e o Copiar valem para todos
+export function diffSummary(items: DiffItem[]): string {
+  const n = (k: DiffItem['k']) => items.filter(d => d.k === k).length, a = n('A'), c = n('C'), d = n('D');
+  return [a && (a === 1 ? t`1 adicionado` : t`${a} adicionados`), c && (c === 1 ? t`1 alterado` : t`${c} alterados`),
+          d && (d === 1 ? t`1 apagado` : t`${d} apagados`)].filter(Boolean).join(' · ');
+}
+
 // criar container: as mesmas regras do run_argv do servidor, para apontar o erro no campo antes de enviar.
 // Quem decide é o servidor, que confere tudo de novo
 export const RESTART = ['no', 'on-failure', 'unless-stopped', 'always'] as const;
