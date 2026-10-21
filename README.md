@@ -1,6 +1,8 @@
-# Docker GUI
+# Stivo
 
-Gerenciador de containers Docker no navegador, num arquivo Python só. Usa apenas a biblioteca padrão e o `docker` CLI que você já tem.
+Gerenciador de containers para Docker e Podman, no navegador, num arquivo Python só. Usa apenas a biblioteca padrão e o `docker` CLI que você já tem.
+
+> Até outubro de 2026 o projeto se chamava Docker GUI. O nome mudou porque as [diretrizes de marca da Docker](https://www.docker.com/legal/trademark-guidelines/) não permitem "Docker" em nome de produto; o comando, as variáveis `DOCKER_GUI_*` e o que a página guarda no navegador continuam iguais.
 
 ```bash
 python3 docker_gui.py

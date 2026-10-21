@@ -21,7 +21,7 @@ SRC = ROOT / "src"
 ESCAPES = {"n": "\n", "t": "\t"}
 LETTERS = re.compile(r"[A-Za-zÀ-ÿ]")
 PLACEHOLDER = re.compile(r"\{\d+\}")
-DESCRIPTION = "Gerenciador de containers Docker no navegador. Só stdlib + docker CLI."
+DESCRIPTION = "Stivo: containers Docker e Podman no navegador. Só stdlib + docker CLI."
 
 
 def skip_string(text, i, quote):

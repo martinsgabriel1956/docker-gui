@@ -31,7 +31,7 @@ test('o cabeçalho diz em qual daemon a página age, em âmbar quando é remoto'
   const where = page.locator('#where');
   await expect(where).toHaveText('docker · default');
   await expect(where).toHaveClass(/text-muted/);
-  await expect(page).toHaveTitle('Docker GUI · 1 rodando bem');  // o default não entra no título
+  await expect(page).toHaveTitle('Stivo · 1 rodando bem');  // o default não entra no título
   await gui.stop();
 
   await gui.open({
@@ -45,7 +45,7 @@ test('o cabeçalho diz em qual daemon a página age, em âmbar quando é remoto'
   await expect(where).toHaveText('docker · producao, daemon remoto em tcp://10.0.0.5:2376');  // o sr-only conta
   await expect(where).toHaveClass(/text-warn-fg/);
   await expect(where).toHaveAttribute('title', 'Daemon em tcp://10.0.0.5:2376');
-  await expect(page).toHaveTitle('Docker GUI · producao · 1 rodando bem');
+  await expect(page).toHaveTitle('Stivo · producao · 1 rodando bem');
   // o aviso e a confirmação também dizem onde
   await page.getByRole('button', { name: 'Parar web' }).click();
   await expect(page.locator('#toast')).toContainText('producao · web parado.');
@@ -78,7 +78,7 @@ test('contagem por estado e título da aba', async ({ page, gui }) => {
   await gui.open({ containers: [...shop, ...loose] });
   const pills = page.locator('#count button[data-a="filter"]');
   await expect(pills).toHaveText(['2 com problema', '3 rodando bem', '1 parado']);
-  await expect(page).toHaveTitle('Docker GUI · 3 rodando bem · 2 com problema');  // as palavras das contagens
+  await expect(page).toHaveTitle('Stivo · 3 rodando bem · 2 com problema');  // as palavras das contagens
 });
 
 test('lista só de containers soltos dispensa cabeçalho', async ({ page, gui }) => {
@@ -222,12 +222,12 @@ test('queda antiga marcada como vista sai da faixa de atenção, e o Desfazer de
   await gui.open({ containers: [ctr('web'), job] });
   const band = page.locator('#rows tr[data-key="h:attn"]');
   await expect(band).toContainText('Precisa de atenção · 1');
-  await expect(page).toHaveTitle('Docker GUI · 1 rodando bem · 1 com problema');
+  await expect(page).toHaveTitle('Stivo · 1 rodando bem · 1 com problema');
   await row(page, 'migrate').getByRole('button', { name: 'Marcar a queda de migrate como vista: sai da faixa de atenção' }).click();
   await expect(band).toHaveCount(0);
   // continua vermelho e contado como problema: só não grita mais na faixa
   await expect(page.locator(`#st-${id('migrate')}`)).toContainText('Saiu com código 1');
-  await expect(page).toHaveTitle('Docker GUI · 1 rodando bem · 1 com problema');
+  await expect(page).toHaveTitle('Stivo · 1 rodando bem · 1 com problema');
   await expect(page.locator('#toast')).toContainText('migrate saiu da faixa de atenção. Volta para lá se cair de novo.');
   await page.locator('#toast').getByRole('button', { name: 'Desfazer' }).click();
   await expect(band).toContainText('Precisa de atenção · 1');

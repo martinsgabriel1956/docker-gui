@@ -1,5 +1,5 @@
 ---
-name: Docker GUI
+name: Stivo
 description: O docker ps que cresceu, no navegador, para o ciclo mudar → reiniciar → ler logs.
 colors:
   canvas: "oklch(16% 0.012 255)"
@@ -171,7 +171,7 @@ components:
     textColor: "{colors.bad-fg}"
 ---
 
-# Design System: Docker GUI
+# Design System: Stivo
 
 ## Overview
 
@@ -229,7 +229,7 @@ Paleta de terminal ANSI reafinada: grafite frio de croma baixo (matiz 255) para 
 **Character:** o mono carrega tudo o que o `docker` imprime; o sans carrega tudo o que a GUI diz. Fontes do sistema porque o produto é um arquivo só, offline, sem nada para baixar. O mono desenha maior que o sans, por isso o token `--text-data` (13px) em vez dos 14px do corpo.
 
 ### Hierarchy
-- **Title** (600, 24px, tracking -0.025em; 20px abaixo de 640px): só o "Docker GUI" do cabeçalho, sem ícone.
+- **Title** (600, 24px, tracking -0.025em; 20px abaixo de 640px): só o "Stivo" do cabeçalho, sem ícone.
 - **Headline** (600, 18px): título dos modais ("Logs · shop-api-1", "Novo container").
 - **Body** (400, 14px): botões do cabeçalho, campos, avisos, rótulos de formulário, rótulo das categorias do disco. As abas usam 14px em 500.
 - **Label** (500, 12px): botões de linha e das ferramentas dos logs (14px no toque).

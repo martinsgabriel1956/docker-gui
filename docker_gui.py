@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Gerenciador de containers Docker no navegador. Só stdlib + docker CLI."""
+"""Stivo: containers Docker e Podman no navegador. Só stdlib + docker CLI."""
 import argparse
 import base64
 import errno
@@ -165,13 +165,13 @@ EN = {
     "serviço não encontrado no projeto": "service not found in the project",
     "Porta {port} ocupada. Escolha outra com --port.": "Port {port} is in use. Pick another with --port.",
     "Portas {first}-{last} ocupadas. Escolha uma com --port.": "Ports {first}-{last} are in use. Pick one with --port.",
-    "Gerenciador de containers Docker no navegador. Só stdlib + docker CLI.": "Docker container manager in the browser. Stdlib + docker CLI only.",
+    "Stivo: containers Docker e Podman no navegador. Só stdlib + docker CLI.": "Stivo: Docker and Podman containers in the browser. Stdlib + docker CLI only.",
     "porta local (padrão: {port}, ou a próxima livre)": "local port (default: {port}, or the next free one)",
     "CLI de containers: docker ou podman (padrão: $DOCKER_GUI_CLI ou docker)": "container CLI: docker or podman (default: $DOCKER_GUI_CLI or docker)",
     "contexto do docker (docker --context); sem ele vale o DOCKER_CONTEXT ou o atual": "docker context (docker --context); without it, DOCKER_CONTEXT or the current one",
     "língua da página e das mensagens: pt ou en (padrão: $DOCKER_GUI_LANG ou o locale do sistema)":
         "language of the page and messages: pt or en (default: $DOCKER_GUI_LANG or the system locale)",
-    "Docker GUI em {url}  (Ctrl+C para sair)": "Docker GUI at {url}  (Ctrl+C to quit)",
+    "Stivo em {url}  (Ctrl+C para sair)": "Stivo at {url}  (Ctrl+C to quit)",
     "não abre o navegador; o link sai só no terminal": "don't open the browser; the link is only printed in the terminal",
 }
 
@@ -1173,7 +1173,7 @@ def main():
     pre.add_argument("--lang", nargs="?")
     lang = pre.parse_known_args()[0].lang
     LANG = lang if lang in ("pt", "en") else system_lang()
-    ap = argparse.ArgumentParser(description=tr("Gerenciador de containers Docker no navegador. Só stdlib + docker CLI."))
+    ap = argparse.ArgumentParser(description=tr("Stivo: containers Docker e Podman no navegador. Só stdlib + docker CLI."))
     ap.add_argument("--port", type=int, help=tr("porta local (padrão: {port}, ou a próxima livre)").format(port=PORT))
     ap.add_argument("--cli", default=os.environ.get("DOCKER_GUI_CLI", "docker"),
                     help=tr("CLI de containers: docker ou podman (padrão: $DOCKER_GUI_CLI ou docker)"))
@@ -1192,7 +1192,7 @@ def main():
     server = serve(args.port)
     # o token vai no #fragmento: não é enviado ao servidor nem fica em log; a página guarda e o tira da URL
     url = f"http://localhost:{server.server_address[1]}/#t={TOKEN}"
-    print(tr("Docker GUI em {url}  (Ctrl+C para sair)").format(url=url))
+    print(tr("Stivo em {url}  (Ctrl+C para sair)").format(url=url))
     if not args.no_browser:
         webbrowser.open(url)
     # SIGTERM vira saída normal (SystemExit), para o finally rodar; o código 143 é o de quem morre por SIGTERM
@@ -1216,7 +1216,7 @@ PAGE = r"""<!doctype html>
 <html lang="pt-BR" class="bg-canvas" data-cli="docker">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="dark light">
-<title>Docker GUI</title>
+<title>Stivo</title>
 <style>/*CSS*/</style>
 </head>
 <body class="min-h-screen bg-canvas text-fg-soft antialiased selection:bg-accent/30">
@@ -1227,7 +1227,7 @@ PAGE = r"""<!doctype html>
 <div class="border-b border-line bg-raised"><div class="max-w-7xl mx-auto px-4">
   <header class="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 pt-5 pb-3 max-sm:pt-3">
     <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
-      <h1 class="text-2xl max-sm:text-xl font-semibold text-fg-strong tracking-tight">Docker GUI</h1>
+      <h1 class="text-2xl max-sm:text-xl font-semibold text-fg-strong tracking-tight">Stivo</h1>
       <!-- onde as ações caem: o contexto do docker, em âmbar quando o daemon é remoto (app.ts preenche) -->
       <span id="where" class="empty:hidden font-mono text-xs px-2 py-0.5 rounded ring-1 ring-line-strong text-muted"></span>
       <!-- de onde a lista vem: eventos do docker (ao vivo) ou poll de 2 s (app.ts, showLive) -->
@@ -1596,7 +1596,7 @@ PAGE = r"""<!doctype html>
     "Detalhes técnicos": "Technical details",
     "Disco cheio: libere espaço (aba Imagens, Limpar…).": "Disk full: free some space (Images tab, Clean up…).",
     "Disco: {0} lidos · {1} gravados": "Disk: {0} read · {1} written",
-    "Docker GUI": "Docker GUI",
+    Stivo: "Stivo",
     "Docker fora do ar": "Docker is down",
     "Dá para baixar de novo.": "It can be pulled again.",
     "Em uso por": "Used by",
@@ -1607,7 +1607,7 @@ PAGE = r"""<!doctype html>
     "Esc cancela.": "Esc cancels.",
     "Escolha uma das opções da lista.": "Pick one of the options in the list.",
     Escopo: "Scope",
-    "Esta aba não tem o token do Docker GUI.": "This tab doesn't have the Docker GUI token.",
+    "Esta aba não tem o token do Stivo.": "This tab doesn't have the Stivo token.",
     "Este container não existe mais.": "This container no longer exists.",
     "Este projeto não tem mais containers.": "This project has no containers left.",
     "Faixa de portas: {0} do host → {1} do container": "Port range: {0} on the host → {1} in the container",
@@ -1678,19 +1678,19 @@ PAGE = r"""<!doctype html>
     "Nome inválido: 2 a 128 caracteres entre letras, números, _ . e -, começando por letra ou número.": "Invalid name: 2 to 128 characters among letters, digits, _ . and -, starting with a letter or digit.",
     "Notificar quando algo der problema": "Notify me when something breaks",
     "Novo container": "New container",
-    "Não consegui carregar os logs. O servidor do Docker GUI está rodando?": "Could not load the logs. Is the Docker GUI server running?",
-    "Não consegui conectar ao servidor do Docker GUI.": "Could not connect to the Docker GUI server.",
+    "Não consegui carregar os logs. O servidor do Stivo está rodando?": "Could not load the logs. Is the Stivo server running?",
+    "Não consegui conectar ao servidor do Stivo.": "Could not connect to the Stivo server.",
     "Não consegui copiar.": "Could not copy.",
     "Não consegui copiar. O comando é: {0}": "Could not copy. The command is: {0}",
     "Não consegui falar com o Docker.": "Could not talk to Docker.",
     "Não consegui ler a lista de volumes; o prune leva os sem uso.": "Could not read the volume list; the prune takes the unused ones.",
-    "Não consegui ler a lista. O servidor do Docker GUI está rodando?": "Could not read the list. Is the Docker GUI server running?",
+    "Não consegui ler a lista. O servidor do Stivo está rodando?": "Could not read the list. Is the Stivo server running?",
     "Não consegui ler a lista: {0}": "Could not read the list: {0}",
     "Não consegui ler o healthcheck.": "Could not read the healthcheck.",
     "Não consegui ler o healthcheck: {0}": "Could not read the healthcheck: {0}",
     "Não consegui ler o inspect.": "Could not read the inspect.",
     "Não consegui ler o inspect: {0}": "Could not read the inspect: {0}",
-    "Não consegui ler o uso de disco. O servidor do Docker GUI está rodando?": "Could not read the disk usage. Is the Docker GUI server running?",
+    "Não consegui ler o uso de disco. O servidor do Stivo está rodando?": "Could not read the disk usage. Is the Stivo server running?",
     "Não consegui ler o uso de disco: {0}": "Could not read the disk usage: {0}",
     "Não consegui ler os eventos.": "Couldn't read the events.",
     "Não consegui ler os eventos: {0}": "Couldn't read the events: {0}",
@@ -1709,7 +1709,7 @@ PAGE = r"""<!doctype html>
     "O erro ficou na linha.": "The error is on its row.",
     "O erro ficou na lista.": "The error is shown in the list.",
     "O próximo build fica mais lento.": "The next build will be slower.",
-    "O servidor do Docker GUI parou de responder.": "The Docker GUI server stopped responding.",
+    "O servidor do Stivo parou de responder.": "The Stivo server stopped responding.",
     "O valor de {0} tem o caractere NUL ou passa de {1} caracteres.": "The value of {0} has the NUL character or is longer than {1} characters.",
     "Ocultar valores": "Hide values",
     "Os dados dele se perdem.": "Its data is lost.",
@@ -1773,7 +1773,7 @@ PAGE = r"""<!doctype html>
     "Sem o docker events: a lista é relida a cada 2 s": "Without docker events: the list is re-read every 2 s",
     "Sem permissão para notificar. Dá para liberar nas configurações do site, no navegador.": "No permission to notify. You can allow it in the browser's site settings.",
     "Sem projeto compose": "No compose project",
-    "Sem resposta do servidor do Docker GUI.": "No response from the Docker GUI server.",
+    "Sem resposta do servidor do Stivo.": "No response from the Stivo server.",
     Serviço: "Service",
     "Sessão encerrada.": "Session ended.",
     "Seu usuário não tem acesso ao Docker.": "Your user has no access to Docker.",
@@ -1955,7 +1955,7 @@ PAGE = r"""<!doctype html>
     "{0} às {1}": "{0} at {1}",
     "{0}, conferindo se ficaram de pé…": "{0}, checking they stay up…",
     "{0}: 1 de {1} falhou. O erro ficou na linha.": "{0}: 1 of {1} failed. The error is on its row.",
-    "{0}: sem resposta do servidor do Docker GUI.": "{0}: no response from the Docker GUI server.",
+    "{0}: sem resposta do servidor do Stivo.": "{0}: no response from the Stivo server.",
     "{0}: {1} concluído, conferindo se ficou de pé…": "{0}: {1} done, checking it stays up…",
     "{0}: {1} concluído.": "{0}: {1} done.",
     "{0}: {1} de {2} falharam. Os erros ficaram nas linhas.": "{0}: {1} of {2} failed. The errors are on their rows.",
@@ -11908,7 +11908,7 @@ ${h2.join(`
     try {
       const r = await api("/api/containers"), j2 = await r.json();
       if (r.status === 401) return showProblem([
-        t`Esta aba não tem o token do Docker GUI.`,
+        t`Esta aba não tem o token do Stivo.`,
         t`Abra o link com ${code("#t=…")} que aparece no terminal onde você rodou ${code("python3 docker_gui.py")}. O token muda a cada execução.`,
         j2,
         "auth"
@@ -11931,7 +11931,7 @@ ${h2.join(`
       showProblem(null);
     } catch (e) {
       showProblem([
-        lastOk ? t`O servidor do Docker GUI parou de responder.` : t`Não consegui conectar ao servidor do Docker GUI.`,
+        lastOk ? t`O servidor do Stivo parou de responder.` : t`Não consegui conectar ao servidor do Stivo.`,
         t`Rode ${code("python3 docker_gui.py")} de novo; a página volta sozinha.`,
         e.message,
         "server"
@@ -12062,7 +12062,7 @@ ${h2.join(`
     $2("#where").classList.replace("text-muted", "text-warn-fg");
     $2("#where").classList.replace("ring-line-strong", "ring-warn/60");
   }
-  var TITLE = CTX && CTX !== "default" ? `Docker GUI · ${CTX}` : "Docker GUI";
+  var TITLE = CTX && CTX !== "default" ? `Stivo · ${CTX}` : "Stivo";
   var PORT_HOST = (() => {
     try {
       return REMOTE && new URL(WHERE.host).hostname || "localhost";
@@ -12519,7 +12519,7 @@ ${WIDE.matches ? "" : `
       if (!r.ok) errors.set(c.ID, { msg: msg || t`erro sem mensagem`, state: c.State, what: LABEL[a] });
       return r.ok;
     } catch {
-      errors.set(c.ID, { msg: t`Sem resposta do servidor do Docker GUI.`, state: c.State, what: LABEL[a] });
+      errors.set(c.ID, { msg: t`Sem resposta do servidor do Stivo.`, state: c.State, what: LABEL[a] });
       return false;
     } finally {
       busy.delete(c.ID);
@@ -12723,7 +12723,7 @@ ${WIDE.matches ? "" : `
       toast(ok ? ids.length ? t`${p}: ${what} concluído, conferindo se ficou de pé…` : t`${p}: ${what} concluído.` : t`${p}: ${what} falhou. ${errHint(msg) || msg.trim().split("\n").at(-1) || t`Erro sem mensagem.`}`, ok);
     } catch {
       o2.code = -1;
-      toast(t`${p}: sem resposta do servidor do Docker GUI.`);
+      toast(t`${p}: sem resposta do servidor do Stivo.`);
     }
     if (ok || !o2.text) outs.delete(p);
     composing.delete(p);
@@ -13052,7 +13052,7 @@ ${WIDE.matches ? "" : `
       $2("#lmeta").textContent = t`${hist().replace(/^./, (c) => c.toUpperCase())} · atualizado às ${(/* @__PURE__ */ new Date()).toLocaleTimeString(LOCALE)}`;
     } catch {
       buf = [];
-      lb.textContent = t`Não consegui carregar os logs. O servidor do Docker GUI está rodando?`;
+      lb.textContent = t`Não consegui carregar os logs. O servidor do Stivo está rodando?`;
     }
     renderMore();
     if (more) lb.scrollTop = lb.scrollHeight - fromEnd;
@@ -13363,7 +13363,7 @@ ${WIDE.matches ? "" : `
       msg = await r.json();
       ok = r.ok;
     } catch {
-      msg = t`Sem resposta do servidor do Docker GUI.`;
+      msg = t`Sem resposta do servidor do Stivo.`;
     }
     creating = false;
     go2.removeAttribute("aria-disabled");
@@ -13423,7 +13423,7 @@ ${WIDE.matches ? "" : `
       const r = await api("/api/df"), j2 = await r.json();
       disk = r.ok ? j2 : t`Não consegui ler o uso de disco: ${j2}`;
     } catch {
-      disk = t`Não consegui ler o uso de disco. O servidor do Docker GUI está rodando?`;
+      disk = t`Não consegui ler o uso de disco. O servidor do Stivo está rodando?`;
     }
     render();
   }
@@ -13459,7 +13459,7 @@ ${WIDE.matches ? "" : `
       if (r.ok) toast(`${label}: ${freed ? t`${freed} liberados` : t`limpeza feita`}.`, true);
       else toast(t`Não deu para limpar ${label.toLowerCase()}: ${msg || t`erro sem mensagem`}`);
     } catch {
-      toast(t`Sem resposta do servidor do Docker GUI.`);
+      toast(t`Sem resposta do servidor do Stivo.`);
     }
     diskBusy = "";
     await Promise.all([loadTab(), k === "containers" && load()]);
@@ -13482,7 +13482,7 @@ ${WIDE.matches ? "" : `
       const r = await api("/api/" + k), j2 = await r.json();
       objs[k] = r.ok ? j2 : t`Não consegui ler a lista: ${j2}`;
     } catch {
-      objs[k] = t`Não consegui ler a lista. O servidor do Docker GUI está rodando?`;
+      objs[k] = t`Não consegui ler a lista. O servidor do Stivo está rodando?`;
     }
     render();
   }
@@ -13556,7 +13556,7 @@ ${WIDE.matches ? "" : `
         toast(t`Não deu para remover ${one} ${name}. ${errHint(msg) || t`O erro ficou na lista.`}`);
       }
     } catch {
-      toast(t`Sem resposta do servidor do Docker GUI.`);
+      toast(t`Sem resposta do servidor do Stivo.`);
     }
     objBusy = "";
     await loadTab();

@@ -130,7 +130,7 @@ async function load() {
   lastLoad = Date.now();
   try {
     const r = await api('/api/containers'), j: unknown = await r.json();
-    if (r.status === 401) return showProblem([t`Esta aba não tem o token do Docker GUI.`,
+    if (r.status === 401) return showProblem([t`Esta aba não tem o token do Stivo.`,
       t`Abra o link com ${code('#t=…')} que aparece no terminal onde você rodou ${code('python3 docker_gui.py')}. O token muda a cada execução.`, j, 'auth']);
     if (!r.ok) return showProblem(/permission denied/i.test(String(j))
       ? [t`Seu usuário não tem acesso ao Docker.`, t`Rode ${code('sudo usermod -aG docker $USER')} e entre de novo na sessão.`, j, 'perm']
@@ -150,7 +150,7 @@ async function load() {
     seen = new Set(data.filter(isProblem).map(c => c.ID));
     showProblem(null);
   } catch (e) {
-    showProblem([lastOk ? t`O servidor do Docker GUI parou de responder.` : t`Não consegui conectar ao servidor do Docker GUI.`,
+    showProblem([lastOk ? t`O servidor do Stivo parou de responder.` : t`Não consegui conectar ao servidor do Stivo.`,
       t`Rode ${code('python3 docker_gui.py')} de novo; a página volta sozinha.`, (e as Error).message, 'server']);
   }
 }
@@ -263,7 +263,7 @@ if (REMOTE) {
   $('#where').classList.replace('text-muted', 'text-warn-fg');
   $('#where').classList.replace('ring-line-strong', 'ring-warn/60');
 }
-const TITLE = CTX && CTX !== 'default' ? `Docker GUI · ${CTX}` : 'Docker GUI';
+const TITLE = CTX && CTX !== 'default' ? `Stivo · ${CTX}` : 'Stivo';
 // endereço das portas: localhost, ou o host do daemon remoto (tcp://10.0.0.5:2376, ssh://eu@servidor -> 10.0.0.5, servidor)
 const PORT_HOST = (() => { try { return REMOTE && new URL(WHERE.host!).hostname || 'localhost'; } catch { return 'localhost'; } })();
 // remoto: a faixa âmbar fica no topo o tempo todo, e o "só esta máquina" do Novo container passa a ser a de lá
@@ -747,7 +747,7 @@ async function run(a: Action, c: Container): Promise<boolean> {
     if (!r.ok) errors.set(c.ID, {msg: msg || t`erro sem mensagem`, state: c.State, what: LABEL[a]});
     return r.ok;
   } catch {
-    errors.set(c.ID, {msg: t`Sem resposta do servidor do Docker GUI.`, state: c.State, what: LABEL[a]});
+    errors.set(c.ID, {msg: t`Sem resposta do servidor do Stivo.`, state: c.State, what: LABEL[a]});
     return false;
   } finally { busy.delete(c.ID); render(); }
 }
@@ -982,7 +982,7 @@ async function composeAct(a: ComposeAction, p: string, svc = '', sure = false): 
              : t`${p}: ${what} falhou. ${errHint(msg) || msg.trim().split('\n').at(-1) || t`Erro sem mensagem.`}`, ok);
   } catch {
     o.code = -1;
-    toast(t`${p}: sem resposta do servidor do Docker GUI.`);
+    toast(t`${p}: sem resposta do servidor do Stivo.`);
   }
   // deu certo: o aviso basta. Falhou: a saída fica aberta até o ×, com o motivo
   if (ok || !o.text) outs.delete(p);
@@ -1347,7 +1347,7 @@ async function fetchLogs(more = false) {
     if (buf.length) paint();
     else { lb.textContent = r.ok ? since ? t`Nada no log nesse período.` : t`(sem logs)` : t`Não consegui ler os logs: ${j}`; renderHits(); }
     $('#lmeta').textContent = t`${hist().replace(/^./, c => c.toUpperCase())} · atualizado às ${new Date().toLocaleTimeString(LOCALE)}`;
-  } catch { buf = []; lb.textContent = t`Não consegui carregar os logs. O servidor do Docker GUI está rodando?`; }
+  } catch { buf = []; lb.textContent = t`Não consegui carregar os logs. O servidor do Stivo está rodando?`; }
   renderMore();
   if (more) lb.scrollTop = lb.scrollHeight - fromEnd;
   else if (atEnd) lb.scrollTop = lb.scrollHeight;
@@ -1647,7 +1647,7 @@ async function createContainer(e: SubmitEvent) {
   try {
     const r = await T.request('POST', '/api/run', spec);
     msg = await r.json(); ok = r.ok;
-  } catch { msg = t`Sem resposta do servidor do Docker GUI.`; }
+  } catch { msg = t`Sem resposta do servidor do Stivo.`; }
   creating = false;
   go.removeAttribute('aria-disabled');
   $<HTMLFieldSetElement>('#create-fields').disabled = false;
@@ -1717,7 +1717,7 @@ async function loadDf() {
   try {
     const r = await api('/api/df'), j: unknown = await r.json();
     disk = r.ok ? j as DiskUsage[] : t`Não consegui ler o uso de disco: ${j}`;
-  } catch { disk = t`Não consegui ler o uso de disco. O servidor do Docker GUI está rodando?`; }
+  } catch { disk = t`Não consegui ler o uso de disco. O servidor do Stivo está rodando?`; }
   render();
 }
 
@@ -1758,7 +1758,7 @@ async function prune(k: DiskKind, sure = false): Promise<unknown> {
     const freed = msg.match(/Total(?: reclaimed space)?:\s*(\S+)/)?.[1];
     if (r.ok) toast(`${label}: ${freed ? t`${freed} liberados` : t`limpeza feita`}.`, true);
     else toast(t`Não deu para limpar ${label.toLowerCase()}: ${msg || t`erro sem mensagem`}`);
-  } catch { toast(t`Sem resposta do servidor do Docker GUI.`); }
+  } catch { toast(t`Sem resposta do servidor do Stivo.`); }
   diskBusy = '';
   await Promise.all([loadTab(), k === 'containers' && load()]);
 }
@@ -1786,7 +1786,7 @@ async function loadObjects(k: ObjKind) {
   try {
     const r = await api('/api/' + k), j: unknown = await r.json();
     objs[k] = r.ok ? j as Obj[] : t`Não consegui ler a lista: ${j}`;
-  } catch { objs[k] = t`Não consegui ler a lista. O servidor do Docker GUI está rodando?`; }
+  } catch { objs[k] = t`Não consegui ler a lista. O servidor do Stivo está rodando?`; }
   render();
 }
 
@@ -1870,7 +1870,7 @@ async function rmObj(k: ObjKind, r: string, sure = false): Promise<unknown> {
       objErr.set(id, msg || t`erro sem mensagem`);
       toast(t`Não deu para remover ${one} ${name}. ${errHint(msg) || t`O erro ficou na lista.`}`);
     }
-  } catch { toast(t`Sem resposta do servidor do Docker GUI.`); }
+  } catch { toast(t`Sem resposta do servidor do Stivo.`); }
   objBusy = '';
   await loadTab();  // imagem e volume mudam o df também
   if (ok) (document.querySelector<HTMLElement>(`[data-id="${near}"][data-a="rm"]`) || $('#tab-' + k)).focus();

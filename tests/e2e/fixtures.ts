@@ -104,7 +104,7 @@ export class Gui {
       const timer = setTimeout(() => reject(new Error(`servidor não subiu: ${out}`)), 10_000);
       const onData = (d: Buffer) => {
         out += d;
-        const m = out.match(/Docker GUI (?:em|at) (http:\S+)/);
+        const m = out.match(/Stivo (?:em|at) (http:\S+)/);
         if (m) { clearTimeout(timer); resolve(m[1]); }
       };
       proc.stdout!.on('data', onData);
