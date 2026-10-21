@@ -25,7 +25,7 @@ A feature leva essa lista para o modal de logs, ao lado dos Processos e da Confi
 
 ### 1. Lista de mudanças
 
-1. **RF1.1** O modal de logs de um container ganha a seção "Mudanças" com a lista do que mudou no filesystem em relação à imagem.
+1. **RF1.1** O modal de logs de um container ganha a seção "Mudanças no filesystem" com a lista do que mudou no filesystem em relação à imagem.
 2. **RF1.2** Cada item mostra o caminho e o tipo da mudança, traduzido e diferenciado por cor e texto: adicionado, alterado, apagado.
 3. **RF1.3** Um resumo em cima conta por tipo ("12 adicionados · 3 alterados · 1 apagado").
 4. **RF1.4** A lista funciona com o container rodando, pausado ou parado.
@@ -41,7 +41,7 @@ A feature leva essa lista para o modal de logs, ao lado dos Processos e da Confi
 ## Experiência do usuário
 
 - No modal de logs, junto do Histórico, Processos e Configuração, no mesmo formato (seção recolhida, tabela compacta).
-- O nome da seção segue a língua do CLI: "Mudanças (`docker diff`)".
+- O nome da seção segue a língua do CLI: "Mudanças no filesystem (docker diff)".
 - Uma nota curta explica que volumes ficam de fora.
 - Teclado e leitor de tela como no resto do modal; o tipo de mudança é texto, não só cor.
 
@@ -63,3 +63,5 @@ A feature leva essa lista para o modal de logs, ao lado dos Processos e da Confi
 ## Histórico
 
 **2026-10-21**. Documento criado.
+
+**2026-10-21**. Reconciliação do sdd-review: o nome da seção passa a ser "Mudanças no filesystem (docker diff)", como na tela. "Mudanças" sozinho não dizia do quê, ao lado de Configuração, Histórico e Processos.
