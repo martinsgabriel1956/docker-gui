@@ -30,6 +30,7 @@ export type Container = {
   started?: string;  // StartedAt do inspect (since=start dos logs)
   events?: Record<string, unknown>[];  // linhas do `docker events` que o histórico devolve
   top?: string;  // saída do `docker top`
+  diff?: string;  // saída do `docker diff`
 };
 export type DiskUsage = { Type: string; TotalCount: string; Active: string; Size: string; Reclaimable: string };
 // linhas reais do `docker image ls --no-trunc` (uma por tag), `volume ls` e `network ls --no-trunc`, em '{{json .}}'

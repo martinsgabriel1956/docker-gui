@@ -191,6 +191,11 @@ async fn get(ctx: &Ctx, req: &Request) -> Step<Response> {
             if r.code != 0 { r.stderr.trim() } else { r.stdout.trim() },
         ));
     }
+    if let Some(m) = caps(r"/api/diff/([0-9a-f]{12,64})", &full) {
+        // percorre a camada gravável inteira: o prazo das ações, não o de leitura
+        let r = ctx.docker(&["diff", &m[1]], ACTION_TIMEOUT).await;
+        return Ok(if r.code != 0 { reply(500, r.stderr.trim()) } else { reply(200, n::diff(&r.stdout)) });
+    }
     if let Some(m) = caps(r"/api/inspect/([0-9a-f]{12,64})(/env)?", &full) {
         // resumo do inspect; só o /env (pedido explícito na página) traz os valores do env
         let r = ctx.docker(&["inspect", "--format", "{{json .}}", &m[1]], READ_TIMEOUT).await;

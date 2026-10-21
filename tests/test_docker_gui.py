@@ -366,6 +366,16 @@ class LogsAndHealthTest(ServerTest):
         self.assertEqual(self.request("GET", f"/api/top/{HEX_ID}"), (500, "Error response from daemon: container 0123 is not running"))
 
 
+class DiffTest(unittest.TestCase):
+    """docker diff -> [{k, p}]: o caminho inteiro (com espaço), sem as linhas fora do formato."""
+
+    def test_lines(self):
+        out = "C /etc\nA /app/meu arquivo.txt\n\nX /y\nC\nD /tmp/x"
+        self.assertEqual(docker_gui.diff(out), [{"k": "C", "p": "/etc"}, {"k": "A", "p": "/app/meu arquivo.txt"},
+                                                {"k": "D", "p": "/tmp/x"}])
+        self.assertEqual(docker_gui.diff(""), [])
+
+
 class HistoryTest(unittest.TestCase):
     """docker events (e podman events) -> só o que explica uma queda, no mesmo formato."""
 

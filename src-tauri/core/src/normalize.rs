@@ -394,6 +394,18 @@ fn event_time(v: Option<&Value>) -> Option<Value> {
 const HISTORY_EVENTS: [&str; 6] = ["start", "die", "oom", "pause", "unpause", "health_status"];
 
 /// `docker events` de um container -> [{t, a, code, health}], só as de HISTORY_EVENTS, no máximo as 100 últimas
+/// Saída do `docker diff` -> [{"k", "p"}] (o diff do Python): o caminho é tudo depois do espaço
+pub fn diff(out: &str) -> Value {
+    Value::Array(
+        out.lines()
+            .filter_map(|l| {
+                let (k, p) = l.split_at_checked(2)?;
+                (matches!(k, "A " | "C " | "D ") && !p.is_empty()).then(|| json!({"k": &k[..1], "p": p}))
+            })
+            .collect(),
+    )
+}
+
 pub fn history(out: &str) -> Value {
     let mut events = Vec::new();
     for line in out.lines() {
@@ -497,6 +509,16 @@ mod tests {
         assert_eq!(human(999.0), "999B");
         assert_eq!(human(0.0), "0B");
         assert_eq!(human(1000.0), "1kB");
+    }
+
+    #[test]
+    fn diff_lines() {
+        let out = "C /etc\nA /app/meu arquivo.txt\n\nX /y\nC\nD /tmp/x";
+        assert_eq!(
+            diff(out),
+            json!([{"k": "C", "p": "/etc"}, {"k": "A", "p": "/app/meu arquivo.txt"}, {"k": "D", "p": "/tmp/x"}])
+        );
+        assert_eq!(diff(""), json!([]));
     }
 
     #[test]

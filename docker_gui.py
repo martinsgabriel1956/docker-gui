@@ -423,6 +423,13 @@ def history(out):
     return events[-HISTORY_MAX:]
 
 
+def diff(out):
+    """Saída do `docker diff` (e do `podman diff`): "C /etc", "A /etc/x" -> [{"k": "C", "p": "/etc"}, ...]. O caminho é
+    tudo depois do espaço (pode ter espaço); linha fora do formato fica de fora."""
+    return [{"k": line[0], "p": line[2:]} for line in out.splitlines()
+            if len(line) > 2 and line[0] in "ACD" and line[1] == " "]
+
+
 def summary(info, reveal=False):
     """Resumo do `docker inspect`: restart policy, redes, mounts e env, e o que explica uma queda (se o kernel matou por
     falta de memória e quantas vezes o docker já reiniciou o container).
@@ -695,6 +702,10 @@ class Handler(BaseHTTPRequestHandler):
         if m:  # processos do container (a tabela do docker top, como o CLI imprime)
             r = docker("top", m[1])
             return self.send(500 if r.returncode else 200, json.dumps((r.stderr if r.returncode else r.stdout).strip()))
+        m = re.fullmatch(r"/api/diff/([0-9a-f]{12,64})", self.path)
+        if m:  # o que mudou no filesystem do container em relação à imagem; percorre a camada gravável: prazo de ação
+            r = docker("diff", m[1], timeout=ACTION_TIMEOUT)
+            return self.send(500, json.dumps(r.stderr.strip())) if r.returncode else self.send(200, json.dumps(diff(r.stdout)))
         m = re.fullmatch(r"/api/inspect/([0-9a-f]{12,64})(/env)?", self.path)
         if m:  # resumo do inspect; só o /env (pedido explícito na página) traz os valores do env
             r = docker("inspect", "--format", "{{json .}}", m[1])

@@ -1,0 +1,27 @@
+{
+  "desc": "diff que falha: 500 com o stderr",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "",
+      "stderr": "Error response from daemon: No such container: 0123456789ab\n",
+      "code": 1,
+      "args": [
+        "diff",
+        "0123456789ab"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/diff/0123456789ab",
+    "body": null
+  },
+  "response": {
+    "status": 500,
+    "body": "Error response from daemon: No such container: 0123456789ab"
+  }
+}
