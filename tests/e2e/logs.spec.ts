@@ -3,8 +3,12 @@ import { test, expect, ctr, id, row, compose } from './fixtures';
 const unhealthy = ctr('api', {
   Status: 'Up 10 minutes (unhealthy)',
   logs: 'GET /health 500\n',
-  health: { Status: 'unhealthy', Log: [{ ExitCode: 1, Output: 'curl: (7) Failed to connect to localhost port 3000\n' }] },
+  health: { Status: 'unhealthy', Log: [{ Start: '2026-10-21T13:00:00.100000000Z', End: '2026-10-21T13:00:00.350000000Z',
+                                         ExitCode: 1, Output: 'curl: (7) Failed to connect to localhost port 3000\n' }] },
 });
+// horário local de um probe, como o modal mostra (o fuso é o da máquina que roda o teste)
+const at = (h: number, m: number, s: number, ms = 0) => new Date(2026, 9, 21, h, m, s, ms).toISOString();
+const hms = (h: number, m: number, s: number) => [h, m, s].map(n => String(n).padStart(2, '0')).join(':');
 
 test('Logs abre o modal com a saída do container', async ({ page, gui }) => {
   await gui.open({ containers: [ctr('web', { logs: 'listening on :80\nGET / 200\n' })] });
@@ -117,8 +121,43 @@ test('saída do último healthcheck na linha e no modal', async ({ page, gui }) 
   await expect(details.locator('pre')).toHaveText('código 1 · curl: (7) Failed to connect to localhost port 3000');
 
   await page.getByRole('button', { name: 'Logs api' }).click();
-  await expect(page.locator('#dlg-status')).toContainText(
-    'Último healthcheck: código 1 · curl: (7) Failed to connect to localhost port 3000');
+  const box = page.locator('#dlg-health');
+  await expect(box).toContainText('1 de 1 falharam');
+  await expect(box.locator('tr')).toHaveCount(1);
+  await expect(box.locator('tr').first().locator('td')).toHaveText(
+    [/^\d\d:\d\d:\d\d$/, '250 ms', 'falhou · 1', 'curl: (7) Failed to connect to localhost port 3000', 'Copiar']);
+});
+
+test('os 5 probes do healthcheck no modal, do mais novo para o mais velho', async ({ page, context, gui }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  const probe = (s: number, ExitCode: number, Output: string, ms = 200) =>
+    ({ Start: at(14, 0, s), End: at(14, 0, s, ms), ExitCode, Output });
+  // do mais velho para o mais novo, como o docker guarda
+  const Log = [probe(0, 1, 'falhou 1\n'), probe(10, 0, 'ok\n'), probe(20, 1, 'a\nb\nc\nd\ne\n'),
+               probe(30, -1, 'Health check exceeded timeout (5s)'), probe(40, 0, '', 1500)];
+  await gui.open({ containers: [ctr('api', { Status: 'Up 10 minutes (unhealthy)', health: { Status: 'unhealthy', Log } })] });
+  await page.getByRole('button', { name: 'Logs api' }).click();
+  const box = page.locator('#dlg-health'), rows = box.locator('tr');
+  await expect(box).toContainText('3 de 5 falharam');
+  await expect(rows).toHaveCount(5);
+  await expect(rows.nth(0).locator('td')).toHaveText([hms(14, 0, 40), '1,5 s', 'passou · 0', '(sem saída)', '']);
+  await expect(rows.nth(1).locator('td')).toHaveText([hms(14, 0, 30), '200 ms', 'não rodou como esperado · -1', 'Health check exceeded timeout (5s)', 'Copiar']);
+  // saída longa: 3 linhas à vista, o resto no "mais 2 linhas"
+  await expect(rows.nth(2).locator('pre').first()).toHaveText('a\nb\nc');
+  await rows.nth(2).getByText('mais 2 linhas').click();
+  await expect(rows.nth(2).locator('details pre')).toHaveText('d\ne');
+  await rows.nth(4).getByRole('button', { name: `Copiar a saída do probe das ${hms(14, 0, 0)}` }).click();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('falhou 1\n');
+});
+
+test('o ↻ do healthcheck relê sem esperar o status mudar', async ({ page, gui }) => {
+  await gui.open({ containers: [unhealthy] });
+  await page.getByRole('button', { name: 'Logs api' }).click();
+  await expect(page.locator('#dlg-health tr')).toHaveCount(1);
+  gui.update(s => { s.containers[0].health!.Log.push({ Start: at(14, 1, 0), End: at(14, 1, 0, 100), ExitCode: 0, Output: 'voltou\n' }); });
+  await page.getByRole('button', { name: 'Atualizar o healthcheck' }).click();
+  await expect(page.locator('#dlg-health tr')).toHaveCount(2);
+  await expect(page.locator('#dlg-health tr').first().locator('td').nth(3)).toHaveText('voltou');
 });
 
 test('healthcheck que ainda não rodou', async ({ page, gui }) => {

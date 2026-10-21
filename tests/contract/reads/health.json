@@ -6,7 +6,7 @@
   ],
   "calls": [
     {
-      "stdout": "{\"Status\": \"unhealthy\", \"FailingStreak\": 3, \"Log\": [{\"ExitCode\": 1, \"Output\": \"curl: (7) falhou\\n\"}]}\n",
+      "stdout": "{\"Status\": \"unhealthy\", \"FailingStreak\": 3, \"Log\": [{\"Start\": \"2026-10-21T13:00:00.123456789Z\", \"End\": \"2026-10-21T13:00:00.456789012Z\", \"ExitCode\": 1, \"Output\": \"curl: (7) falhou\\n\"}]}\n",
       "stderr": "",
       "code": 0,
       "args": [
@@ -29,6 +29,8 @@
       "FailingStreak": 3,
       "Log": [
         {
+          "Start": "2026-10-21T13:00:00.123456789Z",
+          "End": "2026-10-21T13:00:00.456789012Z",
           "ExitCode": 1,
           "Output": "curl: (7) falhou\n"
         }

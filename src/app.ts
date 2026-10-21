@@ -1501,13 +1501,14 @@ function healthHtml(id: string, v: Probe[] | string) {
   const rows = v.map((p, i) => {
     const [txt, tn] = PROBE[probeResult(p)], lines = p.Output.trimEnd().split('\n'), shown = esc(lines.slice(0, 3).join('\n'));
     const rest = lines.length > 3 ? `<details><summary class="w-fit cursor-pointer font-sans text-muted hover:text-fg rounded focus-visible:outline-2 focus-visible:outline-accent">${
-      t`mais ${lines.length - 3} linhas`}</summary><pre class="whitespace-pre-wrap [overflow-wrap:anywhere]">${esc(lines.slice(3).join('\n'))}</pre></details>` : '';
+      (lines.length === 4 ? t`mais 1 linha` : t`mais ${lines.length - 3} linhas`)}</summary><pre class="whitespace-pre-wrap [overflow-wrap:anywhere]">${esc(lines.slice(3).join('\n'))}</pre></details>` : '';
     return `<tr class="align-top"><td class="pr-3 py-0.5 text-muted whitespace-nowrap">${time(p.Start)}</td><td class="pr-3 py-0.5 text-muted whitespace-nowrap text-right">${dur(probeDuration(p))}</td>
       <td class="pr-3 py-0.5 whitespace-nowrap ${TONE[tn][1]}">${txt} · ${p.ExitCode}</td>
       <td class="pr-3 py-0.5 w-full [overflow-wrap:anywhere]"><pre class="whitespace-pre-wrap text-fg-soft">${shown || `<span class="font-sans text-muted">${t`(sem saída)`}</span>`}</pre>${rest}</td>
       <td class="py-0.5">${p.Output ? `<button onclick="copyProbe('${id}', ${i})" aria-label="${t`Copiar a saída do probe das ${time(p.Start)}`}" class="${SMALL_BTN}">${t`Copiar`}</button>` : ''}</td></tr>`;
   }).join('');
-  return head(healthSummary(v)) + `<div class="mt-1 max-h-48 overflow-auto"><table class="w-full font-mono"><caption class="sr-only">${
+  // a folga (p-1) é para o contorno dos botões, que a rolagem cortaria na borda
+  return head(healthSummary(v)) + `<div class="-mx-1 p-1 max-h-48 overflow-auto"><table class="w-full font-mono"><caption class="sr-only">${
     t`Últimos probes do healthcheck, do mais novo para o mais velho`}</caption><tbody>${rows}</tbody></table></div>`;
 }
 
