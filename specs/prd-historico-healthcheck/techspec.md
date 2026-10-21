@@ -2,23 +2,23 @@
 
 ## Resumo executivo
 
-Mudança só no front. A rota `/api/health/<id>` já devolve o objeto `State.Health` inteiro, com o `Log` das últimas 5 execuções (`Start`, `End`, `ExitCode` e `Output`), nos dois backends. Hoje o `loadHealth` usa só o `Log.at(-1)`. A feature amplia o tipo `Health`, cria um renderizador `healthTable` no `format.ts` (puro, testável) e troca a linha "Último healthcheck:" do modal por essa tabela. Os backends não mudam.
+Mudança só no front. A rota `/api/health/<id>` já devolve o objeto `State.Health` inteiro, com o `Log` das últimas 5 execuções (`Start`, `End`, `ExitCode` e `Output`), nos dois backends. Hoje o `loadHealth` usa só o `Log.at(-1)`. A feature amplia o tipo `Health`, cria funções puras dos probes no `format.ts` e um `healthHtml` no `app.ts` e troca a linha "Último healthcheck:" do modal por essa tabela. Os backends não mudam.
 
 ## Arquitetura
 
 ### Visão de componentes
 
-- **`src/format.ts`**:
+- **`src/format.ts`** (só dados, como o `topTable`):
   - `probeResult(p)` devolve `ok`, `fail` ou `error`;
   - `probeDuration(p)` calcula a duração em ms, a partir de `Start` e `End` em RFC 3339 com nanossegundos;
-  - `healthSummary(log)` monta o texto "3 de 5 falharam";
-  - `healthTable(log, t)` gera o HTML da tabela, com a saída escapada, limitada a 3 linhas e com um `<details>` para expandir.
+  - `healthSummary(log)` monta o texto "3 de 5 falharam".
+- **`healthHtml` no `app.ts`**, ao lado do `topHtml`: gera o HTML da tabela, com a saída escapada, limitada a 3 linhas e com um `<details>` para expandir.
 - **`src/app.ts`**:
   - o tipo `Health` ganha os campos do `Log`;
   - o `loadHealth` passa a guardar o `Log` inteiro, ordenado do mais novo para o mais velho;
   - o `renderDlg` troca a linha `#dlg-status` pela tabela;
   - a linha da lista (`<details>` "Ver último healthcheck") continua mostrando só o último, porque ali o espaço é de uma linha.
-- **Atualização com o ao vivo (RF2.2)**: o stream de eventos já recebe `health_status`. Com o modal aberto no container, um `health_status` dele invalida o cache `health[ID+Status]` e chama o `loadHealth`.
+- **Atualização (RF2.1 e RF2.2)**: o cache `health[ID+Status]` já vence quando o `Status` muda. Isso acontece numa mudança de saúde e também a cada minuto ("Up 5 minutes" → "Up 6 minutes"). Por isso não há handler de evento novo. Um botão ↻ apaga a chave e relê.
 
 ## Design de implementação
 
@@ -30,7 +30,7 @@ export type Health = {Status: string; FailingStreak: number; Log?: Probe[]} | nu
 export const probeResult = (p: Probe): 'ok' | 'fail' | 'error' => p.ExitCode === 0 ? 'ok' : p.ExitCode === 1 ? 'fail' : 'error';
 export function probeDuration(p: Probe): number | null;    // null se Start/End faltarem ou não fizerem sentido
 export function healthSummary(log: Probe[]): string;        // via t``
-export function healthTable(log: Probe[]): string;          // HTML escapado, mais novo primeiro
+// e no app.ts: function healthHtml(id: string, v: Probe[] | string): string
 ```
 
 ### Modelos de dado
@@ -52,7 +52,7 @@ Nenhum novo. Usa `GET /api/health/<id>`.
   - o `probeResult` com 0, 1 e -1;
   - o `probeDuration` com nanossegundos, com fuso e com o `End` vazio;
   - o `healthSummary`;
-  - o `healthTable`, com saída longa (só 3 linhas e o expandir) e com HTML na saída (escapado).
+  - a tabela (saída longa, HTML escapado) fica com o E2E, como o `topHtml`.
 - **E2E** (`tests/e2e/logs.spec.ts`): o docker falso já devolve `c.health`. O caso novo tem 5 probes alternando falha e sucesso, e confere o resumo e as 5 linhas; outro caso confere 0 probes ("Nenhum probe rodou ainda"). Roda nos dois backends.
 - **Contrato**: o `health.json` ganha `Start` e `End` no `Log`, para documentar que os dois backends passam os campos adiante.
 
@@ -72,7 +72,8 @@ Nada novo.
 
 - **Sem mudança no backend.** O dado já chega inteiro; recortar o `Log` no servidor só tiraria informação.
 - **Tabela no lugar da linha de hoje, no `#dlg-status`, e não uma seção `<details>` nova.** O PRD pede que a lista substitua a linha. Ela fica junto do status, porque é a explicação dele.
-- **Renderização pura no `format.ts`**, como o `topTable`, para testar sem navegador.
+- **Dados no `format.ts`, HTML no `app.ts`**, como o `topTable`/`topHtml`: o `format.ts` não gera marcação.
+- **Sem handler de evento para o ao vivo**: a chave `ID+Status` do cache já vence com a mudança de saúde.
 
 ### Riscos conhecidos
 
@@ -81,7 +82,7 @@ Nada novo.
 
 ### Conformidade com regras do projeto
 
-- Saída do container é texto não confiável: o `healthTable` escapa tudo, como o `topTable`.
+- Saída do container é texto não confiável: o `healthHtml` escapa tudo, como o `topHtml`.
 - Cor e texto juntos no resultado (WCAG 2.2 AA, DESIGN.md).
 - Textos novos em pt e en.
 
@@ -100,3 +101,5 @@ Nada novo.
 ## Histórico
 
 **2026-10-21**. Documento criado.
+
+**2026-10-21**. Durante o sdd-tasks: a tabela sai do `format.ts` e vai para o `app.ts` (`healthHtml`), no padrão `topTable`/`topHtml`; o RF2.2 fica com a chave do cache (`ID+Status`), sem handler de evento, mais um botão ↻ para o RF2.1.
