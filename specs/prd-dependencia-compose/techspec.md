@@ -119,9 +119,9 @@ Nada novo.
 
 - `src/format.ts`: `tone`/`bucket`/`isProblem` (48 a 63) e `project`/`service`/`workingDir` (64 a 72).
 - `src/app.ts`:
-  - `attention`, `inBand`, `bucketOf` e `rootsFirst`, junto do `quiet`; `render` e `renderCount`;
+  - `attention`, `inBand`, `bucketOf` e `attnSort` (o antigo `rootsFirst`), junto do `quiet`; `render` e `renderCount`;
   - `row` (assinatura), `DEP_TXT`, `depHtml` e `rowHtml`, além do `renderDlg`;
-  - o `load()` (o `newProblems` com o critério `attention`);
+  - o `checkAttention()` (o `newProblems` com o critério `attention` e a chave `alertKey`), chamado pelo `load()` e pelo `loadStats()`;
   - `load` (149), `row` (441, assinatura do cache) e `notify` (210).
 - `tests/format.test.js`, `tests/e2e/fixtures.ts`, `tests/e2e/compose.spec.ts` e `tests/e2e/problems.spec.ts`.
 
@@ -138,3 +138,10 @@ Nada novo.
 **2026-10-21**. Reconciliação do sdd-review:
 - Entraram o `bucketOf`, para o filtro e as contagens seguirem a faixa (achado no print da tela; antes o "Created" segurado contava como parado), e a anotação no modal de logs, como texto (o PRD já pedia o modal).
 - A anotação aparece também na linha do grupo do projeto, porque o `depHtml` está no `rowHtml`. O PRD foi atualizado nesse ponto.
+
+**2026-10-21**. Vindo do [alerta de memória](../prd-alerta-memoria/techspec.md):
+- O `rootsFirst` virou `attnSort`: raiz de dependência, depois os graves, depois quem só está perto do limite.
+- O critério de entrada (`attention`) e o `bucketOf` contam também a memória.
+- A notificação passou a comparar pela chave (`ID`, ou `ID:mem`).
+
+A regra desta feature não muda: o "Created" segurado é grave, e a raiz continua primeiro.
