@@ -160,6 +160,16 @@ test('o ↻ do healthcheck relê sem esperar o status mudar', async ({ page, gui
   await expect(page.locator('#dlg-health tr').first().locator('td').nth(3)).toHaveText('voltou');
 });
 
+test('abrir os logs relê os probes, mesmo sem o status mudar', async ({ page, gui }) => {
+  await gui.open({ containers: [unhealthy] });
+  // a linha já leu (e guardou) o healthcheck
+  await row(page, 'api').locator('summary', { hasText: 'Ver último healthcheck' }).click();
+  await expect(row(page, 'api').locator('details[data-keep="health"] pre')).toContainText('código 1');
+  gui.update(s => { s.containers[0].health!.Log.push({ Start: at(14, 1, 0), End: at(14, 1, 0, 100), ExitCode: 0, Output: 'voltou\n' }); });
+  await page.getByRole('button', { name: 'Logs api' }).click();
+  await expect(page.locator('#dlg-health tr')).toHaveCount(2);
+});
+
 test('healthcheck que ainda não rodou', async ({ page, gui }) => {
   await gui.open({ containers: [ctr('api', { Status: 'Up 2 seconds (health: starting)', health: { Status: 'starting', Log: [] } })] });
   await row(page, 'api').locator('summary', { hasText: 'Ver último healthcheck' }).click();

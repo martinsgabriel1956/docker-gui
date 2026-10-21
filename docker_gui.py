@@ -13172,11 +13172,13 @@ ${WIDE.matches ? "" : `
     svcSet.clear();
     renderSvcs();
     $2("#lb").textContent = t`Carregando…`;
-    $2("#lmeta").textContent = hist().replace(/^./, (c) => c.toUpperCase());
+    $2("#lmeta").textContent = hist().replace(/^./, (c2) => c2.toUpperCase());
     $2("#dlg-msg").innerHTML = "";
     $2("#insp").hidden = $2("#hist").hidden = $2("#procs").hidden = !!logProject;
     renderHits();
     renderMore();
+    const c = !logProject && data.find((c2) => c2.ID === logId);
+    if (c) delete health[c.ID + c.Status];
     $2("#dlg").showModal();
     renderDlg();
     fetchLogs();

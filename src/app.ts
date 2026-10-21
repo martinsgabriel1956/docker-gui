@@ -1379,6 +1379,9 @@ function openLogs(title: string, running: boolean) {
   $('#lb').textContent = t`Carregando…`; $('#lmeta').textContent = hist().replace(/^./, c => c.toUpperCase()); $('#dlg-msg').innerHTML = '';
   $('#insp').hidden = $('#hist').hidden = $('#procs').hidden = !!logProject;  // configuração, histórico e processos são de um container só
   renderHits(); renderMore();
+  // os probes são lidos de novo a cada abertura: um Status como "Up About an hour" seguraria o cache por uma hora
+  const c = !logProject && data.find(c => c.ID === logId);
+  if (c) delete health[c.ID + c.Status];
   $<HTMLDialogElement>('#dlg').showModal(); renderDlg(); fetchLogs();
   $('#lb').focus();  // a caixa do log: as setas rolam, / vai para o filtro e r reinicia
   if (running && wantsFollow()) toggleFollow(true);  // ao vivo por padrão; desligado só para quem desligou da última vez
