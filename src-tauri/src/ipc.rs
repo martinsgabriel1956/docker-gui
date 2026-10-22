@@ -230,8 +230,9 @@ pub async fn open_dir(
     if !std::path::Path::new(&dir).is_dir() {
         return Err(format!("{} {dir}", say("A pasta não existe mais:", "The folder no longer exists:")));
     }
-    app.opener().open_path(&dir, None::<&str>).map_err(|e| {
-        log::warn!("abrir a pasta do projeto: {e}");
+    app.opener().open_path(&dir, None::<&str>).map_err(|_| {
+        // sem o erro do opener, que traz o caminho (a regra de log do projeto)
+        log::warn!("abrir a pasta do projeto: o gerenciador de arquivos recusou");
         format!("{} {dir}", say("Não consegui abrir a pasta:", "Could not open the folder:"))
     })
 }
