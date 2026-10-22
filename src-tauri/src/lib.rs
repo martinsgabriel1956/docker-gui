@@ -15,6 +15,7 @@ use prefs::Prefs;
 use stivo_core::Ctx;
 use stivo_core::terminal::Terminal;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri_plugin_window_state::StateFlags;
 
 pub struct AppState {
     ctx: RwLock<Ctx>,
@@ -64,10 +65,22 @@ fn lean_webview(window: &tauri::WebviewWindow) {
 }
 
 pub fn run() {
+    // aberto pelo login (autostart.rs): direto na bandeja, sem janela (PRD do iniciar com o sistema, RF2.2)
+    let tray_only = std::env::args().any(|a| a == autostart::ARG);
     tauri::Builder::default()
-        // abrir o Stivo de novo traz a janela que já existe (e o clique no toast do Windows também passa por aqui)
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| background::show_main(app)))
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        // abrir o Stivo de novo traz a janela que já existe (e o clique no toast do Windows também passa por aqui);
+        // um login de novo com o app aberto (sessão restaurada) não traz
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if !argv.iter().any(|a| a == autostart::ARG) {
+                background::show_main(app);
+            }
+        }))
+        // sem VISIBLE: quem decide se a janela aparece é o --autostart, não como ela estava ao sair
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(StateFlags::all() - StateFlags::VISIBLE)
+                .build(),
+        )
         .plugin(tauri_plugin_opener::init())
         .plugin(
             tauri_plugin_log::Builder::new()
@@ -91,13 +104,14 @@ pub fn run() {
             ipc::prefs_set,
             ipc::open_dir,
         ])
-        .setup(|app| {
+        .setup(move |app| {
             let prefs = app.path().app_config_dir().map(|d| Prefs::load(&d)).unwrap_or_default();
             app.manage(AppState::new(prefs));
             background::tray(app.handle())?;
             log::info!("Stivo aberto");
             let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::CustomProtocol(page::url()))
                 .title("Stivo")
+                .visible(!tray_only)
                 .inner_size(1280.0, 820.0)
                 .min_inner_size(480.0, 420.0)
                 // o título da página (contexto e contagens, como a aba da versão web) vira o da janela (PRD RF3.3)
