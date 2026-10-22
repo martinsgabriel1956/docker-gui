@@ -13,6 +13,7 @@ const db = ctr('db', {
 test('Configuração mostra o inspect resumido com o env mascarado', async ({ page, gui }) => {
   await gui.open({ containers: [db] });
   await page.getByRole('button', { name: 'Logs db' }).click();
+  await page.locator('#extra > summary').click();
   await page.locator('#insp summary').click();
   const body = page.locator('#insp-body');
   await expect(body.locator('dd')).toHaveText([
@@ -37,6 +38,7 @@ test('Configuração mostra o inspect resumido com o env mascarado', async ({ pa
   await expect(page.locator('#insp')).not.toHaveAttribute('open');
   await expect(body).not.toContainText('s3cr3t');
   await page.getByRole('button', { name: 'Logs db' }).click();
+  await page.locator('#extra > summary').click();
   await page.locator('#insp summary').click();
   await expect(body).toContainText('POSTGRES_PASSWORD=••••••');
 });
@@ -52,6 +54,7 @@ test('Histórico mostra quando o container subiu, caiu e mudou de saúde', async
     { Type: 'container', Action: 'health_status: unhealthy', time: at(14, 5) },
   ] })] });
   await page.getByRole('button', { name: 'Logs api' }).click();
+  await page.locator('#extra > summary').click();
   await page.locator('#hist summary').click();
   const body = page.locator('#hist-body');
   await expect(body.locator('p')).toHaveText('Desde 14:00:00: subiu 2× · caiu 1×');
@@ -68,6 +71,7 @@ test('Histórico mostra quando o container subiu, caiu e mudou de saúde', async
 test('Histórico vazio diz por quê', async ({ page, gui }) => {
   await gui.open({ containers: [ctr('web')] });
   await page.getByRole('button', { name: 'Logs web' }).click();
+  await page.locator('#extra > summary').click();
   await page.locator('#hist summary').click();
   await expect(page.locator('#hist-body')).toHaveText('Nada nas últimas 24 h. O docker guarda só os eventos mais recentes.');
 });
@@ -76,10 +80,13 @@ test('Processos mostra o docker top, só com o container de pé', async ({ page,
   await gui.open({ containers: [ctr('db', { top: 'UID  PID   CMD\n70   104   postgres\n70   105   postgres: checkpointer' }),
                                ctr('cron', { State: 'exited', Status: 'Exited (0) 3 days ago' })] });
   await page.getByRole('button', { name: 'Logs db' }).click();
+  await page.locator('#extra > summary').click();
   await page.locator('#procs summary').click();
   await expect(page.locator('#procs-body tr')).toHaveText(['UIDPIDCMD', '70104postgres', '70105postgres: checkpointer']);
   await page.keyboard.press('Escape');
   await page.getByRole('button', { name: 'Logs cron' }).click();
+  await expect(page.locator('#extra > summary')).toBeVisible();  // os detalhes continuam, sem os Processos
+  await page.locator('#extra > summary').click();
   await expect(page.locator('#procs')).toBeHidden();
   await expect(page.locator('#hist')).toBeVisible();
 });
@@ -87,6 +94,7 @@ test('Processos mostra o docker top, só com o container de pé', async ({ page,
 test('container sem mounts, redes nem env', async ({ page, gui }) => {
   await gui.open({ containers: [ctr('web')] });
   await page.getByRole('button', { name: 'Logs web' }).click();
+  await page.locator('#extra > summary').click();
   await page.locator('#insp summary').click();
   await expect(page.locator('#insp-body dd')).toHaveText(['no · não reinicia', 'nenhuma', 'nenhum', 'nenhuma']);
   await expect(page.getByRole('button', { name: 'Revelar valores' })).toHaveCount(0);
@@ -95,6 +103,7 @@ test('container sem mounts, redes nem env', async ({ page, gui }) => {
 // docker diff: o que mudou no filesystem do container em relação à imagem
 const openDiff = async (page: import('@playwright/test').Page, name: string) => {
   await page.getByRole('button', { name: `Logs ${name}` }).click();
+  await page.locator('#extra > summary').click();
   await page.locator('#diff summary').click();
 };
 

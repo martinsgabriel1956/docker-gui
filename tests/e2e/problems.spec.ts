@@ -39,10 +39,12 @@ test('dados velhos ficam visíveis mas não aceitam clique', async ({ page, gui 
   await expect(page.locator('#banner')).toBeVisible();
   await expect(page.locator('#table')).toHaveJSProperty('inert', true);
   await expect(page.locator('#count')).toHaveText(/^Desatualizado · dados de \d\d:\d\d$/);
+  await expect(page.locator('#live')).toHaveText('desatualizado');  // o "ao vivo" verde desmentiria o aviso
   await expect(page.locator(`#rows`)).toContainText('web');  // a lista continua lá, só esmaecida
 
   gui.update(s => { delete s.ps_error; });
   await expect(page.locator('#table')).toHaveJSProperty('inert', false);
+  await expect(page.locator('#live')).not.toHaveText('desatualizado');
 });
 
 test('servidor do Stivo caiu', async ({ page, gui }) => {

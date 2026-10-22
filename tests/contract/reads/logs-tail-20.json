@@ -1,5 +1,5 @@
 {
-  "desc": "tail=5: a última linha de quem caiu",
+  "desc": "tail=20: a linha de quem caiu",
   "lang": "pt",
   "cli": [
     "docker"
@@ -13,14 +13,14 @@
         "logs",
         "--timestamps",
         "--tail",
-        "5",
+        "20",
         "0123456789ab"
       ]
     }
   ],
   "request": {
     "method": "GET",
-    "path": "/api/logs/0123456789ab?tail=5",
+    "path": "/api/logs/0123456789ab?tail=20",
     "body": null
   },
   "response": {

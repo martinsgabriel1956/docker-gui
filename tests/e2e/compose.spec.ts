@@ -205,7 +205,7 @@ test('Logs do projeto juntam os serviços em ordem, com o prefixo de cada um', a
   await expect(page.locator('#lb')).toHaveText('db-1  | 2026-10-05T10:00:01Z db pronto\napi-1  | 2026-10-05T10:00:02Z api pronto\n');
   await expect(page.locator('#dlg-status')).toHaveText('Projeto compose · 1 de 2 rodando · todos os serviços');
   await expect(page.locator('#lmeta')).toContainText('Últimas 500 linhas de cada container');
-  await expect(page.locator('#insp')).toBeHidden();  // o inspect é de um container só
+  await expect(page.locator('#extra')).toBeHidden();  // o inspect, o histórico... são de um container só
   expect(gui.read().compose_calls).toEqual([[...PREFIX, 'logs', '--no-color', '--timestamps', '--tail', '500']]);
 
   await page.keyboard.press('Escape');
@@ -218,7 +218,7 @@ test('Logs do projeto juntam os serviços em ordem, com o prefixo de cada um', a
   expect(await prefixes.nth(0).getAttribute('class')).not.toBe(await prefixes.nth(1).getAttribute('class'));  // db e api
   await page.keyboard.press('Escape');
   await page.getByRole('button', { name: 'Logs db' }).click();
-  await expect(page.locator('#insp')).toBeVisible();
+  await expect(page.locator('#extra')).toBeVisible();
   await expect(page.locator('#lb')).toHaveText('2026-10-05T10:00:01Z db pronto\n');
 });
 

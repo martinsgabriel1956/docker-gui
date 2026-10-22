@@ -1,5 +1,6 @@
 """Testes do backend. Só stdlib: o docker CLI é trocado por mock, exceto em RealDockerTest."""
 import errno
+import gzip
 import http.client
 import io
 import json
@@ -84,6 +85,18 @@ class HostTest(ServerTest):
         _, body = self.request("GET", "/", token=None)
         self.assertNotIn("/*CSS*/", body)
         self.assertIn("tailwindcss", body)
+
+    def test_page_is_gzipped_when_accepted(self):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
+        conn.request("GET", "/", headers={"Host": f"localhost:{self.port}", "Accept-Encoding": "gzip, deflate"})
+        r = conn.getresponse()
+        data = r.read()
+        conn.close()
+        self.assertEqual(r.getheader("Content-Encoding"), "gzip")
+        self.assertEqual(gzip.decompress(data).decode(), docker_gui.PAGE)
+        # sem o Accept-Encoding (curl, http.client), o texto puro
+        _, body = self.request("GET", "/", token=None)
+        self.assertEqual(body, docker_gui.PAGE)
 
     def test_foreign_host_is_forbidden(self):
         for host in (f"evil.com:{self.port}", "evil.com", f"localhost:{self.port + 1}", "localhost", ""):

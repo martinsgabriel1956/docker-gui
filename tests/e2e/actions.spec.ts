@@ -17,6 +17,33 @@ test('Parar avisa, a linha passa para o novo estado e dá para iniciar de novo',
   await expect(toast(page)).toHaveText('web está de pé.');
 });
 
+test('r reinicia o container em loop; sem o que reiniciar, diz por quê', async ({ page, gui }) => {
+  await gui.open({ containers: [ctr('api', { State: 'restarting', Status: 'Restarting (1) 4 seconds ago' }),
+                               ctr('pausado', { State: 'paused', Status: 'Up 3 minutes (Paused)' })] });
+  await row(page, 'api').getByRole('button', { name: 'Logs api' }).focus();
+  await page.keyboard.press('r');
+  await expect(toast(page)).toContainText('api reiniciado');
+  expect(gui.container('api')!.State).toBe('running');
+  await row(page, 'pausado').getByRole('button', { name: 'Logs pausado' }).focus();
+  await page.keyboard.press('r');
+  await expect(toast(page)).toHaveText('Nada a reiniciar em pausado: pausado.');
+});
+
+test('↑↓ andam dentro do "⋯", e o Tab para fora fecha o menu', async ({ page, gui }) => {
+  await gui.open({ containers: [ctr('db'), ctr('web')] });
+  await menu(page, 'db').click();
+  await page.keyboard.press('ArrowDown');
+  await expect(page.getByRole('button', { name: 'Pausar' })).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await expect(page.getByRole('button', { name: 'Abrir terminal' })).toBeFocused();
+  await page.keyboard.press('ArrowUp');
+  await page.keyboard.press('ArrowUp');  // do primeiro, volta para o último
+  await expect(page.getByRole('button', { name: 'Remover (indisponível: pare o container antes)' })).toBeFocused();
+  // aberto, o menu cobria os botões da linha de baixo
+  await page.keyboard.press('Tab');
+  await expect(page.locator('details[data-keep="menu"][open]')).toHaveCount(0);
+});
+
 test('Iniciar confere depois de uns segundos se o container ficou de pé', async ({ page, gui }) => {
   await gui.open({ containers: [stopped('cron')] });
   await page.getByRole('button', { name: 'Iniciar cron' }).click();

@@ -631,6 +631,20 @@ test('pullOutcome compara o ID da tag antes e depois', () => {
   assert.equal(f.pullOutcome(null, null), 'missing');  // por digest, ou tag que a lista mostra de outro jeito
 });
 
+test('tailLine escolhe a linha que explica a queda', () => {
+  const at = '2026-10-22T10:00:00.000000000Z ';
+  // mesmo instante: a ordem do docker vale, não a alfabética ("Traceback" > "KeyError")
+  assert.equal(f.tailLine(`${at}INFO up\n${at}Traceback (most recent call last):\n${at}  File "/app/main.py", line 12\n${at}KeyError: 'DATABASE_URL'\n`),
+    "KeyError: 'DATABASE_URL'");
+  // o erro com o stack trace depois: a linha do erro, não o último "at …"
+  assert.equal(f.tailLine(`${at}Error: Cannot find module 'x'\n${at}    at Module._resolveFilename (node:internal)\n${at}    at main.js:1\n`),
+    "Error: Cannot find module 'x'");
+  // stderr chegou depois do stdout: o timestamp devolve a ordem
+  assert.equal(f.tailLine('2026-10-22T10:00:02Z ERROR boom\n2026-10-22T10:00:01Z INFO start\n'), 'ERROR boom');
+  assert.equal(f.tailLine('2026-10-22T10:00:01Z INFO ready\n'), 'INFO ready');  // sem erro, a última
+  assert.equal(f.tailLine(''), '');
+});
+
 test('imageOk segue a regra do run', () => {
   assert.ok(f.imageOk('postgres:17'));
   assert.ok(!f.imageOk('Postgres'));

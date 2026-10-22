@@ -118,6 +118,7 @@ test('botão principal depende do estado e Logs fica sempre no mesmo lugar', asy
       ctr('on'), ctr('off', { State: 'exited', Status: 'Exited (0) 1 hour ago' }),
       ctr('pausado', { State: 'paused', Status: 'Up 3 minutes (Paused)' }),
       ctr('zumbi', { State: 'dead', Status: 'Dead' }),
+      ctr('loop', { State: 'restarting', Status: 'Restarting (1) 5 seconds ago' }),
     ],
   });
   const actions = async (name: string) =>
@@ -126,6 +127,7 @@ test('botão principal depende do estado e Logs fica sempre no mesmo lugar', asy
   expect(await actions('off')).toEqual(['Iniciar', 'Logs']);
   expect(await actions('pausado')).toEqual(['Retomar', 'Logs']);
   expect(await actions('zumbi')).toEqual(['Logs']);  // dead não inicia: só remove, pelo menu
+  expect(await actions('loop')).toEqual(['Reiniciar', 'Logs']);  // em loop, o próximo passo do ciclo; o Parar fica no "⋯"
 });
 
 test('imagem sem o host do registry, completa no title', async ({ page, gui }) => {

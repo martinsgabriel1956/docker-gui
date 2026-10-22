@@ -39,7 +39,7 @@ pub fn log_tail(v: &str) -> Option<&'static [&'static str]> {
         "2000" => &["--tail", "2000"],
         "10000" => &["--tail", "10000"],
         "all" => &[],
-        "5" => &["--tail", "5"], // a última linha de quem caiu, que a lista mostra na faixa de atenção
+        "20" => &["--tail", "20"], // a linha de quem caiu que a faixa de atenção mostra (o erro antes do stack trace)
         _ => return None,
     })
 }

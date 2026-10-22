@@ -508,6 +508,17 @@ export const logLevel = (line: string): LogLevel => LEVEL.find(([, word, mark]) 
 // abriu o trace, para "Só erros" mostrar o trace inteiro. Recebe a linha sem o prefixo do serviço e sem o timestamp
 export const continues = (body: string): boolean => /^(\s+\S|Caused by:|\.\.\. \d+ more)/.test(body);
 
+// a linha que a faixa de atenção mostra de quem caiu, sem o timestamp: a que explica a queda. O timestamp ordena (stdout
+// e stderr chegam um depois do outro); no empate vale a ordem do docker (o sort é estável), e não a alfabética, que punha
+// "Traceback…" depois de "KeyError…". Entre as linhas, a última de erro que não continua um stack trace nem o abre;
+// sem nenhuma, a última
+export function tailLine(text: string): string {
+  const ts = /^\d{4}-\d\d-\d\dT\S+\s/;
+  const lines = text.split('\n').filter(l => l.trim()).map(l => [l.match(ts)?.[0] ?? '', l.replace(ts, '')])
+    .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([, l]) => l);
+  return lines.reverse().find(l => logLevel(l) === 'bad' && !continues(l) && !l.startsWith('Traceback (')) ?? lines[0] ?? '';
+}
+
 // fatia liberável de uma categoria do docker system df (0 a 1), para a barra: o "(40%)" do Reclaimable, ou a
 // conta pelos tamanhos quando ele não vem (o build cache manda só "3.3GB"); null se não der para saber
 export function reclaimShare(d: DiskUsage): number | null {
