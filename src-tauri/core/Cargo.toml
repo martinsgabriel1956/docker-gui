@@ -28,6 +28,8 @@ portable-pty = "=0.9.0"
 regex = "=1.13.1"
 # preserve_order: as Labels do podman (um dict) viram texto na ordem em que vieram, como no Python
 serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+# baixar arquivo: o tar que o docker cp escreve no stdout (só leitura, sem xattr)
+tar = { version = "=0.4.46", default-features = false }
 tokio = { version = "=1.54.0", features = ["process", "io-util", "time", "sync", "macros", "rt-multi-thread"] }
 axum = { version = "=0.8.9", features = ["ws"], optional = true }
 getrandom = { version = "=0.3.4", optional = true }

@@ -33,6 +33,8 @@ pub async fn api(
     match stivo_core::handle(&state.ctx(), Request::new(self::method(&method), &path, body)).await {
         Reply::Json(r) => Ok(ApiReply { status: r.status, body: r.body }),
         Reply::Ndjson(_) => Err("rota com stream: use stream_open".into()),
+        // o desktop baixa pelo cp_save (a janela "Salvar como"), sem passar os bytes pela página
+        Reply::File(_) => Ok(ApiReply { status: 404, body: "not found".into() }),
     }
 }
 
@@ -68,6 +70,7 @@ pub async fn stream_open(
         let mut lines = match stivo_core::handle(&ctx, Request::new(Method::Post, &path, body)).await {
             Reply::Ndjson(lines) => lines,
             Reply::Json(r) => return Err(ApiReply { status: r.status, body: r.body }),
+            Reply::File(_) => return Err(ApiReply { status: 404, body: "not found".into() }), // só GET baixa
         };
         tauri::async_runtime::spawn(async move {
             // o compose segue até o fim mesmo que a página saia: aqui só deixa de mandar

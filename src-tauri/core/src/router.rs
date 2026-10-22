@@ -57,6 +57,8 @@ pub enum Reply {
     Json(Response),
     /// o compose: uma linha de saída por item (string) e, no fim, {"code": n}
     Ndjson(BoxStream<'static, Value>),
+    /// o download do baixar arquivo (docker cp): bytes e nome
+    File(crate::cp::CpFile),
 }
 
 /// o early return do Python (self.send(...); return None): o erro já é a resposta
@@ -81,6 +83,14 @@ pub(crate) fn caps(re: &str, s: &str) -> Option<Vec<String>> {
 }
 
 pub async fn handle(ctx: &Ctx, req: Request) -> Reply {
+    if req.method == Method::Get
+        && let Some(m) = caps(r"/api/cp/([0-9a-f]{12,64})", &req.path)
+    {
+        // baixar arquivo ou pasta do container (também parado): bytes, não JSON
+        let qs = parse_qs(&req.query, true);
+        let path = qs_get(&qs, "path").and_then(|v| v.first()).map_or("", String::as_str);
+        return crate::cp::cp_out(ctx, &m[1], path).await.map_or_else(Reply::Json, Reply::File);
+    }
     match req.method {
         Method::Get => Reply::Json(get(ctx, &req).await.unwrap_or_else(|e| e)),
         Method::Post => post(ctx, &req).await,

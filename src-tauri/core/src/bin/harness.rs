@@ -14,6 +14,7 @@ use axum::http::{HeaderMap, HeaderValue, Method as HttpMethod, StatusCode, Uri, 
 use axum::response::Response;
 use axum::routing::get;
 use futures_util::StreamExt;
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::Value;
 use stivo_core::i18n::trf;
 use stivo_core::streams::StreamMsg;
@@ -123,6 +124,18 @@ async fn dispatch(
     let json = (!body.is_empty() && body.len() <= MAX_BODY).then(|| serde_json::from_slice(&body).ok()).flatten();
     match stivo_core::handle(&app.ctx, Request::new(method, target, json)).await {
         Reply::Json(r) => send(r.status, &r.body),
+        Reply::File(f) => {
+            // o send_bytes do Python: o quote(safe='') deixa _.-~ sem codificar
+            const NAME: &AsciiSet = &NON_ALPHANUMERIC.remove(b'_').remove(b'.').remove(b'-').remove(b'~');
+            let disposition = format!("attachment; filename*=UTF-8''{}", utf8_percent_encode(&f.name, NAME));
+            let mut r = send(200, &Value::Null);
+            *r.body_mut() = Body::from(f.data);
+            let h = r.headers_mut();
+            h.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
+            h.insert(header::CONTENT_DISPOSITION, HeaderValue::from_str(&disposition).expect("nome codificado"));
+            h.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+            r
+        }
         Reply::Ndjson(lines) => {
             let body = lines.map(|v| Ok::<_, std::convert::Infallible>(format!("{v}\n")));
             let mut r = Response::new(Body::from_stream(body));
