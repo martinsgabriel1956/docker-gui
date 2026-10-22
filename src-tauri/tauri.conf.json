@@ -34,6 +34,19 @@
     "license": "MIT",
     "publisher": "Gabriel Martins",
     "homepage": "https://github.com/martinsgabriel1956/docker-gui",
+    "windows": {
+      "nsis": {
+        "installerHooks": "windows/hooks.nsh"
+      },
+      "wix": {
+        "fragmentPaths": [
+          "windows/autostart.wxs"
+        ],
+        "componentRefs": [
+          "AutostartCleanup"
+        ]
+      }
+    },
     "linux": {
       "rpm": {
         "depends": [
