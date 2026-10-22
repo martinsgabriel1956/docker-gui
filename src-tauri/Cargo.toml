@@ -34,6 +34,10 @@ log = "=0.4.34"
 webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
 libc = "=0.2.191"
 
+[target.'cfg(windows)'.dependencies]
+# o "Iniciar com o sistema" no HKCU\...\Run: a mesma versão que o Tauri já traz
+winreg = "=0.56.0"
+
 [workspace]
 # core: o equivalente ao backend do docker_gui.py, sem Tauri (cargo test e o harness dos testes não precisam do WebKit)
 members = ["core"]
