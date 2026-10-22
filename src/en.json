@@ -213,6 +213,8 @@
  "Nome inválido: 2 a 128 caracteres entre letras, números, _ . e -, começando por letra ou número.": "Invalid name: 2 to 128 characters among letters, digits, _ . and -, starting with a letter or digit.",
  "Notificar quando algo der problema": "Notify me when something breaks",
  "Notificar quando um container entrar na faixa de atenção": "Notify me when a container needs attention",
+ "Iniciar com o sistema": "Start with the system",
+ "Abre na bandeja ao entrar na sua conta. No GNOME sem a extensão AppIndicator, ele roda sem ícone visível.": "Opens in the tray when you log in. On GNOME without the AppIndicator extension, it runs with no visible icon.",
  "Novo container": "New container",
  "Não consegui carregar os logs. O servidor do Stivo está rodando?": "Could not load the logs. Is the Stivo server running?",
  "Não consegui conectar ao servidor do Stivo.": "Could not connect to the Stivo server.",

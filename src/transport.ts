@@ -13,7 +13,7 @@ export interface TermHandlers { open(): void; data(b: Uint8Array): void; notice(
 export interface Term { send(data: string): void; resize(cols: number, rows: number): void; close(): void }
 export interface NdjsonResult { status: number; code: number; error?: unknown }
 // preferências do app desktop (a versão web usa as flags e as variáveis de ambiente). null = o padrão de hoje
-export interface Prefs { cli: string | null; context: string | null; lang: string | null; notifications: boolean }
+export interface Prefs { cli: string | null; context: string | null; lang: string | null; notifications: boolean; autostart: boolean }
 export interface DesktopPrefs {
   get(): Promise<Prefs & {contexts: string[]}>;
   set(p: Prefs): Promise<string | null>;  // a mensagem de erro, ou null (a janela recarrega)

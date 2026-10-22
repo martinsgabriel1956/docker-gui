@@ -2124,6 +2124,8 @@ async function openPrefs() {
   ctx.value = p.context && p.contexts.includes(p.context) ? p.context : '';
   sel('lang').value = p.lang ?? '';
   $<HTMLInputElement>('#pref-notify').checked = p.notifications;
+  const auto = $<HTMLInputElement>('#pref-autostart');
+  auto.checked = auto.defaultChecked = p.autostart;  // defaultChecked: o estado real, para voltar se salvar falhar
   prefsContext();
   $('#prefs-msg').textContent = '';
   $<HTMLDialogElement>('#prefs').showModal();
@@ -2136,10 +2138,12 @@ async function savePrefs(e: SubmitEvent) {
   const v = (k: string) => $<HTMLSelectElement>(`#pref-${k}`).value || null, go = $('#prefs-go');
   if (go.getAttribute('aria-disabled') === 'true') return;
   go.setAttribute('aria-disabled', 'true');
+  const auto = $<HTMLInputElement>('#pref-autostart');
   const err = await T.prefs!.set({cli: v('cli'), context: v('cli') === 'podman' ? null : v('context'), lang: v('lang'),
-                                  notifications: $<HTMLInputElement>('#pref-notify').checked});
+                                  notifications: $<HTMLInputElement>('#pref-notify').checked, autostart: auto.checked});
   go.removeAttribute('aria-disabled');
-  if (err) $('#prefs-msg').textContent = err;
+  // com erro nada mudou (nem o início automático): a caixa volta ao que o sistema tem (RF1.4)
+  if (err) { $('#prefs-msg').textContent = err; auto.checked = auto.defaultChecked; }
 }
 if (T.prefs) {
   $('#prefs-open').hidden = false;

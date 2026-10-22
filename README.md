@@ -44,7 +44,7 @@ O Stivo também vem como app instalável para Linux (`.deb` e `.rpm`) e Windows 
 - **Não precisa de Python.** O instalador tem uns 3 MB e usa a WebView do sistema (o WebKitGTK no Linux, o WebView2 no Windows); do lado de fora, só o `docker` (ou o `podman`).
 - **Fica na bandeja.** Fechar a janela não encerra o app: ele continua vigiando os containers, o ícone da bandeja mostra quantos precisam de atenção e a notificação do sistema avisa quando um entra na faixa (com as mesmas regras da página: só quem entra, uma notificação para vários juntos). Para sair, use Sair no menu da bandeja. Abrir o Stivo de novo traz a janela de volta.
 - **Nenhuma porta aberta.** A janela fala com o núcleo pela IPC do app, sem servidor em `localhost` e sem token.
-- **Preferências** no cabeçalho e no menu da bandeja: CLI (Docker ou Podman), contexto do docker, idioma e notificações. Valem na hora.
+- **Preferências** no cabeçalho e no menu da bandeja: CLI (Docker ou Podman), contexto do docker, idioma, notificações e iniciar com o sistema (abre na bandeja ao entrar na conta). Valem na hora.
 - **Terminal com TTY também no Windows** (ConPTY), sem o `script` dentro do container.
 
 No GNOME, a bandeja depende da extensão [AppIndicator](https://extensions.gnome.org/extension/615/appindicator-support/): sem ela o ícone não aparece (o app continua rodando, e abrir o Stivo de novo traz a janela). No Windows, como o instalador não é assinado, o SmartScreen avisa na primeira execução ("Mais informações" → "Executar assim mesmo").

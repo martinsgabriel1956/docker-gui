@@ -1,6 +1,5 @@
 //! Stivo desktop: a janela com a página da versão web, falando com o núcleo (stivo-core) pela IPC, sem porta aberta.
 //! Fechar a janela deixa o app na bandeja, vigiando os containers.
-#[allow(dead_code)] // usado a partir das preferências
 mod autostart;
 mod background;
 mod ipc;

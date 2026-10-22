@@ -143,6 +143,8 @@ pub struct PrefsView {
     context: Option<String>,
     lang: Option<String>,
     notifications: bool,
+    /// lido do sistema a cada vez, não do prefs.json (RF1.3)
+    autostart: bool,
     contexts: Vec<String>,
 }
 
@@ -161,6 +163,7 @@ pub async fn prefs_get(state: State<'_, AppState>) -> Result<PrefsView, String> 
         context: p.context.clone(),
         lang: p.lang.clone(),
         notifications: p.notifications(),
+        autostart: crate::autostart::enabled(),
         contexts: contexts().await,
     })
 }
@@ -175,6 +178,14 @@ pub async fn prefs_set(
 ) -> Result<(), String> {
     let en = state.ctx().lang == stivo_core::Lang::En;
     crate::prefs::validate(&prefs, &contexts().await, en)?;
+    // antes de salvar o resto: se o sistema recusar, nada muda (RF1.4). O kind, não o erro: o motivo, sem o caminho
+    if prefs.autostart != crate::autostart::enabled() {
+        crate::autostart::set(prefs.autostart).map_err(|e| {
+            log::warn!("iniciar com o sistema: {}", e.kind());
+            let (pt, en_) = ("O sistema recusou o início automático:", "The system refused to start Stivo at login:");
+            format!("{} {}", if en { en_ } else { pt }, e.kind())
+        })?;
+    }
     let saved = {
         let mut p = state.prefs.lock().unwrap();
         p.cli = prefs.cli;

@@ -336,6 +336,13 @@
         <input id="pref-notify" type="checkbox" class="mt-0.5 size-4 accent-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
         <span>Notificar quando um container entrar na faixa de atenção</span>
       </label>
+      <div>
+        <label class="flex items-start gap-2 w-fit coarse:py-2 cursor-pointer">
+          <input id="pref-autostart" type="checkbox" aria-describedby="pref-autostart-hint" class="mt-0.5 size-4 accent-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+          <span>Iniciar com o sistema</span>
+        </label>
+        <p id="pref-autostart-hint" class="ml-6 max-w-[70ch] text-xs text-muted">Abre na bandeja ao entrar na sua conta. No GNOME sem a extensão AppIndicator, ele roda sem ícone visível.</p>
+      </div>
     </div>
     <div id="prefs-msg" role="alert" class="empty:hidden mx-4 mb-3 rounded-lg ring-1 ring-bad/40 bg-bad/10 px-3 py-2 text-sm text-bad-soft"></div>
     <div class="px-4 py-3 border-t border-line flex justify-end gap-2">
@@ -566,6 +573,8 @@
     "Nome inválido: 2 a 128 caracteres entre letras, números, _ . e -, começando por letra ou número.": "Invalid name: 2 to 128 characters among letters, digits, _ . and -, starting with a letter or digit.",
     "Notificar quando algo der problema": "Notify me when something breaks",
     "Notificar quando um container entrar na faixa de atenção": "Notify me when a container needs attention",
+    "Iniciar com o sistema": "Start with the system",
+    "Abre na bandeja ao entrar na sua conta. No GNOME sem a extensão AppIndicator, ele roda sem ícone visível.": "Opens in the tray when you log in. On GNOME without the AppIndicator extension, it runs with no visible icon.",
     "Novo container": "New container",
     "Não consegui carregar os logs. O servidor do Stivo está rodando?": "Could not load the logs. Is the Stivo server running?",
     "Não consegui conectar ao servidor do Stivo.": "Could not connect to the Stivo server.",
@@ -13023,6 +13032,8 @@ ${WIDE.matches ? "" : `
     ctx.value = p.context && p.contexts.includes(p.context) ? p.context : "";
     sel2("lang").value = p.lang ?? "";
     $2("#pref-notify").checked = p.notifications;
+    const auto = $2("#pref-autostart");
+    auto.checked = auto.defaultChecked = p.autostart;
     prefsContext();
     $2("#prefs-msg").textContent = "";
     $2("#prefs").showModal();
@@ -13036,14 +13047,19 @@ ${WIDE.matches ? "" : `
     const v2 = (k) => $2(`#pref-${k}`).value || null, go2 = $2("#prefs-go");
     if (go2.getAttribute("aria-disabled") === "true") return;
     go2.setAttribute("aria-disabled", "true");
+    const auto = $2("#pref-autostart");
     const err = await T.prefs.set({
       cli: v2("cli"),
       context: v2("cli") === "podman" ? null : v2("context"),
       lang: v2("lang"),
-      notifications: $2("#pref-notify").checked
+      notifications: $2("#pref-notify").checked,
+      autostart: auto.checked
     });
     go2.removeAttribute("aria-disabled");
-    if (err) $2("#prefs-msg").textContent = err;
+    if (err) {
+      $2("#prefs-msg").textContent = err;
+      auto.checked = auto.defaultChecked;
+    }
   }
   if (T.prefs) {
     $2("#prefs-open").hidden = false;
