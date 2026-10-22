@@ -1,4 +1,4 @@
-import { test, expect, ctr, type Gui } from './fixtures';
+import { test, expect, ctr, compose, type Gui } from './fixtures';
 import type { Page } from '@playwright/test';
 
 // Notification falsa: guarda o que seria mostrado e aceita o pedido de permissão; a página "sem foco" é o
@@ -57,4 +57,29 @@ test('sem pedir permissão não notifica', async ({ page, gui }) => {
   await expect.poll(() => badge(page)).toBe('1');
   await nextPoll(page, gui, 'api');
   expect(await notes(page)).toEqual([]);
+});
+
+test('raiz e dependente entram juntos: uma notificação, com a raiz primeiro', async ({ page, gui }) => {
+  await gui.open({ containers: [ctr('db', { Labels: compose('shop', 'db') })] });
+  await page.getByRole('button', { name: 'Notificar quando algo der problema' }).click();
+  await expect(page.locator('#notify')).toBeHidden();
+  gui.update(s => {
+    s.containers[0].Status = 'Up 1 minute (unhealthy)';
+    s.containers.push(ctr('api', { Labels: compose('shop', 'api', 'db:service_healthy:false'), State: 'created', Status: 'Created' }));
+  });
+  await expect.poll(() => notes(page)).toEqual([['2 containers precisam de atenção', 'db, api']]);
+});
+
+test('memória perto do limite notifica, e a queda depois notifica de novo', async ({ page, gui }) => {
+  const memAt = (p: number) => ({ CPUPerc: '1.00%', MemUsage: `${Math.round(p * 5.12)}MiB / 512MiB`, MemPerc: `${p.toFixed(2)}%` });
+  await gui.open({ containers: [ctr('api', { stats: [memAt(50), memAt(50), memAt(95), memAt(96)] })] });
+  await page.getByRole('button', { name: 'Notificar quando algo der problema' }).click();
+  await expect(page.locator('#notify')).toBeHidden();
+  await expect.poll(() => notes(page), { timeout: 30_000 })
+    .toEqual([['api precisa de atenção', 'Memória em 96% do limite (492 MiB de 512 MiB)']]);
+
+  // caiu por falta de memória: a causa mudou, então avisa de novo
+  gui.update(s => { Object.assign(s.containers[0], { State: 'exited', Status: 'Exited (137) 1 second ago' }); });
+  await expect.poll(() => notes(page)).toHaveLength(2);
+  expect((await notes(page))[1]).toEqual(['api precisa de atenção', 'Saiu com código 137 há 1 s']);
 });

@@ -86,3 +86,28 @@ test('terminal: o primeiro resize abre, os outros redimensionam; bytes viram Uin
   await tick();
   assert.deepEqual(calls.at(-1), ['term_close', {term: 9}]);
 });
+
+test('openDir chama o open_dir e devolve null, ou a mensagem de erro', async () => {
+  onInvoke = () => undefined;
+  assert.equal(await T.openDir('shop', '/srv/shop'), null);
+  assert.deepEqual(calls.at(-1), ['open_dir', {project: 'shop', dir: '/srv/shop'}]);
+  onInvoke = () => { throw 'A pasta não existe mais: /srv/shop'; };
+  assert.equal(await T.openDir('shop', '/srv/shop'), 'A pasta não existe mais: /srv/shop');
+});
+
+test('prefs: set manda o autostart junto e devolve o erro como texto', async () => {
+  onInvoke = () => undefined;
+  const p = {cli: null, context: null, lang: null, notifications: true, autostart: true};
+  assert.equal(await T.prefs.set(p), null);
+  assert.deepEqual(calls.at(-1), ['prefs_set', {prefs: p}]);
+  onInvoke = () => { throw 'O sistema recusou o início automático: permission denied'; };
+  assert.equal(await T.prefs.set(p), 'O sistema recusou o início automático: permission denied');
+});
+
+test('cpOut: cp_save com id e caminho; a recusa vira {ok: false} com o status e a mensagem', async () => {
+  onInvoke = () => ({saved: true, name: 'error.log'});
+  assert.deepEqual(await T.cpOut('0123456789ab', '/var/log/x', new AbortController().signal), {ok: true, saved: true, name: 'error.log'});
+  assert.deepEqual(calls.at(-1), ['cp_save', {id: '0123456789ab', path: '/var/log/x'}]);
+  onInvoke = () => { throw {status: 404, body: '/x não existe no container'}; };
+  assert.deepEqual(await T.cpOut('0123456789ab', '/x', new AbortController().signal), {ok: false, status: 404, error: '/x não existe no container'});
+});

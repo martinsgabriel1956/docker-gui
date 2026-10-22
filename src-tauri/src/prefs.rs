@@ -66,6 +66,8 @@ pub struct Choice {
     pub context: Option<String>,
     pub lang: Option<String>,
     pub notifications: bool,
+    /// iniciar com o sistema: não vai para o prefs.json, vai para o sistema (autostart.rs)
+    pub autostart: bool,
 }
 
 /// Confere o que veio da página antes de virar argv: CLI só docker ou podman, contexto só um que o `docker context ls`
@@ -124,6 +126,7 @@ mod tests {
                 context: ctx.map(Into::into),
                 lang: lang.map(Into::into),
                 notifications: true,
+                autostart: false,
             };
             validate(&c, &["default".into(), "prod".into()], false)
         };

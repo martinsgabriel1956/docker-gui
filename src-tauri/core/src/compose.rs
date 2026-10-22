@@ -74,7 +74,7 @@ async fn run(ctx: &Ctx, args: &[String], tx: &mpsc::UnboundedSender<Value>) -> i
             let _ = tx.send(json!(trf(
                 ctx.lang,
                 "{cli} {cmd} não respondeu em {timeout}s. O daemon está travado?",
-                &[("cli", &ctx.cli[0]), ("cmd", "compose"), ("timeout", &COMPOSE_TIMEOUT.as_secs().to_string())],
+                &[("cli", &ctx.cli[0]), ("cmd", &args[0]), ("timeout", &COMPOSE_TIMEOUT.as_secs().to_string())],
             )));
             return 124;
         }

@@ -11,6 +11,8 @@ const COMMANDS: &[&str] = &[
     "notify",
     "prefs_get",
     "prefs_set",
+    "open_dir",
+    "cp_save",
 ];
 
 fn main() {

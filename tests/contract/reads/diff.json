@@ -1,0 +1,44 @@
+{
+  "desc": "mudanças no filesystem, com caminho que tem espaço",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "C /etc\nA /etc/nginx.conf\nD /tmp/x\nA /app/meu arquivo.txt\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "diff",
+        "0123456789ab"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/diff/0123456789ab",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": [
+      {
+        "k": "C",
+        "p": "/etc"
+      },
+      {
+        "k": "A",
+        "p": "/etc/nginx.conf"
+      },
+      {
+        "k": "D",
+        "p": "/tmp/x"
+      },
+      {
+        "k": "A",
+        "p": "/app/meu arquivo.txt"
+      }
+    ]
+  }
+}

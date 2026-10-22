@@ -121,6 +121,11 @@ pub const COMPOSE_FORMAT: &str = "[{{json (.Label \"com.docker.compose.project\"
 const RUN_FIELDS: [&str; 7] = ["image", "name", "ports", "all_interfaces", "env", "restart", "volume"];
 const RESTART: [&str; 4] = ["no", "on-failure", "unless-stopped", "always"];
 const MAX_IMAGE: usize = 512;
+
+/// a regra de referência de imagem do run e do pull (o image_ok do Python)
+pub fn image_ok(image: &str) -> bool {
+    image.chars().count() <= MAX_IMAGE && IMAGE_RE.is_match(image)
+}
 const MAX_ENV_VALUE: usize = 4096;
 const MAX_ITEMS: usize = 64;
 
@@ -164,7 +169,7 @@ pub fn run_argv(lang: Lang, body: &Value) -> Result<Vec<String>, String> {
         Some(Value::Bool(b)) => *b,
         Some(_) => return Err(bad_type("all_interfaces")),
     };
-    if image.chars().count() > MAX_IMAGE || !IMAGE_RE.is_match(&image) {
+    if !image_ok(&image) {
         return Err(f("imagem inválida: use repo[:tag] ou repo@sha256:…", &[]));
     }
     if !name.is_empty() && !NAME_RE.is_match(&name) {
@@ -241,6 +246,15 @@ pub fn run_argv(lang: Lang, body: &Value) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_ok_for_pull() {
+        assert!(image_ok("postgres:17"));
+        assert!(image_ok(&format!("ghcr.io/a/b@sha256:{}", "a".repeat(64))));
+        assert!(!image_ok("-v"));
+        assert!(!image_ok("UPPER"));
+        assert!(!image_ok(&"a".repeat(513)));
+    }
 
     #[test]
     fn image_re() {

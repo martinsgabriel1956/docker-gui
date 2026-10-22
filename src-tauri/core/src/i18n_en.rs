@@ -76,4 +76,11 @@ pub const EN: &[(&str, &str)] = &[
         "não abre o navegador; o link sai só no terminal",
         "don't open the browser; the link is only printed in the terminal",
     ),
+    (
+        "caminho inválido: use um caminho absoluto (começa com /), de até 4096 caracteres",
+        "invalid path: use an absolute path (starting with /), up to 4096 characters",
+    ),
+    ("{path} não existe no container", "{path} does not exist in the container"),
+    ("o container não existe mais", "the container no longer exists"),
+    ("{path} passa de 100 MB, o limite daqui", "{path} is over 100 MB, the limit here"),
 ];

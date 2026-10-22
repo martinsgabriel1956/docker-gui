@@ -126,7 +126,7 @@ test('imagens, volumes e redes só vão ao docker quando a aba abre', async ({ p
   await expect(page.locator('#tab-images')).toHaveText('Imagens · 4');
   // colunas como o docker images: IMAGEM, ID, TAMANHO, CRIADA, EM USO POR
   await expect(item(page, 'images', 'postgres:16').locator('td'))
-    .toHaveText([`ID: ${sha('postgres').slice(0, 12)}`, 'Tamanho: 412MB', 'Criada: há 2 sem', 'Em uso por: db', 'Remover…']);
+    .toHaveText([`ID: ${sha('postgres').slice(0, 12)}`, 'Tamanho: 412MB', 'Criada: há 2 sem', 'Em uso por: db', 'AtualizarRemover…']);
   await expect(item(page, 'images', 'nginx:latest')).toContainText('Em uso por: web');  // parado também conta
   await expect(item(page, 'images', 'app:latest, app:1.0')).toContainText('Em uso por: nenhum container');  // duas tags, uma imagem
   await expect(item(page, 'images', 'sem tag')).toContainText('dangling');

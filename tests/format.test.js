@@ -492,3 +492,148 @@ test('logServices: o prefixo do compose logs vira o serviço pelo nome do contai
   // nome que só parece o padrão (o resto não é número): é container_name, vai inteiro
   assert.deepEqual(Object.fromEntries(f.logServices('shop', [ctr('shop-api-x', 'api')])), {'shop-api-x': 'api'});
 });
+
+const probe = (ExitCode, Start = '', End = '', Output = '') => ({ExitCode, Start, End, Output});
+
+test('probeResult separa passou, falhou e não rodou', () => {
+  assert.equal(f.probeResult(probe(0)), 'ok');
+  assert.equal(f.probeResult(probe(1)), 'fail');
+  assert.equal(f.probeResult(probe(-1)), 'error');  // timeout ou não conseguiu rodar
+  assert.equal(f.probeResult(probe(2)), 'error');
+});
+
+test('probeDuration lê o RFC 3339 do docker com nanossegundos', () => {
+  assert.equal(f.probeDuration(probe(0, '2026-10-21T13:00:00.123456789Z', '2026-10-21T13:00:00.456789012Z')), 333);
+  assert.equal(f.probeDuration(probe(0, '2026-10-21T10:00:00.1-03:00', '2026-10-21T13:00:01.1Z')), 1000);
+  assert.equal(f.probeDuration(probe(0, '2026-10-21T13:00:00Z', '')), null);
+  assert.equal(f.probeDuration(probe(0, '2026-10-21T13:00:01Z', '2026-10-21T13:00:00Z')), null);  // fim antes do início
+});
+
+test('healthSummary conta as falhas', () => {
+  assert.equal(f.healthSummary([probe(1), probe(0), probe(1), probe(-1), probe(0)]), '3 de 5 falharam');
+  assert.equal(f.healthSummary([probe(0), probe(0)]), 'as 2 passaram');
+  assert.equal(f.healthSummary([]), '');
+});
+
+const dep = (Names, State, Status, deps = '', svc = Names) => ({ID: Names, Names, State, Status,
+  Labels: `${deps ? `com.docker.compose.depends_on=${deps},` : ''}com.docker.compose.project=shop,com.docker.compose.service=${svc}`});
+
+test('dependsOn lê o depends_on com 2 ou 3 campos e para no próximo label', () => {
+  assert.deepEqual(f.dependsOn(dep('api', 'created', 'Created', 'db:service_healthy:false,redis:service_started:true')),
+    [{service: 'db', cond: 'service_healthy'}, {service: 'redis', cond: 'service_started'}]);
+  assert.deepEqual(f.dependsOn(dep('api', 'created', 'Created', 'migrate:service_completed_successfully')),
+    [{service: 'migrate', cond: 'service_completed_successfully'}]);
+  assert.deepEqual(f.dependsOn(dep('api', 'created', 'Created', 'db:outra_coisa:false')), [{service: 'db', cond: 'service_started'}]);
+  assert.deepEqual(f.dependsOn(dep('api', 'running', 'Up 1 minute')), []);
+  assert.deepEqual(f.dependsOn({Labels: 'xcom.docker.compose.depends_on=db:service_started:false'}), []);
+});
+
+test('depState confere a dependência contra a condição', () => {
+  const st = (cond, ...cs) => f.depState({service: 'db', cond}, 'shop', cs);
+  assert.equal(st('service_started', dep('db', 'running', 'Up 1 minute (unhealthy)')), null);
+  assert.equal(st('service_healthy', dep('db', 'running', 'Up 1 minute (unhealthy)')), 'unhealthy');
+  assert.equal(st('service_healthy', dep('db', 'running', 'Up 2 seconds (health: starting)')), null);  // espera normal do up
+  assert.equal(st('service_healthy', dep('db', 'running', 'Up 1 minute')), null);  // sem healthcheck
+  assert.equal(st('service_started', dep('db', 'exited', 'Exited (1) 1 minute ago')), 'exited');
+  assert.equal(st('service_started', dep('db', 'restarting', 'Restarting (1) 2 seconds ago')), 'exited');
+  assert.equal(st('service_started', dep('db', 'exited', 'Exited (0) 1 minute ago')), 'stopped');
+  assert.equal(st('service_completed_successfully', dep('db', 'exited', 'Exited (0) 1 minute ago')), null);
+  assert.equal(st('service_completed_successfully', dep('db', 'exited', 'Exited (2) 1 minute ago')), 'exited');
+  assert.equal(st('service_completed_successfully', dep('db', 'running', 'Up 3 seconds')), null);  // ainda migrando
+  assert.equal(st('service_started'), 'missing');
+  // réplicas: basta uma que cumpra
+  assert.equal(st('service_started', dep('db-1', 'exited', 'Exited (1) 1 minute ago', '', 'db'), dep('db-2', 'running', 'Up 1 minute', '', 'db')), null);
+});
+
+test('blockers, held e holds ligam o dependente à causa', () => {
+  const db = dep('db', 'running', 'Up 1 minute (unhealthy)');
+  const api = dep('api', 'created', 'Created', 'db:service_healthy:false,cache:service_started:false');
+  const web = dep('web', 'running', 'Up 1 minute', 'api:service_started:false');
+  const cs = [db, api, web];
+  assert.deepEqual(f.blockers(api, cs).map(b => [b.service, b.state, b.c?.ID]), [['db', 'unhealthy', 'db'], ['cache', 'missing', undefined]]);
+  assert.equal(f.held(api, cs), true);
+  assert.deepEqual(f.blockers(web, cs), []);  // de pé e bem: ninguém o segura
+  assert.equal(f.held(dep('api', 'created', 'Created'), cs), false);  // criado à mão, sem dependência quebrada
+  assert.deepEqual(f.holds(db, cs).map(c => c.Names), ['api']);
+  assert.deepEqual(f.holds(dep('solto', 'running', 'Up 1 minute (unhealthy)'), cs), []);
+});
+
+test('newProblems aceita outro critério de entrada na faixa', () => {
+  const api = c('created', 'Created', {ID: 'a'});
+  assert.deepEqual(f.newProblems(new Set(), [api]), []);
+  assert.deepEqual(f.newProblems(new Set(), [api], () => true), [api]);
+});
+
+const mst = (used, limit, perc) => ({ID: 'x', CPUPerc: '1%', MemUsage: `${used} / ${limit}`, MemPerc: perc});
+const GiB = 2 ** 30;
+
+test('memLimit e memPct leem o uso e o limite do stats', () => {
+  assert.deepEqual(f.memLimit(mst('476MiB', '512MiB', '92.97%')), {used: 476 * 2 ** 20, limit: 512 * 2 ** 20});
+  assert.equal(f.memLimit(mst('--', '--', '--')), null);
+  assert.equal(f.memPct(mst('476MiB', '512MiB', '92.97%')), 92.97);
+  assert.equal(f.memPct(mst('256MiB', '512MiB', '--')), 50);  // sem o MemPerc, a conta
+});
+
+test('memWatch: 2 leituras para entrar, abaixo de 85% para sair, sem limite nunca', () => {
+  const s = p => ({x: mst(`${p * 5.12}MiB`, '512MiB', `${p}%`)}), T = 16 * GiB;
+  let m = f.memWatch(new Map(), s(95), T);
+  assert.equal(f.memHot(m, 'x'), false);  // 1ª leitura: ainda não
+  m = f.memWatch(m, s(96), T);
+  assert.equal(f.memHot(m, 'x'), true);
+  m = f.memWatch(m, s(87), T);
+  assert.equal(f.memHot(m, 'x'), true);   // entre 85 e 90: fica
+  m = f.memWatch(m, s(80), T);
+  assert.equal(f.memHot(m, 'x'), false);  // abaixo de 85: sai
+  m = f.memWatch(f.memWatch(new Map(), s(95), T), s(88), T);
+  assert.equal(f.memHot(f.memWatch(m, s(95), T), 'x'), false);  // pico, queda, pico: não são 2 seguidas
+  const noLimit = {x: mst('15.5GiB', '15.6GiB', '99.36%')};     // o "limite" é a RAM toda (arredondada)
+  assert.equal(f.memHot(f.memWatch(f.memWatch(new Map(), noLimit, T), noLimit, T), 'x'), false);
+  assert.equal(f.memHot(f.memWatch(f.memWatch(new Map(), s(95), null), s(95), null), 'x'), false);  // sem RAM total
+  assert.equal(f.memHot(f.memWatch(new Map(), s(95), T, true), 'x'), true);  // base: quente já na 1ª leitura
+  assert.equal(f.memWatch(f.memWatch(new Map(), s(95), T), {}, T).size, 0);  // parou: sai
+});
+
+test('memText diz a porcentagem e os números', () => {
+  assert.equal(f.memText(mst('476MiB', '512MiB', '92.97%')), 'Memória em 93% do limite (476 MiB de 512 MiB)');
+});
+
+test('newProblems compara pela chave', () => {
+  const a = c('running', 'Up 1 minute', {ID: 'a'});
+  assert.deepEqual(f.newProblems(new Set(['a:mem']), [a], () => true, x => x.ID), [a]);  // mem -> queda: entra de novo
+  assert.deepEqual(f.newProblems(new Set(['a']), [a], () => true, x => x.ID), []);
+});
+
+test('diffSummary conta por tipo, com singular e plural', () => {
+  const d = (k, p = '/x') => ({k, p});
+  assert.equal(f.diffSummary([d('A'), d('A'), d('C'), d('D')]), '2 adicionados · 1 alterado · 1 apagado');
+  assert.equal(f.diffSummary([d('C'), d('C')]), '2 alterados');
+  assert.equal(f.diffSummary([]), '');
+});
+
+test('withTag põe o latest quando falta tag (e respeita porta e digest)', () => {
+  assert.equal(f.withTag('postgres'), 'postgres:latest');
+  assert.equal(f.withTag('postgres:17'), 'postgres:17');
+  assert.equal(f.withTag('localhost:5000/app'), 'localhost:5000/app:latest');  // o ":5000" é a porta, não a tag
+  assert.equal(f.withTag('app@sha256:' + 'a'.repeat(64)), 'app@sha256:' + 'a'.repeat(64));
+});
+
+test('sameRef casa a tag da lista com a digitada, com o prefixo do Docker Hub do podman', () => {
+  assert.ok(f.sameRef('postgres:17', 'postgres:17'));
+  assert.ok(f.sameRef('docker.io/library/postgres:17', 'postgres:17'));
+  assert.ok(f.sameRef('docker.io/acme/api:1', 'acme/api:1'));
+  assert.ok(!f.sameRef('postgres:16', 'postgres:17'));
+});
+
+test('pullOutcome compara o ID da tag antes e depois', () => {
+  assert.equal(f.pullOutcome(null, 'sha256:a'), 'new');
+  assert.equal(f.pullOutcome('sha256:a', 'sha256:a'), 'same');
+  assert.equal(f.pullOutcome('sha256:a', 'sha256:b'), 'updated');
+  assert.equal(f.pullOutcome(null, null), 'missing');  // por digest, ou tag que a lista mostra de outro jeito
+});
+
+test('imageOk segue a regra do run', () => {
+  assert.ok(f.imageOk('postgres:17'));
+  assert.ok(!f.imageOk('Postgres'));
+  assert.ok(!f.imageOk('-v'));
+  assert.ok(!f.imageOk('a'.repeat(513)));
+});

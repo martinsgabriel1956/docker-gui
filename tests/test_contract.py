@@ -33,11 +33,11 @@ class CoverageTest(unittest.TestCase):
     sem ninguém ver. As listas saem das tabelas do próprio docker_gui.py; as rotas avulsas, do código do Handler."""
 
     def routes(self):
-        get = ["/api/containers", "/api/stats", "/api/df", *(f"/api/{k}" for k in docker_gui.OBJECTS),
-               *(f"/api/{r}/{ID}" for r in ("logs", "health", "history", "top", "inspect")), f"/api/inspect/{ID}/env",
+        get = ["/api/containers", "/api/stats", "/api/df", "/api/info", *(f"/api/{k}" for k in docker_gui.OBJECTS),
+               *(f"/api/{r}/{ID}" for r in ("logs", "health", "history", "top", "diff", "inspect", "cp")), f"/api/inspect/{ID}/env",
                "/api/compose/logs", "/api/compose/services"]
         post = [*(f"/api/{a}/{ID}" for a in docker_gui.ACTIONS), *(f"/api/prune/{k}" for k in docker_gui.PRUNE),
-                *(f"/api/rm/{k}/" for k in docker_gui.REMOVE), "/api/run",
+                *(f"/api/rm/{k}/" for k in docker_gui.REMOVE), "/api/run", "/api/pull",
                 *(f"/api/compose/{a}" for a in [*docker_gui.COMPOSE, *docker_gui.COMPOSE_SERVICE])]
         return [("GET", p) for p in get] + [("POST", p) for p in post]
 
@@ -54,7 +54,7 @@ class CoverageTest(unittest.TestCase):
     def test_handler_routes_are_known(self):
         # as rotas com regex do Handler: uma nova aqui precisa entrar em routes() (e ganhar caso) ou ser stream
         src = pathlib.Path(docker_gui.__file__).read_text()
-        self.assertEqual(len(re.findall(r're\.fullmatch\(r"/api', src)), 12,
+        self.assertEqual(len(re.findall(r're\.fullmatch\(r"/api', src)), 14,
                          "rota nova no Handler: acrescente-a em CoverageTest.routes() e em tests/contract/")
 
 

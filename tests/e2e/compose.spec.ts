@@ -1,4 +1,4 @@
-import { test, expect, ctr, compose } from './fixtures';
+import { test, expect, ctr, compose, id, row, rowKeys } from './fixtures';
 
 // labels de um projeto compose de verdade: pasta e arquivos (config_files tem vírgula no valor)
 const FILES = '/srv/shop/compose.yml,/srv/shop/compose.override.yml';
@@ -22,7 +22,8 @@ test('cabeçalho do projeto mostra só a ação principal, Logs e o ⋯', async 
   await expect(page.getByRole('button', { name: 'compose up do projeto shop', exact: true })).toBeHidden();
   await projectMenu(page).click();
   await expect(head.getByRole('button').filter({ visible: true }))
-    .toHaveText(['Iniciar api', 'Logs', 'Reiniciar db', 'Parar db', 'compose up', 'compose up --build', 'compose pull', 'compose down…']);
+    .toHaveText(['Iniciar api', 'Logs', 'Reiniciar db', 'Parar db', 'compose up', 'compose up --build', 'compose pull',
+                 'Copiar caminho da pasta', 'compose down…']);
   await page.keyboard.press('Escape');
 
   // tudo rodando: a principal vira Parar tudo
@@ -296,4 +297,85 @@ test('cada serviço guarda a sua cor nos logs do projeto, de uma abertura para a
   await expect(page.locator('#lb')).toContainText('db 2');
   expect(await tone('db-1')).toBe(db);
   expect(await tone('api-1')).toBe(api);
+});
+
+// depends_on: quem segura quem. Labels sem working_dir bastam (a anotação só lê o projeto, o serviço e o depends_on)
+const created = { State: 'created', Status: 'Created' };
+
+test('a faixa diz qual dependência segura o serviço, com a causa-raiz primeiro', async ({ page, gui }) => {
+  await gui.open({ containers: [
+    ctr('db', { Labels: compose('shop', 'db'), Status: 'Up 1 minute (unhealthy)' }),
+    ctr('api', { Labels: compose('shop', 'api', 'db:service_healthy:false'), ...created }),
+  ] });
+  await expect.poll(() => rowKeys(page).then(k => k.slice(0, 3))).toEqual(['h:attn', `c:${id('db')}`, `c:${id('api')}`]);
+  await expect(row(page, 'api')).toContainText('depende de db, que está com healthcheck falhando');
+  await expect(row(page, 'db')).toContainText('segurando api');
+  // o filtro e as contagens seguem a faixa: a api segurada é problema, não parada
+  await expect(page.locator('#count button[data-a="filter"]')).toHaveText(['2 com problema']);
+  await page.locator('#count button[data-a="filter"]', { hasText: 'com problema' }).click();
+  await expect(page.getByRole('button', { name: 'Logs api' })).toBeVisible();
+  await page.locator('#count button[data-a="filter"]', { hasText: 'com problema' }).click();
+
+  // no modal da api, a anotação vem junto do status
+  await page.getByRole('button', { name: 'Logs api' }).click();
+  await expect(page.locator('#dlg-status')).toContainText('depende de db, que está com healthcheck falhando');
+  await page.keyboard.press('Escape');
+  await row(page, 'api').getByRole('button', { name: 'Abrir logs de db' }).click();
+  await expect(page.locator('#lt')).toHaveText('db');
+  await page.keyboard.press('Escape');
+
+  gui.update(s => { s.containers[0].Status = 'Up 2 minutes (healthy)'; });
+  await expect(row(page, 'api')).not.toContainText('depende de');
+  await expect.poll(() => rowKeys(page)).not.toContain('h:attn');
+});
+
+test('migrate que terminou bem não segura ninguém; o que saiu com erro segura', async ({ page, gui }) => {
+  await gui.open({ containers: [
+    ctr('migrate', { Labels: compose('shop', 'migrate'), State: 'exited', Status: 'Exited (0) 1 minute ago' }),
+    ctr('api', { Labels: compose('shop', 'api', 'migrate:service_completed_successfully:false') }),
+  ] });
+  await expect(page.getByRole('button', { name: 'Logs api' })).toBeVisible();
+  expect(await rowKeys(page)).not.toContain('h:attn');
+  await expect(row(page, 'api')).not.toContainText('depende de');
+
+  gui.update(s => {
+    Object.assign(s.containers[0], { Status: 'Exited (1) 2 seconds ago' });
+    Object.assign(s.containers[1], created);
+  });
+  await expect(row(page, 'api')).toContainText('depende de migrate, que saiu com erro');
+});
+
+test('dependência sem container aparece sem link', async ({ page, gui }) => {
+  await gui.open({ containers: [ctr('api', { Labels: compose('shop', 'api', 'cache:service_started:false'), ...created })] });
+  await expect(row(page, 'api')).toContainText('depende de cache, que não tem container');
+  await expect(row(page, 'api').getByRole('button', { name: 'Abrir logs de cache' })).toHaveCount(0);
+  expect(await rowKeys(page)).toContain('h:attn');
+});
+
+test('a espera normal do compose up não acende a faixa', async ({ page, gui }) => {
+  await gui.open({ containers: [
+    ctr('db', { Labels: compose('shop', 'db'), Status: 'Up 2 seconds (health: starting)' }),
+    ctr('api', { Labels: compose('shop', 'api', 'db:service_healthy:false'), ...created }),
+  ] });
+  await expect(page.getByRole('button', { name: 'Logs api' })).toBeVisible();
+  expect(await rowKeys(page)).not.toContain('h:attn');
+  await expect(row(page, 'api')).not.toContainText('depende de');
+});
+
+test('o menu do projeto copia o caminho da pasta (web)', async ({ page, context, gui }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await gui.open({ containers: containers() });
+  await projectMenu(page).click();
+  const item = page.getByRole('button', { name: 'Copiar caminho da pasta' });
+  await expect(item).toHaveAttribute('title', '/srv/shop');
+  await item.click();
+  await expect(page.locator('#toast')).toHaveText('Caminho copiado: /srv/shop');
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('/srv/shop');
+});
+
+test('com daemon remoto, o menu do projeto não oferece a pasta', async ({ page, gui }) => {
+  await gui.open({ containers: containers(), context: { Name: 'prod', Host: 'tcp://10.0.0.5:2376' } });
+  await projectMenu(page).click();
+  await expect(page.getByRole('button', { name: 'compose pull do projeto shop' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Copiar caminho da pasta' })).toHaveCount(0);
 });

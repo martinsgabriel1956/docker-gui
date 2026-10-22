@@ -1,0 +1,19 @@
+{
+  "desc": "pull de imagem que não casa com a regra (começa com -): 400 sem chamar o docker",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [],
+  "request": {
+    "method": "POST",
+    "path": "/api/pull",
+    "body": {
+      "image": "-v/etc:/x"
+    }
+  },
+  "response": {
+    "status": 400,
+    "body": "imagem inválida: use repo[:tag] ou repo@sha256:…"
+  }
+}

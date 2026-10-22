@@ -4,6 +4,7 @@
 
 pub mod cli;
 pub mod compose;
+pub mod cp;
 pub mod i18n;
 mod i18n_en;
 pub mod normalize;

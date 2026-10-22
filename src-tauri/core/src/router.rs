@@ -57,6 +57,8 @@ pub enum Reply {
     Json(Response),
     /// o compose: uma linha de saída por item (string) e, no fim, {"code": n}
     Ndjson(BoxStream<'static, Value>),
+    /// o download do baixar arquivo (docker cp): bytes e nome
+    File(crate::cp::CpFile),
 }
 
 /// o early return do Python (self.send(...); return None): o erro já é a resposta
@@ -81,6 +83,14 @@ pub(crate) fn caps(re: &str, s: &str) -> Option<Vec<String>> {
 }
 
 pub async fn handle(ctx: &Ctx, req: Request) -> Reply {
+    if req.method == Method::Get
+        && let Some(m) = caps(r"/api/cp/([0-9a-f]{12,64})", &req.path)
+    {
+        // baixar arquivo ou pasta do container (também parado): bytes, não JSON
+        let qs = parse_qs(&req.query, true);
+        let path = qs_get(&qs, "path").and_then(|v| v.first()).map_or("", String::as_str);
+        return crate::cp::cp_out(ctx, &m[1], path).await.map_or_else(Reply::Json, Reply::File);
+    }
     match req.method {
         Method::Get => Reply::Json(get(ctx, &req).await.unwrap_or_else(|e| e)),
         Method::Post => post(ctx, &req).await,
@@ -103,6 +113,17 @@ async fn get(ctx: &Ctx, req: &Request) -> Step<Response> {
     if path == "/api/compose/services" {
         let base = compose_query(ctx, &req.query).await?;
         return Ok(reply(200, compose_services(ctx, &base).await?));
+    }
+    if full == "/api/info" {
+        // sem limite, o stats reporta a RAM total como limite: a página precisa dela
+        let r = ctx.docker(&["info", "--format", "{{json .}}"], READ_TIMEOUT).await;
+        if r.code != 0 {
+            return Ok(reply(500, r.stderr.trim()));
+        }
+        let cmd = format!("{} info", ctx.cli[0]);
+        return Ok(
+            n::mem_total(&r.stdout).map_or_else(|| format_error(ctx, &cmd), |t| reply(200, json!({"MemTotal": t})))
+        );
     }
     if full == "/api/containers" || full == "/api/stats" || full == "/api/df" {
         // o ps e o stats do podman só saem completos em "json" (um array); o resto em um JSON por linha
@@ -180,6 +201,11 @@ async fn get(ctx: &Ctx, req: &Request) -> Step<Response> {
             if r.code != 0 { r.stderr.trim() } else { r.stdout.trim() },
         ));
     }
+    if let Some(m) = caps(r"/api/diff/([0-9a-f]{12,64})", &full) {
+        // percorre a camada gravável inteira: o prazo das ações, não o de leitura
+        let r = ctx.docker(&["diff", &m[1]], ACTION_TIMEOUT).await;
+        return Ok(if r.code != 0 { reply(500, r.stderr.trim()) } else { reply(200, n::diff(&r.stdout)) });
+    }
     if let Some(m) = caps(r"/api/inspect/([0-9a-f]{12,64})(/env)?", &full) {
         // resumo do inspect; só o /env (pedido explícito na página) traz os valores do env
         let r = ctx.docker(&["inspect", "--format", "{{json .}}", &m[1]], READ_TIMEOUT).await;
@@ -194,6 +220,14 @@ async fn get(ctx: &Ctx, req: &Request) -> Step<Response> {
 
 async fn post(ctx: &Ctx, req: &Request) -> Reply {
     let full = req.full();
+    if full == "/api/pull" {
+        let image = req.body.as_ref().and_then(|b| b.get("image")?.as_str()).unwrap_or("");
+        if !v::image_ok(image) {
+            return Reply::Json(reply(400, tr(ctx.lang, "imagem inválida: use repo[:tag] ou repo@sha256:…")));
+        }
+        // o stream do compose (segue até o fim sem leitor, prazo de 10 min); o "--" fecha as opções
+        return Reply::Ndjson(crate::compose::stream(ctx, vec!["pull".into(), "--".into(), image.into()]));
+    }
     if let Some(m) = caps(r"/api/compose/(\w+)", &full)
         && (v::compose_project(&m[1]).is_some() || v::compose_service(&m[1]).is_some())
     {
@@ -425,6 +459,11 @@ pub(crate) async fn compose_query(ctx: &Ctx, query: &str) -> Step<Vec<String>> {
     compose_base(ctx, &project, &dir, None).await
 }
 
+/// O par {project, dir} existe nos labels dos containers? (o "Abrir pasta" do desktop: abre só o que o compose declarou)
+pub async fn compose_project(ctx: &Ctx, project: &str, dir: &str) -> Result<(), Response> {
+    compose_base(ctx, project, dir, None).await.map(|_| ())
+}
+
 /// Começo do argv (compose -p, --project-directory e os -f) montado só com os labels dos containers: o par
 /// {project, dir} tem que existir neles e o service, se veio, ser um dos serviços desse projeto
 pub(crate) async fn compose_base(ctx: &Ctx, project: &str, wd: &str, service: Option<&str>) -> Step<Vec<String>> {
@@ -465,4 +504,36 @@ pub(crate) async fn compose_services(ctx: &Ctx, base: &[String]) -> Step<Vec<Str
         return Err(reply(500, r.stderr.trim()));
     }
     Ok(r.stdout.split_whitespace().map(String::from).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use super::*;
+    use crate::cli::{Output, RunError, Runner};
+    use crate::i18n::Lang;
+
+    /// devolve sempre o mesmo `ps` (as linhas do COMPOSE_FORMAT)
+    struct Ps(&'static str);
+
+    #[async_trait::async_trait]
+    impl Runner for Ps {
+        async fn run(&self, _: &[String], _: &[String], _: Duration) -> Result<Output, RunError> {
+            Ok(Output { code: 0, stdout: self.0.into(), stderr: String::new() })
+        }
+        fn command(&self, _: &[String], _: &[String]) -> tokio::process::Command {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn compose_project_only_what_the_labels_say() {
+        let runner = Arc::new(Ps("[\"shop\",\"/srv/shop\",\"\",\"api\"]\n"));
+        let ctx = Ctx { cli: vec!["docker".into()], lang: Lang::Pt, runner, now: Arc::new(|| 0.0) };
+        assert!(compose_project(&ctx, "shop", "/srv/shop").await.is_ok());
+        assert_eq!(compose_project(&ctx, "shop", "/etc").await.unwrap_err().status, 404);
+        assert_eq!(compose_project(&ctx, "outro", "/srv/shop").await.unwrap_err().status, 404);
+    }
 }

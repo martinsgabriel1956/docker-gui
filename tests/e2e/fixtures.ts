@@ -20,7 +20,7 @@ export type Stats = { CPUPerc: string; MemUsage: string; MemPerc: string; NetIO?
 export type Container = {
   ID: string; Names: string; Image: string; State: string; Status: string; Ports: string; Labels: string;
   logs?: string;
-  health?: { Status: string; Log: { ExitCode: number; Output: string }[] } | null;
+  health?: { Status: string; Log: { Start?: string; End?: string; ExitCode: number; Output: string }[] } | null;
   inspect?: Record<string, unknown>;
   fail?: Partial<Record<Action, string>>;
   delay?: Partial<Record<Action, number>>;
@@ -30,6 +30,8 @@ export type Container = {
   started?: string;  // StartedAt do inspect (since=start dos logs)
   events?: Record<string, unknown>[];  // linhas do `docker events` que o histórico devolve
   top?: string;  // saída do `docker top`
+  diff?: string;  // saída do `docker diff`
+  files?: Record<string, string>;  // o que o `docker cp` acha: {caminho: texto}; uma pasta é um prefixo com /
 };
 export type DiskUsage = { Type: string; TotalCount: string; Active: string; Size: string; Reclaimable: string };
 // linhas reais do `docker image ls --no-trunc` (uma por tag), `volume ls` e `network ls --no-trunc`, em '{{json .}}'
@@ -43,6 +45,9 @@ export type DockerState = {
   images?: ImageRow[]; volumes?: VolumeRow[]; networks?: NetworkRow[]; removed?: string[];
   context?: { Name: string; Host: string };  // o que o `context inspect` responde (padrão: default em unix://)
   compose_services?: Record<string, string[]>;  // o `compose config --services` de cada projeto
+  mem_total?: number;  // a RAM total do `docker info` (padrão: 16 GiB)
+  registry?: Record<string, string>;  // o que o `docker pull` acha: {ref com tag: ID da imagem}
+  pull_delay?: number;  // segundos que o pull leva, espalhados na saída
 };
 
 // ID estável por nome: o mesmo container tem o mesmo ID em todo teste
@@ -52,8 +57,9 @@ export const ctr = (Names: string, rest: Partial<Container> = {}): Container => 
   ID: id(Names), Names, Image: `${Names}:latest`, State: 'running', Status: 'Up 5 minutes', Ports: '', Labels: '', ...rest,
 });
 
-export const compose = (project: string, service: string) =>
-  `com.docker.compose.project=${project},com.docker.compose.service=${service}`;
+// depends: o valor do com.docker.compose.depends_on ("db:service_healthy:false,…"), primeiro, como o docker ps ordena
+export const compose = (project: string, service: string, depends = '') =>
+  `${depends ? `com.docker.compose.depends_on=${depends},` : ''}com.docker.compose.project=${project},com.docker.compose.service=${service}`;
 
 export const row = (page: Page, name: string) => page.locator(`#rows tr[data-key="c:${id(name)}"]`);
 

@@ -10,6 +10,7 @@ import socket
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -366,6 +367,16 @@ class LogsAndHealthTest(ServerTest):
         self.assertEqual(self.request("GET", f"/api/top/{HEX_ID}"), (500, "Error response from daemon: container 0123 is not running"))
 
 
+class DiffTest(unittest.TestCase):
+    """docker diff -> [{k, p}]: o caminho inteiro (com espaço), sem as linhas fora do formato."""
+
+    def test_lines(self):
+        out = "C /etc\nA /app/meu arquivo.txt\n\nX /y\nC\nD /tmp/x"
+        self.assertEqual(docker_gui.diff(out), [{"k": "C", "p": "/etc"}, {"k": "A", "p": "/app/meu arquivo.txt"},
+                                                {"k": "D", "p": "/tmp/x"}])
+        self.assertEqual(docker_gui.diff(""), [])
+
+
 class HistoryTest(unittest.TestCase):
     """docker events (e podman events) -> só o que explica uma queda, no mesmo formato."""
 
@@ -669,6 +680,98 @@ EOF""")
                     return
                 time.sleep(0.1)
             self.fail("a vaga do stream não foi devolvida")
+
+
+class CpTest(StreamTest):
+    """Baixar arquivo: o docker cp escreve um tar no stdout; arquivo vira o conteúdo, pasta vira o tar."""
+
+    def tar(self, *members):  # (nome, conteúdo | None para pasta)
+        path = os.path.join(self.dir, "out.tar")
+        with tarfile.open(path, "w") as t:
+            for name, data in members:
+                info = tarfile.TarInfo(name)
+                if data is None:
+                    info.type = tarfile.DIRTYPE
+                    t.addfile(info)
+                else:
+                    info.size = len(data)
+                    t.addfile(info, io.BytesIO(data))
+        return path
+
+    def args(self):
+        with open(os.path.join(self.dir, "args")) as f:
+            return f.read().split()
+
+    def test_file_comes_with_its_name_and_bytes(self):
+        path = self.tar(("error.log", b"\x00bin\xff"))
+        self.fake_docker(f"cat {path}")
+        self.assertEqual(docker_gui.cp_out(HEX_ID, "/var/log/nginx/error.log"), (200, "error.log", b"\x00bin\xff"))
+        self.assertEqual(self.args(), ["cp", "-L", f"{HEX_ID}:/var/log/nginx/error.log", "-"])
+
+    def test_folder_comes_as_tar(self):
+        path = self.tar(("reports", None), ("reports/a.txt", b"a"))
+        self.fake_docker(f"cat {path}")
+        with open(path, "rb") as f:
+            self.assertEqual(docker_gui.cp_out(HEX_ID, "/app/reports/"), (200, "reports.tar", f.read()))
+
+    def test_podman_has_no_dash_l(self):
+        self.fake_docker(f"cat {self.tar(('x', b'1'))}", name="podman")
+        with mock.patch.object(docker_gui, "CLI", ["podman"]):
+            self.assertEqual(docker_gui.cp_out(HEX_ID, "/x"), (200, "x", b"1"))
+        self.assertEqual(self.args(), ["cp", f"{HEX_ID}:/x", "-"])
+
+    def test_invalid_path_never_runs(self):
+        self.fake_docker("exit 0")
+        for path in ["", "etc/passwd", "/a\x00b", "/" + "a" * 4096]:
+            with self.subTest(path[:10]):
+                self.assertEqual(docker_gui.cp_out(HEX_ID, path), (400, "", "caminho inválido: use um caminho absoluto (começa com /), de até 4096 caracteres"))
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "args")))
+        self.assertEqual(docker_gui.cp_out(HEX_ID, "/" + "a" * 4095)[0], 500)  # 4096 passa (o tar vazio do exit 0 não)
+
+    def test_docker_errors(self):
+        for stderr, code, msg in [
+            ("Error response from daemon: Could not find the file /x in container web", 404, "/x não existe no container"),
+            ('Error: "/x" could not be found on container web: no such file or directory', 404, "/x não existe no container"),
+            ("Error response from daemon: No such container: 0123456789ab", 404, "o container não existe mais"),
+            ('Error: no container with name or ID "0123456789ab" found: no such container', 404, "o container não existe mais"),
+            ("Error response from daemon: permission denied", 500, "Error response from daemon: permission denied"),
+        ]:
+            with self.subTest(stderr):
+                self.fake_docker(f"echo '{stderr}' >&2; exit 1")
+                self.assertEqual(docker_gui.cp_out(HEX_ID, "/x"), (code, "", msg))
+
+    def test_over_the_limit_is_413_and_kills_docker(self):
+        self.fake_docker(f"echo $$ > {self.dir}/pid; exec head -c 100000 /dev/zero")  # exec: o pid é o do head
+        with mock.patch.object(docker_gui, "MAX_CP", 1000):
+            self.assertEqual(docker_gui.cp_out(HEX_ID, "/big"), (413, "", "/big passa de 100 MB, o limite daqui"))
+        self.wait_dead("o docker cp")
+
+    def test_deadline(self):
+        self.fake_docker(f"echo $$ > {self.dir}/pid; exec sleep 30")
+        with mock.patch.object(docker_gui, "ACTION_TIMEOUT", 0.3):
+            self.assertEqual(docker_gui.cp_out(HEX_ID, "/x"),
+                             (500, "", "docker cp não respondeu em 0.3s. O daemon está travado?"))
+        self.wait_dead("o docker cp")
+
+    def test_route_sends_attachment(self):
+        self.fake_docker(f"cat {self.tar(('relatório.txt', b'ok'))}")
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
+        conn.request("GET", f"/api/cp/{HEX_ID}?path=/app/relat%C3%B3rio.txt",
+                     headers={"Host": f"localhost:{self.port}", "X-Docker-GUI-Token": docker_gui.TOKEN})
+        r = conn.getresponse()
+        self.assertEqual((r.status, r.read()), (200, b"ok"))
+        self.assertEqual(r.getheader("Content-Type"), "application/octet-stream")
+        self.assertEqual(r.getheader("Content-Disposition"), "attachment; filename*=UTF-8''relat%C3%B3rio.txt")
+        self.assertEqual(r.getheader("X-Content-Type-Options"), "nosniff")
+        conn.close()
+        self.assertEqual(self.request("GET", f"/api/cp/{HEX_ID}?path=relativo"),
+                         (400, "caminho inválido: use um caminho absoluto (começa com /), de até 4096 caracteres"))
+        # só o header: com o token na query (um link direto), recusa
+        self.assertEqual(self.request("GET", f"/api/cp/{HEX_ID}?path=/x&t={docker_gui.TOKEN}", token=None)[0], 401)
+
+    def test_name_is_sanitized(self):
+        self.assertEqual(docker_gui.cp_name("/", True), "root.tar")
+        self.assertEqual(docker_gui.cp_name("/a\\b\x01c", False), "a_b_c")
 
 
 class InspectTest(ServerTest):

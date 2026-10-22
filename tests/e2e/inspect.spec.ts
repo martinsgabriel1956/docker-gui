@@ -1,4 +1,4 @@
-import { test, expect, ctr } from './fixtures';
+import { test, expect, ctr, compose } from './fixtures';
 
 const db = ctr('db', {
   inspect: {
@@ -90,4 +90,58 @@ test('container sem mounts, redes nem env', async ({ page, gui }) => {
   await page.locator('#insp summary').click();
   await expect(page.locator('#insp-body dd')).toHaveText(['no · não reinicia', 'nenhuma', 'nenhum', 'nenhuma']);
   await expect(page.getByRole('button', { name: 'Revelar valores' })).toHaveCount(0);
+});
+
+// docker diff: o que mudou no filesystem do container em relação à imagem
+const openDiff = async (page: import('@playwright/test').Page, name: string) => {
+  await page.getByRole('button', { name: `Logs ${name}` }).click();
+  await page.locator('#diff summary').click();
+};
+
+test('Mudanças mostra o docker diff com o tipo, o resumo e o filtro', async ({ page, gui }) => {
+  await gui.open({ containers: [ctr('app', { diff: 'C /etc\nA /etc/nginx.conf\nD /tmp/x\nA /app/<b>x</b>.txt' })] });
+  await openDiff(page, 'app');
+  const body = page.locator('#diff-body');
+  await expect(body.locator('p').first()).toHaveText('2 adicionados · 1 alterado · 1 apagado');
+  await expect(body.locator('li')).toHaveText(['alterado/etc', 'adicionado/etc/nginx.conf', 'apagado/tmp/x', 'adicionado/app/<b>x</b>.txt']);
+  await expect(body.locator('li b')).toHaveCount(0);  // o caminho vem do container: texto, nunca HTML
+
+  await page.locator('#diff-q').fill('etc');
+  await expect(body.locator('li')).toHaveCount(2);
+  await expect(body.locator('li mark')).toHaveText(['etc', 'etc']);
+  await expect(body.locator('p').first()).toHaveText('2 adicionados · 1 alterado · 1 apagado · 2 no filtro');
+  await page.locator('#diff-q').press('Escape');  // com texto, o Esc limpa o filtro (e o modal fica aberto)
+  await expect(body.locator('li')).toHaveCount(4);
+  await expect(page.locator('#dlg')).toBeVisible();
+});
+
+test('Mudanças funciona com o container parado e diz quando nada mudou', async ({ page, gui }) => {
+  await gui.open({ containers: [ctr('cron', { State: 'exited', Status: 'Exited (0) 3 days ago', diff: 'A /var/log/cron.log' }),
+                               ctr('limpo')] });
+  await openDiff(page, 'cron');
+  await expect(page.locator('#procs')).toBeHidden();
+  await expect(page.locator('#diff-body li')).toHaveText(['adicionado/var/log/cron.log']);
+  await page.keyboard.press('Escape');
+  await openDiff(page, 'limpo');
+  await expect(page.locator('#diff-body')).toHaveText('Nada mudou em relação à imagem.');
+});
+
+test('Mudanças mostra 500 e o filtro acha o resto; Copiar leva as filtradas', async ({ page, context, gui }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  const diff = Array.from({ length: 600 }, (_, i) => `A /app/node_modules/pkg-${i}/index.js`).join('\n');
+  await gui.open({ containers: [ctr('app', { diff })] });
+  await openDiff(page, 'app');
+  await expect(page.locator('#diff-body li')).toHaveCount(500);
+  await expect(page.locator('#diff-body')).toContainText('Mostrando 500 de 600; use o filtro para achar o resto.');
+  await page.locator('#diff-q').fill('pkg-599/');
+  await expect(page.locator('#diff-body li')).toHaveText(['adicionado/app/node_modules/pkg-599/index.js']);
+  await page.locator('#diff').getByRole('button', { name: 'Copiar' }).click();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('A /app/node_modules/pkg-599/index.js');
+});
+
+test('Mudanças não aparece nos logs do projeto', async ({ page, gui }) => {
+  const labels = `${compose('shop', 'api')},com.docker.compose.project.working_dir=/srv/shop`;
+  await gui.open({ containers: [ctr('api', { Labels: labels, diff: 'C /etc' })] });
+  await page.getByRole('button', { name: 'Logs do projeto shop' }).click();
+  await expect(page.locator('#diff')).toBeHidden();
 });

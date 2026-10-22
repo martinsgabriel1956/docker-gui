@@ -1,6 +1,6 @@
 // Histórico do docker stats: sparkline de CPU e memória por container e rede/disco fora da tabela.
 // O stats é consultado a cada 5 s, então cada leitura nova custa uns 5 s de teste.
-import { test, expect, ctr, id, row, type Stats } from './fixtures';
+import { test, expect, ctr, id, row, rowKeys, type Stats } from './fixtures';
 
 const reading = (cpu: number, memMiB: number): Stats =>
   ({ CPUPerc: `${cpu.toFixed(2)}%`, MemUsage: `${memMiB}MiB / 1.944GiB`, MemPerc: '1.00%' });
@@ -48,4 +48,45 @@ test('no celular o sparkline cabe no card, sem rolagem horizontal', async ({ pag
   await expect(page.locator(`#us-${id(name)} [data-spark="mem"]`)).toBeVisible(slow);
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(0);  // negativo: o espaço reservado da barra de rolagem
+});
+
+// memória perto do limite: p% de um limite de 512 MiB (com o MemPerc coerente, como o docker manda)
+const memAt = (p: number, cpu = 1): Stats =>
+  ({ CPUPerc: `${cpu.toFixed(2)}%`, MemUsage: `${Math.round(p * 5.12)}MiB / 512MiB`, MemPerc: `${p.toFixed(2)}%` });
+const memSlow = { timeout: 25_000 };  // a entrada pede 2 leituras seguidas, uns 5 s cada
+
+test('memória perto do limite entra na faixa na 2ª leitura alta e sai abaixo de 85%', async ({ page, gui }) => {
+  await gui.open({ containers: [ctr('api', { stats: [memAt(50), memAt(95), memAt(96)] })] });
+  const line = row(page, 'api').getByText('Memória em 96% do limite (492 MiB de 512 MiB)');
+  await expect(line).toBeVisible(memSlow);
+  expect(await rowKeys(page)).toContain('h:attn');
+  await expect(page.locator('#count button[data-a="filter"]', { hasText: 'com problema' })).toHaveText('1 com problema');
+  // de pé, mas no tom de aviso: a bolinha e o status em âmbar, não em verde
+  await expect(page.locator(`#st-${id('api')}`)).toHaveClass(/text-warn-fg/);
+
+  // o atalho abre os logs com os Processos abertos
+  await row(page, 'api').getByRole('button', { name: 'Ver os processos de api' }).click();
+  await expect(page.locator('#dlg')).toBeVisible();
+  await expect(page.locator('#procs')).toHaveAttribute('open', '');
+  await expect(page.locator('#dlg-status')).toContainText('Memória em 96% do limite');
+  await page.keyboard.press('Escape');
+
+  gui.update(s => { s.containers[0].stats = memAt(80); });
+  await expect(line).toBeHidden(memSlow);
+  await expect.poll(() => rowKeys(page), memSlow).not.toContain('h:attn');
+});
+
+test('container sem limite de memória nunca entra na faixa por memória', async ({ page, gui }) => {
+  // sem limite, o docker põe a RAM toda como limite (aqui 15.6 GiB de 16 GiB)
+  const full = (cpu: number): Stats => ({ CPUPerc: `${cpu.toFixed(2)}%`, MemUsage: '15.5GiB / 15.6GiB', MemPerc: '99.36%' });
+  await gui.open({ containers: [ctr('web', { stats: [full(1), full(2), full(3)] })] });
+  await expect(page.locator(`#us-${id('web')}`)).toContainText('CPU 3.00%', memSlow);  // a 3ª leitura chegou
+  expect(await rowKeys(page)).not.toContain('h:attn');
+  await expect(row(page, 'web')).not.toContainText('Memória em');
+});
+
+test('quem já estava perto do limite ao abrir entra na faixa na primeira leitura', async ({ page, gui }) => {
+  await gui.open({ containers: [ctr('api', { stats: memAt(95) })] });
+  await expect(row(page, 'api').getByText('Memória em 95% do limite')).toBeVisible(slow);
+  expect(await rowKeys(page)).toContain('h:attn');
 });

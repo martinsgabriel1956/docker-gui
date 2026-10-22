@@ -1,13 +1,13 @@
 import {
-  type Bucket, type Container, type ContainerState, type DiskUsage, type Facts, type HistoryEvent, type Image, type LogLevel,
-  type Network, type Port, type RunErrors, type RunField, type Sample, type Stats, type Tone, type Volume, HISTORY, age, anonVolume,
-  bucket, bulkSummary, bytes, continues, errHint, esc, eventText, fmtBytes, hasHealth, healthChanges, historySummary, io, isProblem,
-  logFilter, logLevel, logServices, newProblems, percent, ports, project, prunedVolumes, pushSample, reclaimShare, runSpec, service, shortImage,
-  sparkPoints, status, tone, topTable, trend, usage, workingDir,
+  type Blocker, type Bucket, type Container, type ContainerState, type DepState, type DiffItem, type DiskUsage, type Facts, type HistoryEvent, type Image, type LogLevel, type MemState,
+  type Network, type Port, type Probe, type RunErrors, type RunField, type Sample, type Stats, type Tone, type Volume, HISTORY, age, anonVolume,
+  DIFF_MAX, blockers, bucket, bulkSummary, bytes, continues, diffSummary, errHint, esc, eventText, fmtBytes, hasHealth, healthChanges, healthSummary, held, historySummary, holds, io, memHot, memText, memWatch, isProblem,
+  imageOk, logFilter, logLevel, logServices, newProblems, percent, ports, pullOutcome, sameRef, withTag, probeDuration, probeResult, probeTime, project, prunedVolumes, pushSample,
+  reclaimShare, runSpec, service, shortImage, sparkPoints, status, tone, topTable, trend, usage, workingDir,
 } from './format';
 import {LOCALE, t, translatePage} from './i18n';
 import {T} from '#transport';
-import type {Closer, Term} from './transport';
+import type {Closer, CpResult, Term} from './transport';
 import {Terminal} from '@xterm/xterm';
 import {FitAddon} from '@xterm/addon-fit';
 import XTERM_CSS from '@xterm/xterm/css/xterm.css';  // string (build.py usa --loader:.css=text): nada de CDN
@@ -20,7 +20,7 @@ const api = (path: string) => T.request('GET', path);
 
 type Action = 'start' | 'stop' | 'restart' | 'pause' | 'unpause' | 'remove';
 type RowAction = Action | 'logs';
-type MenuAction = Action | 'exec' | 'shell' | 'srestart' | 'sbuild' | 'noremove';
+type MenuAction = Action | 'exec' | 'shell' | 'srestart' | 'sbuild' | 'noremove' | 'cp';
 type ProblemKind = 'docker' | 'perm' | 'server' | 'auth';
 // [título, dica (HTML confiável), detalhe técnico, tipo]
 type Problem = [title: string, hint: string, detail: unknown, kind: ProblemKind];
@@ -35,7 +35,7 @@ type ComposeAction = 'up' | 'rebuild' | 'down' | 'pull' | 'restart' | 'build' | 
 type Arming = {id: string; name: string; a: 'remove' | 'down' | 'prune' | 'rm'; note: string; run: () => unknown; at: number; timer: number};
 // saída do compose de um projeto, enquanto roda (code null) e, se falhou, até fechar (code -1: o stream caiu no meio)
 type Out = {what: string; text: string; code: number | null};
-type Health = {Log?: {ExitCode: number; Output: string}[]} | null;
+type Health = {Log?: Probe[]} | null;
 // resumo do /api/inspect; o valor do env vem null (mascarado) até o usuário pedir para revelar
 type Inspect = {Restart: string; Networks: Record<string, string>; Env: [key: string, value: string | null][];
                 Mounts: {Type: string; Name: string; Source: string; Destination: string; RW: boolean}[]};
@@ -146,8 +146,7 @@ async function load() {
       for (const id of sel) if (!data.some(c => c.ID === id)) sel.delete(id);
       if (selectingRows()) dirty = true; else render();
     }
-    notify(newProblems(seen, data));
-    seen = new Set(data.filter(isProblem).map(c => c.ID));
+    checkAttention();
     showProblem(null);
   } catch (e) {
     showProblem([lastOk ? t`O servidor do Stivo parou de responder.` : t`Não consegui conectar ao servidor do Stivo.`,
@@ -209,9 +208,10 @@ async function askNotify() {
 }
 function notify(cs: Container[]) {
   if (!cs.length || !notifying() || (!document.hidden && document.hasFocus())) return;
+  cs = attnSort([...cs]);
   T.notify(cs.length === 1 ? t`${cs[0].Names} precisa de atenção` : t`${cs.length} containers precisam de atenção`,
     // o clique traz a página e põe o foco no Logs de quem caiu (a linha dele na faixa de atenção, que vem primeiro)
-    cs.length === 1 ? status(cs[0])[0] : cs.map(c => c.Names).join(', '),
+    cs.length === 1 ? (severe(cs[0]) ? status(cs[0])[0] : memLine(cs[0])) : cs.map(c => c.Names).join(', '),
     () => { focus(); document.querySelector<HTMLElement>(`[data-id="${cs[0].ID}"][data-a="logs"]`)?.focus(); });
 }
 
@@ -230,6 +230,15 @@ function setIcon(badge: string) {
 let stats: Record<string, Stats> = {};
 const series = new Map<string, Sample[]>();  // últimas leituras de cada container, para o sparkline
 const sid = (id: string) => id.slice(0, 12);
+// memória perto do limite: a RAM total do daemon (sem limite, o stats a reporta como limite) e quem está quente.
+// memBase: a próxima leitura com a RAM total é a base (quem já estava no alto ao abrir não vira notificação)
+let memTotal: number | null = null, memSt: MemState = new Map(), memBase = true;
+async function loadMemTotal() {
+  try {
+    const r = await api('/api/info');
+    if (r.ok) memTotal = (await r.json() as {MemTotal: number}).MemTotal;
+  } catch { /* tenta de novo na próxima leitura do stats */ }
+}
 async function loadStats() {
   let next: Record<string, Stats> = {};
   try {
@@ -242,13 +251,19 @@ async function loadStats() {
     const cpu = percent(s.CPUPerc), mem = bytes(s.MemUsage.split(' / ')[0]);
     if (cpu !== null && mem !== null) series.set(k, pushSample(series.get(k) ?? [], {t, cpu, mem}));
   }
+  if (memTotal === null) await loadMemTotal();
+  const first = memBase && memTotal !== null;
+  memSt = memWatch(memSt, next, memTotal, first);
   // sempre redesenha: mesmo com os números iguais, o sparkline andou uma amostra
   stats = next;
+  if (first) { memBase = false; for (const c of data) if (memOn(c)) seen?.add(alertKey(c)); }
+  checkAttention();
   if (selectingRows()) dirty = true; else render();
 }
 
 // setTimeout encadeado em vez de setInterval: um docker lento não empilha consultas
-async function statsLoop() { if (!document.hidden) await loadStats(); setTimeout(statsLoop, 5000); }
+// com a aba escondida, só se a página vigia (notificações ligadas, ou o desktop na bandeja): o alerta de memória precisa
+async function statsLoop() { if (watching()) await loadStats(); setTimeout(statsLoop, 5000); }
 
 // sparkline em SVG inline, sem animação e sem linha de base: a série ocupa a largura toda (estica até a janela de
 // HISTORY leituras encher). Para leitor de tela e no hover, um texto com mín, máx e o valor atual. O CPU tem piso de 10% na escala: 0,8% fica baixo e 80% no topo (com 1%, qualquer carga enchia a altura)
@@ -281,7 +296,7 @@ if (REMOTE) {
 }
 
 function renderCount() {
-  const n = (k: Bucket) => data.filter(c => bucket(c) === k).length;
+  const n = (k: Bucket) => data.filter(c => bucketOf(c) === k).length;
   const problemTxt = problemKind ? PROBLEM_TXT[problemKind] : '';
   // o favicon conta a faixa de atenção (a queda já vista sai dela); o título usa as mesmas palavras das contagens
   const band = data.filter(inBand).length;
@@ -394,20 +409,28 @@ function errHtml(c: Container) {
     hint ? `<p class="[contain:inline-size] font-sans text-xs text-bad-soft">${esc(hint)}</p>` : ''}`;
 }
 
-const health: Record<string, string> = {};  // ID+Status -> texto do último probe (o cache vence quando o Status muda)
+// ID+Status -> os probes, do mais novo para o mais velho, ou o texto do erro. O cache vence quando o Status muda: numa
+// mudança de saúde e a cada minuto ("Up 5 minutes" -> "Up 6 minutes"); o ↻ do modal relê na hora
+const health: Record<string, Probe[] | string> = {};
 
 async function loadHealth(id: string) {
   const c = data.find(c => c.ID === id);
   if (!c || health[id + c.Status]) return;
-  let txt: string;
+  let v: Probe[] | string;
   try {
-    const r = await api('/api/health/' + id), h: unknown = await r.json(), last = r.ok ? (h as Health)?.Log?.at(-1) : undefined;
-    txt = !r.ok ? t`Não consegui ler o healthcheck: ${h}`
-        : last ? t`código ${last.ExitCode} · ${last.Output.trim() || t`(sem saída)`}` : t`Nenhum probe rodou ainda.`;
-  } catch { txt = t`Não consegui ler o healthcheck.`; }
-  health[id + c.Status] = txt;
+    const r = await api('/api/health/' + id), h: unknown = await r.json();
+    v = r.ok ? [...((h as Health)?.Log ?? [])].reverse() : t`Não consegui ler o healthcheck: ${h}`;
+  } catch { v = t`Não consegui ler o healthcheck.`; }
+  health[id + c.Status] = v;
   render();
 }
+function reloadHealth(id: string) {
+  const c = data.find(c => c.ID === id);
+  if (c) { delete health[id + c.Status]; loadHealth(id); }
+}
+// a linha da lista mostra só o último probe
+const lastProbe = (v: Probe[] | string) => typeof v === 'string' ? v
+  : v[0] ? t`código ${v[0].ExitCode} · ${v[0].Output.trim() || t`(sem saída)`}` : t`Nenhum probe rodou ainda.`;
 
 // última linha do log de quem caiu (saiu com erro ou está em loop): o motivo costuma estar ali, sem abrir o modal.
 // Uma consulta por queda (estado + código de saída), não por poll: o "há 10 min" do Status muda sozinho
@@ -432,11 +455,13 @@ async function loadTail(c: Container) {
 const rowCache = new Map<string, {sig: string; html: string}>();
 function row(c: Container, withProject = false) {
   if (fell(c)) loadTail(c);
-  const sig = JSON.stringify([c, withProject, tails[tailKey(c)], facts[tailKey(c)], busy.get(c.ID), arming?.id === c.ID, errors.get(c.ID), health[c.ID + c.Status], stats[sid(c.ID)],
-                              series.get(sid(c.ID))?.at(-1)?.t, composing.has(project(c)), TOUCH, WIDE.matches, sel.has(c.ID), quiet(c), fallKey(c)]);
+  // a anotação da dependência vem de outros containers: entra na assinatura, senão a linha não muda quando o db muda
+  const bl = blockers(c, data), hd = holds(c, data);
+  const sig = JSON.stringify([c, withProject, bl.map(b => [b.service, b.state, b.c?.ID]), hd.map(x => x.ID), tails[tailKey(c)], facts[tailKey(c)], busy.get(c.ID), arming?.id === c.ID, errors.get(c.ID), health[c.ID + c.Status], stats[sid(c.ID)],
+                              series.get(sid(c.ID))?.at(-1)?.t, composing.has(project(c)), TOUCH, WIDE.matches, sel.has(c.ID), quiet(c), fallKey(c), memOn(c)]);
   const hit = rowCache.get(c.ID);
   if (hit?.sig === sig) return hit.html;
-  const html = rowHtml(c, withProject);
+  const html = rowHtml(c, withProject, bl, hd);
   rowCache.set(c.ID, {sig, html});
   return html;
 }
@@ -459,8 +484,29 @@ const SEEN_KEY = 'docker-gui-seen';
 let seenFails = new Set<string>((() => { try { return JSON.parse(localStorage.getItem(SEEN_KEY) || '[]'); } catch { return []; } })());
 const fallKey = (c: Container) => { const f = facts[tailKey(c)]; return f?.FinishedAt ? `${c.ID}@${f.FinishedAt}` : ''; };
 const quiet = (c: Container) => (c.State === 'exited' || c.State === 'dead') && seenFails.has(fallKey(c));
-// na faixa de atenção: o que está com problema, menos a queda antiga que alguém marcou como vista
-const inBand = (c: Container) => isProblem(c) && !quiet(c);
+// na faixa de atenção: o que está com problema (menos a queda antiga que alguém marcou como vista), o "Created" que uma
+// dependência quebrada segura e quem está perto do limite de memória. attention é o mesmo sem o "visto", para as
+// notificações. severe: o que quebrou (ou não sobe); só a memória é aviso, com chave própria na notificação, para a
+// queda de quem estava perto do limite notificar de novo
+const memOn = (c: Container) => c.State === 'running' && memHot(memSt, sid(c.ID));
+const severe = (c: Container) => isProblem(c) || held(c, data);
+const attention = (c: Container) => severe(c) || memOn(c);
+const inBand = (c: Container) => (isProblem(c) && !quiet(c)) || held(c, data) || memOn(c);
+const alertKey = (c: Container) => severe(c) ? c.ID : `${c.ID}:mem`;
+// o filtro e as contagens seguem a faixa: o "Created" segurado e a memória contam como problema
+const bucketOf = (c: Container): Bucket => held(c, data) || memOn(c) ? 'problema' : bucket(c);
+// raiz de dependência (consertar o db conserta a api), depois quem quebrou, depois quem só está perto do limite; o sort
+// é estável, então dentro de cada grupo segue por nome
+const rank = (c: Container) => holds(c, data).length ? 0 : severe(c) ? 1 : 2;
+const attnSort = (cs: Container[]) => cs.sort((a, b) => rank(a) - rank(b));
+// rodando bem, mas perto do limite de memória: o tom de aviso (a bolinha, o status e o bloco do projeto)
+const toneOf = (c: Container): Tone => tone(c) === 'ok' && memOn(c) ? 'warn' : tone(c);
+const memLine = (c: Container) => memOn(c) && stats[sid(c.ID)] ? memText(stats[sid(c.ID)]) : '';
+// quem entrou na faixa desde a última vez (da lista ou do stats) vira notificação
+function checkAttention() {
+  notify(newProblems(seen, data, attention, alertKey));
+  seen = new Set(data.filter(attention).map(alertKey));
+}
 function saveSeen() {
   try { localStorage.setItem(SEEN_KEY, JSON.stringify([...seenFails].slice(-200))); } catch { /* aba privada: vale só agora */ }
   render();
@@ -472,8 +518,32 @@ function ackFail(id: string) {
   toast(t`${c.Names} saiu da faixa de atenção. Volta para lá se cair de novo.`, true, [t`Desfazer`, () => { seenFails.delete(k); saveSeen(); }]);
   document.querySelector<HTMLElement>(`[data-id="${id}"][data-a="logs"]`)?.focus();
 }
-function rowHtml(c: Container, withProject: boolean) {
-  const b = busy.get(c.ID), tn = TONE[b ? 'busy' : tone(c)], st = status(c, facts[tailKey(c)]), pp = ports(c.Ports), p = project(c), bt = b && busyText(c, b);
+const DEP_TXT: Record<DepState, (s: string) => string> = {
+  unhealthy: s => t`depende de ${s}, que está com healthcheck falhando`, exited: s => t`depende de ${s}, que saiu com erro`,
+  stopped: s => t`depende de ${s}, que está parado`, missing: s => t`depende de ${s}, que não tem container`};
+// "depende de db, que …" (na linha, o nome abre os logs do db; no modal fica só o texto, porque trocar de container com
+// o modal aberto é fechar e abrir de novo) e "segurando api e worker"
+function depHtml(bl: Blocker[], hd: Container[], link = true) {
+  return bl.map(b => `<span class="block text-xs text-fg-soft">${DEP_TXT[b.state](b.c && link
+    ? `<button data-id="${b.c.ID}" data-a="dep" onclick="act('logs','${b.c.ID}')" aria-label="${t`Abrir logs de ${esc(b.service)}`}"
+        class="font-mono underline underline-offset-4 rounded hover:text-fg-strong focus-visible:outline-2 focus-visible:outline-accent">${esc(b.service)}</button>`
+    : mono(esc(b.service)))}</span>`).join('')
+    + (hd.length ? `<span class="block text-xs text-fg-soft">${t`segurando ${mono(esc(names(hd)))}`}</span>` : '');
+}
+// "Memória em 93% do limite (…)", no tom de aviso; na linha, com o atalho para os Processos (a pergunta seguinte é
+// "qual processo?"); no modal, os Processos já estão logo abaixo
+function memHtml(c: Container, procs: boolean) {
+  const m = memLine(c);
+  return !m ? '' : `<span class="block text-xs text-warn-fg">${esc(m)}${procs ? ` <button data-id="${c.ID}" data-a="procs" onclick="openProcs('${c.ID}')"
+    aria-label="${t`Ver os processos de ${esc(c.Names)}`}" class="font-sans underline underline-offset-4 rounded hover:text-fg-strong focus-visible:outline-2 focus-visible:outline-accent">${t`Processos`}</button>` : ''}</span>`;
+}
+function openProcs(id: string) {
+  logs(id);
+  const d = $<HTMLDetailsElement>('#procs');
+  if (!d.hidden) d.open = true;  // o ontoggle chama o loadTop
+}
+function rowHtml(c: Container, withProject: boolean, bl: Blocker[], hd: Container[]) {
+  const b = busy.get(c.ID), tn = TONE[b ? 'busy' : toneOf(c)], st = status(c, facts[tailKey(c)]), pp = ports(c.Ports), p = project(c), bt = b && busyText(c, b);
   const armed = arming?.id === c.ID, prim = PRIMARY[c.State], sec = SECONDARY[c.State];
   const u = c.State === 'running' && !b && stats[sid(c.ID)] ? usage(stats[sid(c.ID)]) : null, h = series.get(sid(c.ID)) ?? [];
   const slot = (w = 'w-20') => `<span aria-hidden="true" class="${w} shrink-0 max-sm:hidden"></span>`;
@@ -491,17 +561,17 @@ function rowHtml(c: Container, withProject: boolean) {
   const more = [sec && sec !== 'restart' && [sec, LABEL[sec]], svc && ['srestart', `compose restart ${esc(svc)}`],
                 svc && ['sbuild', `compose up --build ${esc(svc)}`], c.State === 'running' && ['pause', t`Pausar`],
                 c.State === 'running' && ['shell', t`Abrir terminal`], c.State === 'running' && ['exec', t`Copiar docker exec`],
-                removable(c) ? ['remove', t`Remover…`] : ['noremove', t`Pare antes de remover`]].filter((x): x is [MenuAction, string] => !!x);
+                ['cp', t`Baixar arquivo…`], removable(c) ? ['remove', t`Remover…`] : ['noremove', t`Pare antes de remover`]].filter((x): x is [MenuAction, string] => !!x);
   const menu = !more.length ? slot('w-9') : menuBox(c.ID, t`Mais ações para ${esc(c.Names)}`, !!b || armed,
     more.map(([a, text]) => a === 'noremove' ? `<button data-id="${c.ID}" data-a="m-noremove" aria-disabled="true" aria-label="${t`Remover (indisponível: pare o container antes)`}" title="${t`O docker só remove container parado (sem -f)`}"
-      class="${MENU_ITEM} text-muted cursor-not-allowed hover:bg-transparent">${text}</button>` : `<button data-id="${c.ID}" data-a="m-${a}" ${b || ((a === 'srestart' || a === 'sbuild') && composing.has(p)) ? 'aria-disabled="true"' : ''} onclick="menuPick(this); ${a === 'exec' ? `copyExec('${c.ID}')` : a === 'shell' ? `openShell('${c.ID}')`
+      class="${MENU_ITEM} text-muted cursor-not-allowed hover:bg-transparent">${text}</button>` : `<button data-id="${c.ID}" data-a="m-${a}" ${b || ((a === 'srestart' || a === 'sbuild') && composing.has(p)) ? 'aria-disabled="true"' : ''} onclick="menuPick(this); ${a === 'exec' ? `copyExec('${c.ID}')` : a === 'shell' ? `openShell('${c.ID}')` : a === 'cp' ? `openCp('${c.ID}')`
       : a === 'srestart' || a === 'sbuild' ? `serviceAct('${a.slice(1)}','${c.ID}')` : `act('${a}','${c.ID}')`}"
-      ${a === 'srestart' ? `title="${t`Reinicia todas as réplicas do serviço ${esc(svc)}`}"` : a === 'sbuild' ? `title="${t`Reconstrói a imagem e recria o serviço ${esc(svc)} (b)`}"` : ''}
+      ${a === 'srestart' ? `title="${t`Reinicia todas as réplicas do serviço ${esc(svc)}`}"` : a === 'cp' ? `title="${esc(cpCmd(c.Names))}"` : a === 'sbuild' ? `title="${t`Reconstrói a imagem e recria o serviço ${esc(svc)} (b)`}"` : ''}
       class="${MENU_ITEM} ${a === 'remove' ? 'text-bad-fg' : a === 'srestart' || a === 'sbuild' ? 'font-mono text-xs text-fg' : 'text-fg'}">${text}</button>`).join(''));
   // [contain:inline-size]: o healthcheck aberto quebra dentro da coluna, sem alargá-la (a tabela inteira se mexia)
   const healthBox = hasHealth(c) && !b ? `<details data-keep="health" class="mt-1 text-xs [contain:inline-size]" ontoggle="this.open && loadHealth('${c.ID}')">
       <summary class="cursor-pointer w-fit py-1 coarse:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent text-muted hover:text-fg">${t`Ver último healthcheck`}</summary>
-      <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-fg-soft">${esc(health[c.ID + c.Status] || t`Carregando…`)}</pre></details>` : '';
+      <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-fg-soft">${esc(health[c.ID + c.Status] ? lastProbe(health[c.ID + c.Status]) : t`Carregando…`)}</pre></details>` : '';
   const tail = fell(c) && !b ? tails[tailKey(c)] : '';
   // na faixa, a última linha do log é o atalho para o diagnóstico: abre os logs
   const tailBtn = tail ? `<button data-id="${c.ID}" data-a="tail" onclick="act('logs','${c.ID}')" title="${esc(tail)}"
@@ -525,7 +595,7 @@ ${WIDE.matches ? '' : `
         chips ? `<div class="mt-0.5 flex flex-wrap gap-1 -ml-1 coarse:gap-x-2 coarse:-ml-2">${chips}</div>` : ''}`}</div></div></th>
     <td role="cell" class="${cell} font-mono text-xs text-muted pr-4 max-xl:hidden">${WIDE.matches ? `<div class="truncate [direction:rtl] text-left" title="${esc(c.Image)}">${image}</div>` : ''}</td>
     <td role="cell" class="${cell} font-mono text-data pr-4 sm:min-w-[20ch] max-sm:block max-sm:p-0 max-sm:pl-12 max-sm:coarse:pl-14" title="${esc(c.Status)}">
-      <span id="st-${c.ID}" class="${tn[1]}">${bt || esc(st[0])}${st[1] && !b ? `<span class="block text-xs text-muted">${st[1]}</span>` : ''}</span>${tailBtn}${
+      <span id="st-${c.ID}" class="${tn[1]}">${bt || esc(st[0])}${st[1] && !b ? `<span class="block text-xs text-muted">${st[1]}</span>` : ''}</span>${tailBtn}${b ? '' : depHtml(bl, hd) + memHtml(c, true)}${
       u ? `<span id="us-${c.ID}" class="block text-xs font-mono text-muted" title="${esc(u[2])}"><span class="whitespace-nowrap">${esc(u[0])} ${spark(h, 'cpu')}</span> <span class="whitespace-nowrap max-xl:block"><span class="max-xl:hidden">· </span>${esc(u[1])} ${spark(h, 'mem')}</span></span>` : ''}${b ? '' : errHtml(c) + healthBox}${seenBtn}</td>
     <td role="cell" class="${cell} pr-4 max-xl:hidden">${WIDE.matches && chips ? `<div class="flex flex-wrap gap-1">${chips}</div>` : ''}</td>
     <td role="cell" class="py-2.5 align-top pr-4 max-sm:block max-sm:p-0 max-sm:pt-2"><div class="flex justify-end max-sm:justify-start items-center gap-1.5 coarse:gap-2">
@@ -573,7 +643,7 @@ function closeMenus(except?: Element | null) {
 document.addEventListener('click', e => closeMenus(e.target instanceof Element ? e.target.closest('details[data-keep="menu"]') : null));
 
 const bandHead = (text: string, cls: string) => `<tr data-key="h:attn" role="row" class="max-sm:block"><th role="columnheader" colspan="5" scope="colgroup"
-  class="max-sm:block px-4 pt-4 pb-2 text-left font-mono text-xs font-semibold uppercase border-t border-line ${cls}">${text}<span class="ml-3 font-sans font-normal normal-case text-bad-soft/80">${t`healthcheck falhando, loop de reinício ou saída com erro`}</span></th></tr>`;
+  class="max-sm:block px-4 pt-4 pb-2 text-left font-mono text-xs font-semibold uppercase border-t border-line ${cls}">${text}<span class="ml-3 font-sans font-normal normal-case text-bad-soft/80">${t`healthcheck falhando, loop de reinício, saída com erro, dependência quebrada ou memória perto do limite`}</span></th></tr>`;
 
 // cabeçalho do projeto compose: contagem e ações para o stack inteiro (sempre sobre todos os containers do projeto).
 // Como na linha: uma ação principal (Iniciar tudo se algo está parado, senão Parar tudo), Logs e o resto no "⋯"
@@ -602,13 +672,17 @@ function groupHead(k: string, label: string) {
   const upSvc = missing.map(s => `<button data-id="stack-${ek}" data-a="m-svcup-${esc(s)}" data-p="${ek}" data-s="${esc(s)}" ${off}
       aria-label="${t`compose up ${esc(s)} do projeto ${ek}`}" onclick="menuPick(this); composeAct('svcup', this.dataset.p, this.dataset.s)"
       class="${MENU_ITEM} text-fg">compose up ${esc(s)}</button>`).join('');
+  // a pasta do projeto: o desktop abre no gerenciador de arquivos, a web copia o caminho (pode estar por SSH ou no
+  // celular). Com daemon remoto a pasta é da outra máquina, então nenhum dos dois
+  const dirItem = dir && !REMOTE ? `<button data-id="stack-${ek}" data-a="m-dir" data-p="${ek}" title="${esc(dir)}"
+      onclick="menuPick(this); projectDir(this.dataset.p)" class="${MENU_ITEM} text-fg">${T.openDir ? t`Abrir pasta` : t`Copiar caminho da pasta`}</button>` : '';
   const groups = [STACK.filter(([a]) => a !== prim).map(([a, text]) => sbtn(a, text, MENU_ITEM + ' text-fg')).join(''),
                   dir ? cbtn('up', 'compose up') + cbtn('rebuild', 'compose up --build') + cbtn('pull', 'compose pull') : '', upSvc,
-                  dir ? cbtn('down', 'compose down…', MENU_ITEM + ' text-bad-fg') : ''].filter(Boolean);
+                  dirItem, dir ? cbtn('down', 'compose down…', MENU_ITEM + ' text-bad-fg') : ''].filter(Boolean);
   const verb = composing.get(k);
   // a faixa de estado: um bloco por container do projeto, na cor do estado, como uma calha de processos
   const strip = k ? `<span aria-hidden="true" data-strip class="flex items-center gap-0.5">${[...all].sort((a, b) => a.Names.localeCompare(b.Names)).map(c =>
-    `<span title="${esc(c.Names)}: ${esc(status(c)[0])}" class="h-3 w-1.5 rounded-[1px] ${TONE[busy.has(c.ID) ? 'busy' : tone(c)][0]}"></span>`).join('')}</span>` : '';
+    `<span title="${esc(c.Names)}: ${esc(status(c)[0])}" class="h-3 w-1.5 rounded-[1px] ${TONE[busy.has(c.ID) ? 'busy' : toneOf(c)][0]}"></span>`).join('')}</span>` : '';
   return `<tr data-key="g:${ek}" role="row" class="max-sm:block"><th role="columnheader" colspan="5" scope="colgroup" class="max-sm:block px-4 pt-3 pb-2.5 text-left font-normal border-t border-line-strong bg-raised">
     <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
       <span class="font-mono text-group font-semibold ${k ? 'text-fg-strong' : 'text-fg-soft'}">${label}</span>${strip}
@@ -655,10 +729,10 @@ function render() {
   const q = $<HTMLInputElement>('#q').value.trim().toLowerCase();
   // ordem alfabética estável: a linha não sai de baixo do cursor depois de uma ação;
   // a triagem fica na faixa "Precisa de atenção", o resto agrupado por projeto compose
-  const rows = data.filter(c => (!only || bucket(c) === only) && [c.Names, c.Image, project(c)].join(' ').toLowerCase().includes(q))
+  const rows = data.filter(c => (!only || bucketOf(c) === only) && [c.Names, c.Image, project(c)].join(' ').toLowerCase().includes(q))
                    .sort((a, b) => a.Names.localeCompare(b.Names));
   visible = rows.map(c => c.ID);
-  const attn = rows.filter(inBand), groups = new Map<string, Container[]>();
+  const attn = attnSort(rows.filter(inBand)), groups = new Map<string, Container[]>();
   for (const c of rows) if (!inBand(c)) groups.set(project(c), [...(groups.get(project(c)) || []), c]);
   // projeto com todos os containers na faixa ainda precisa do cabeçalho (e das ações do stack)
   for (const c of attn) if (project(c) && !groups.has(project(c))) groups.set(project(c), []);
@@ -1007,6 +1081,17 @@ async function composeAct(a: ComposeAction, p: string, svc = '', sure = false): 
   if (a === 'down') $('#q').focus();
 }
 
+// "Abrir pasta" (desktop) ou "Copiar caminho da pasta" (web) do projeto: a pasta vem dos labels, como no up e no down
+async function projectDir(p: string) {
+  const c = data.find(c => project(c) === p), dir = c && workingDir(c);
+  if (!dir) return;
+  if (!T.openDir) {
+    return navigator.clipboard.writeText(dir).then(() => toast(t`Caminho copiado: ${dir}`, true), () => toast(t`Não consegui copiar. O caminho é: ${dir}`));
+  }
+  const err = await T.openDir(p, dir);
+  if (err) toast(err);
+}
+
 // serviços do arquivo do compose (config --services), para mostrar os que não têm container (nunca subiram, ou
 // removidos à mão). Lido uma vez por projeto, de novo quando os serviços com container mudam (um compose up pelo
 // terminal) e depois de cada ação do compose pela página. ponytail: só os perfis ativos; quem está atrás de um
@@ -1132,7 +1217,7 @@ function renderDlg() {
     $('#dlg-acts').innerHTML = '';
     return;
   }
-  const b = busy.get(c.ID), tn = TONE[b ? 'busy' : tone(c)], st = status(c, facts[tailKey(c)]);
+  const b = busy.get(c.ID), tn = TONE[b ? 'busy' : toneOf(c)], st = status(c, facts[tailKey(c)]);
   $('#procs').hidden = c.State !== 'running';  // docker top só com o container de pé
   const h = hasHealth(c) && health[c.ID + c.Status];
   if (hasHealth(c) && !h) loadHealth(c.ID);
@@ -1141,19 +1226,20 @@ function renderDlg() {
   // uma linha para cada coisa: status, último healthcheck (inteiro no title) e uso, com rede e disco no fim (fora do celular)
   // depois de reiniciar daqui, o status diz quando foi: a marca no log só aparece se o container escrever algo novo
   const again = mark && c.State === 'running' && !b ? `<span class="text-muted"> · ${esc(mark.label)}</span>` : '';
-  $('#dlg-status').innerHTML = `<span class="${tn[1]}">${b ? busyText(c, b) : esc(st[0])}</span>${st[1] && !b ? `<span class="text-muted"> · ${st[1]}</span>` : ''}${again}${b ? '' : errHtml(c)}${
-    h ? `<div class="mt-1 text-xs text-muted sm:truncate" title="${esc(h)}"><span class="font-sans">${t`Último healthcheck:`}</span> <span class="text-fg-soft">${esc(h)}</span></div>` : ''}${
+  $('#dlg-status').innerHTML = `<span class="${tn[1]}">${b ? busyText(c, b) : esc(st[0])}</span>${st[1] && !b ? `<span class="text-muted"> · ${st[1]}</span>` : ''}${again}${b ? '' : errHtml(c) + depHtml(blockers(c, data), holds(c, data), false) + memHtml(c, false)}${
+    h ? `<div id="dlg-health" class="mt-2 text-xs">${healthHtml(c.ID, h)}</div>` : ''}${
     s && u ? `<div id="dlg-usage" class="mt-1 text-xs text-muted">${usageLine(s, u, hs)}</div>` : ''}`;
   // Reiniciar à vista e primeiro (é o ciclo: reiniciar e ver o log novo), depois a ação principal; o resto no "⋯"
   // (remover fica na lista, onde a confirmação aparece)
   const prim = PRIMARY[c.State], sec = SECONDARY[c.State];
-  const more = [sec && sec !== 'restart' && [sec, LABEL[sec]], c.State === 'running' && ['exec', t`Copiar docker exec`]].filter((x): x is [string, string] => !!x);
+  const more = [sec && sec !== 'restart' && [sec, LABEL[sec]], c.State === 'running' && ['exec', t`Copiar docker exec`],
+                ['cp', t`Baixar arquivo…`]].filter((x): x is [string, string] => !!x);
   $('#dlg-acts').innerHTML = (sec === 'restart' ? `<button data-id="dlg" data-a="restart" ${b ? 'aria-disabled="true"' : ''} aria-label="${t`Reiniciar ${esc(c.Names)}`}" title="${t`Reiniciar (r)`}"
       onclick="act('restart', '${c.ID}')" class="inline-flex items-center gap-1.5 ${BTN} text-fg hover:bg-hover">${RESTART_ICON}${t`Reiniciar`}</button>` : '') + (prim ? `<button data-id="dlg" data-a="${prim}" ${b ? 'aria-disabled="true"' : ''} aria-label="${LABEL[prim]} ${esc(c.Names)}" onclick="act('${prim}', '${c.ID}')"
       class="${BTN} ${prim === 'start' ? 'text-ok-fg hover:bg-ok/10' : 'text-fg hover:bg-hover'}">${LABEL[prim]}</button>` : '')
     + (more.length ? menuBox('dlg', t`Mais ações para ${esc(c.Names)} nos logs`, !!b, more.map(([a, text]) =>
-      `<button data-id="dlg" data-a="m-${a}" ${b ? 'aria-disabled="true"' : ''} onclick="menuPick(this); ${a === 'exec' ? `copyExec('${c.ID}')` : `act('${a}', '${c.ID}')`}"
-        class="${MENU_ITEM} text-fg">${text}</button>`).join('')) : '');
+      `<button data-id="dlg" data-a="m-${a}" ${b ? 'aria-disabled="true"' : ''} onclick="menuPick(this); ${a === 'exec' ? `copyExec('${c.ID}')` : a === 'cp' ? `openCp('${c.ID}')` : `act('${a}', '${c.ID}')`}"
+        ${a === 'cp' ? `title="${esc(cpCmd(c.Names))}"` : ''} class="${MENU_ITEM} text-fg">${text}</button>`).join('')) : '');
 }
 
 // histórico que o "Carregar mais" vai pedindo; o servidor só aceita estes (LOG_TAIL no docker_gui.py)
@@ -1369,8 +1455,12 @@ function openLogs(title: string, running: boolean) {
   $<HTMLOptionElement>('#lsince-start').hidden = $<HTMLOptionElement>('#lsince-start').disabled = !!logProject;
   svcSet.clear(); renderSvcs();
   $('#lb').textContent = t`Carregando…`; $('#lmeta').textContent = hist().replace(/^./, c => c.toUpperCase()); $('#dlg-msg').innerHTML = '';
-  $('#insp').hidden = $('#hist').hidden = $('#procs').hidden = !!logProject;  // configuração, histórico e processos são de um container só
+  // configuração, histórico, processos e mudanças são de um container só
+  $('#insp').hidden = $('#hist').hidden = $('#procs').hidden = $('#diff').hidden = !!logProject;
   renderHits(); renderMore();
+  // os probes são lidos de novo a cada abertura: um Status como "Up About an hour" seguraria o cache por uma hora
+  const c = !logProject && data.find(c => c.ID === logId);
+  if (c) delete health[c.ID + c.Status];
   $<HTMLDialogElement>('#dlg').showModal(); renderDlg(); fetchLogs();
   $('#lb').focus();  // a caixa do log: as setas rolam, / vai para o filtro e r reinicia
   if (running && wantsFollow()) toggleFollow(true);  // ao vivo por padrão; desligado só para quem desligou da última vez
@@ -1469,6 +1559,40 @@ function refreshLogs() {
 function copyLogs() {
   navigator.clipboard.writeText($('#lb').textContent ?? '').then(() => toast(t`Logs copiados.`, true), () => toast(t`Não consegui copiar.`));
 }
+function copyProbe(id: string, i: number) {
+  const c = data.find(c => c.ID === id), v = c && health[id + c.Status];
+  if (!Array.isArray(v) || !v[i]) return;
+  navigator.clipboard.writeText(v[i].Output).then(() => toast(t`Saída do probe copiada.`, true), () => toast(t`Não consegui copiar.`));
+}
+
+// os probes do healthcheck no modal, do mais novo para o mais velho: horário, duração, resultado (cor e texto) e a saída,
+// com 3 linhas à vista e o resto num "mais N linhas"
+const PROBE: Record<ReturnType<typeof probeResult>, [string, Tone]> =
+  {ok: [t`passou`, 'ok'], fail: [t`falhou`, 'bad'], error: [t`não rodou como esperado`, 'warn']};
+const SMALL_BTN = 'px-2 py-0.5 coarse:min-h-11 coarse:px-4 rounded font-sans font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent';
+function healthHtml(id: string, v: Probe[] | string) {
+  const head = (sum: string) => `<div class="flex items-center gap-2"><span class="font-sans text-muted">${t`Healthcheck`}</span>${
+    sum ? `<span class="text-fg-soft">${esc(sum)}</span>` : ''}<button onclick="reloadHealth('${id}')" aria-label="${t`Atualizar o healthcheck`}" class="${SMALL_BTN}">↻</button></div>`;
+  if (typeof v === 'string') return head('') + `<p class="mt-1 text-bad-fg">${esc(v)}</p>`;
+  if (!v.length) return head('') + `<p class="mt-1 text-muted">${t`Nenhum probe rodou ainda.`}</p>`;
+  const time = (s: string) => {
+    const d = new Date(probeTime(s));
+    return isNaN(+d) ? '' : d.toLocaleTimeString(LOCALE, {hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false});
+  };
+  const dur = (d: number | null) => d === null ? '' : d < 1000 ? `${d} ms` : `${(d / 1000).toLocaleString(LOCALE, {maximumFractionDigits: 1})} s`;
+  const rows = v.map((p, i) => {
+    const [txt, tn] = PROBE[probeResult(p)], lines = p.Output.trimEnd().split('\n'), shown = esc(lines.slice(0, 3).join('\n'));
+    const rest = lines.length > 3 ? `<details><summary class="w-fit cursor-pointer font-sans text-muted hover:text-fg rounded focus-visible:outline-2 focus-visible:outline-accent">${
+      (lines.length === 4 ? t`mais 1 linha` : t`mais ${lines.length - 3} linhas`)}</summary><pre class="whitespace-pre-wrap [overflow-wrap:anywhere]">${esc(lines.slice(3).join('\n'))}</pre></details>` : '';
+    return `<tr class="align-top"><td class="pr-3 py-0.5 text-muted whitespace-nowrap">${time(p.Start)}</td><td class="pr-3 py-0.5 text-muted whitespace-nowrap text-right">${dur(probeDuration(p))}</td>
+      <td class="pr-3 py-0.5 whitespace-nowrap ${TONE[tn][1]}">${txt} · ${p.ExitCode}</td>
+      <td class="pr-3 py-0.5 w-full [overflow-wrap:anywhere]"><pre class="whitespace-pre-wrap text-fg-soft">${shown || `<span class="font-sans text-muted">${t`(sem saída)`}</span>`}</pre>${rest}</td>
+      <td class="py-0.5">${p.Output ? `<button onclick="copyProbe('${id}', ${i})" aria-label="${t`Copiar a saída do probe das ${time(p.Start)}`}" class="${SMALL_BTN}">${t`Copiar`}</button>` : ''}</td></tr>`;
+  }).join('');
+  // a folga (p-1) é para o contorno dos botões, que a rolagem cortaria na borda
+  return head(healthSummary(v)) + `<div class="-mx-1 p-1 max-h-48 overflow-auto"><table class="w-full font-mono"><caption class="sr-only">${
+    t`Últimos probes do healthcheck, do mais novo para o mais velho`}</caption><tbody>${rows}</tbody></table></div>`;
+}
 
 // o mesmo texto do select do "Novo container"
 const RESTART_TXT: Record<string, string> = {no: t`não reinicia`, 'on-failure': t`se sair com erro`, 'unless-stopped': t`sempre, menos se você parar`, always: t`sempre`};
@@ -1546,6 +1670,48 @@ async function loadTop() {
   $('#procs-body').innerHTML = html;
 }
 
+// mudanças no filesystem (docker diff): a última leitura fica guardada para o filtro e o Copiar, que valem sobre todas
+let diffItems: DiffItem[] | null = null;
+const DIFF_KIND: Record<DiffItem['k'], [string, string]> =
+  {A: [t`adicionado`, 'text-ok-fg'], C: [t`alterado`, 'text-warn-fg'], D: [t`apagado`, 'text-bad-fg']};
+async function loadDiff() {
+  const id = logId;
+  let err: string | null = null, items: DiffItem[] | null = null;
+  try {
+    const r = await api(`/api/diff/${id}`), j: unknown = await r.json();
+    if (r.ok) items = j as DiffItem[]; else err = t`Não consegui ler as mudanças: ${j}`;
+  } catch { err = t`Não consegui ler as mudanças.`; }
+  if (id !== logId || !$<HTMLDetailsElement>('#diff').open) return;
+  diffItems = items;
+  if (err) $('#diff-body').textContent = err; else paintDiff();
+}
+const diffHits = () => {
+  const re = logFilter($<HTMLInputElement>('#diff-q').value.trim());
+  return {re, hits: re ? diffItems!.filter(d => re.test(d.p)) : diffItems!};
+};
+// o caminho vem do container: entra como texto (o markInto só cria <mark> com textContent), nunca como HTML
+function paintDiff() {
+  if (!diffItems) return;
+  const body = $('#diff-body');
+  if (!diffItems.length) { body.innerHTML = `<p class="text-muted">${t`Nada mudou em relação à imagem.`}</p>`; return; }
+  const {re, hits} = diffHits(), el = (tag: string, cls: string, text = '') =>
+    Object.assign(document.createElement(tag), {className: cls, textContent: text});
+  const ol = el('ol', 'font-mono space-y-0.5');
+  for (const d of hits.slice(0, DIFF_MAX)) {
+    const [txt, cls] = DIFF_KIND[d.k], li = el('li', '');
+    li.append(el('span', `inline-block w-24 font-sans ${cls}`, txt));
+    markInto(li, d.p, re);
+    ol.append(li);
+  }
+  body.replaceChildren(el('p', 'mb-1 text-fg-soft', diffSummary(diffItems) + (re ? ` · ${t`${hits.length} no filtro`}` : '')), ol,
+    ...(hits.length > DIFF_MAX ? [el('p', 'mt-1 text-muted', t`Mostrando ${DIFF_MAX} de ${hits.length}; use o filtro para achar o resto.`)] : []));
+}
+function copyDiff() {
+  if (!diffItems) return;
+  navigator.clipboard.writeText(diffHits().hits.map(d => `${d.k} ${d.p}`).join('\n'))
+    .then(() => toast(t`Mudanças copiadas.`, true), () => toast(t`Não consegui copiar.`));
+}
+
 // baixa o que está na tela (com os timestamps do docker), sem ir de novo ao servidor
 function downloadLogs() {
   const a = document.createElement('a');
@@ -1554,11 +1720,76 @@ function downloadLogs() {
   a.click(); setTimeout(() => URL.revokeObjectURL(a.href));
 }
 
+// baixar arquivo do container (docker cp): os últimos caminhos por nome de container (recriado, continua o mesmo)
+const CP_KEY = 'docker-gui-cp';
+const cpAll = (): Record<string, string[]> => { try { return JSON.parse(localStorage.getItem(CP_KEY) || '{}'); } catch { return {}; } };
+let cpFor: Container | null = null, cpAbort: AbortController | null = null;
+// o comando equivalente, com o caminho entre aspas se precisar (o do 413); sem caminho, o do title do item.
+// function, não const: a lista pode ser desenhada antes desta linha rodar
+function cpCmd(name: string, path?: string) {
+  const p = path === undefined ? t`<caminho>` : /^[\w./@%+=:,-]+$/.test(path) ? path : `'${path.replace(/'/g, `'\\''`)}'`;
+  return `${document.documentElement.dataset.cli} cp ${name}:${p} .`;
+}
+
+function openCp(id: string) {
+  cpFor = data.find(c => c.ID === id) ?? null;
+  if (!cpFor) return;
+  const recent = cpAll()[cpFor.Names] ?? [], input = $<HTMLInputElement>('#cp-path');
+  $('#cp-name').textContent = cpFor.Names;
+  $('#cp-recent').replaceChildren(...recent.map(p => Object.assign(document.createElement('option'), {value: p})));
+  input.value = recent[0] ?? '';
+  input.removeAttribute('aria-invalid');
+  $('#cp-err').textContent = $('#cp-msg').textContent = '';
+  $<HTMLDialogElement>('#cp').showModal();
+  input.select();
+}
+
+async function cpGo(e: SubmitEvent) {
+  e.preventDefault();
+  const input = $<HTMLInputElement>('#cp-path'), path = input.value.trim(), c = cpFor, go = $('#cp-go');
+  if (!c || cpAbort) return;
+  if (!path.startsWith('/')) {  // o servidor confere de novo
+    input.setAttribute('aria-invalid', 'true');
+    $('#cp-err').textContent = t`Use o caminho absoluto, começando com /.`;
+    return input.focus();
+  }
+  input.removeAttribute('aria-invalid');
+  $('#cp-err').textContent = $('#cp-msg').textContent = '';
+  const abort = cpAbort = new AbortController();
+  go.setAttribute('aria-disabled', 'true'); go.textContent = t`Baixando arquivo…`;
+  const r = await T.cpOut(c.ID, path, abort.signal)
+    .catch((): CpResult => ({ok: false, status: 0, error: t`Sem resposta do servidor.`}));
+  cpAbort = null;
+  go.removeAttribute('aria-disabled'); go.textContent = t`Baixar arquivo`;
+  if (abort.signal.aborted) return;  // cancelou: nada a dizer
+  if (!r.ok) {
+    // o comando numa linha própria: quebrar no meio do nome do container confunde
+    $('#cp-msg').innerHTML = esc(r.error) + (r.status === 413 ? `<span class="block mt-1">${t`Pelo terminal:`}
+      <button type="button" onclick="copyCp()" class="ml-1 font-medium underline underline-offset-4 rounded hover:text-fg-strong focus-visible:outline-2 focus-visible:outline-accent">${t`Copiar`}</button></span>
+      <code class="block mt-0.5 font-mono text-xs [overflow-wrap:anywhere]">${esc(cpCmd(c.Names, path))}</code>` : '');
+    return;
+  }
+  try {
+    const all = cpAll();
+    all[c.Names] = [path, ...(all[c.Names] ?? []).filter(p => p !== path)].slice(0, 5);
+    localStorage.setItem(CP_KEY, JSON.stringify(all));
+  } catch { /* aba privada: vale só agora */ }
+  $<HTMLDialogElement>('#cp').close();
+  if (r.saved) toast(t`Baixado: ${r.name}`, true);
+}
+// fechar (×, Cancelar ou Esc) no meio do download cancela
+function cpClosed() { cpAbort?.abort(); cpAbort = null; }
+function copyCp() {
+  const cmd = cpCmd(cpFor!.Names, $<HTMLInputElement>('#cp-path').value.trim());
+  navigator.clipboard.writeText(cmd).then(() => toast(t`Copiado: ${cmd}`, true), () => toast(t`Não consegui copiar. O comando é: ${cmd}`));
+}
+
 // roda no × direto e também no evento close (Esc); chamar duas vezes não faz mal
 function afterClose() {
   toggleFollow(false);
   // fecha o "Configuração" (e o histórico e os processos) e apaga o que estava nele: env revelado não fica na página
-  for (const k of ['insp', 'hist', 'procs']) { $('#' + k).removeAttribute('open'); $(`#${k}-body`).textContent = t`Carregando…`; }
+  for (const k of ['insp', 'hist', 'procs', 'diff']) { $('#' + k).removeAttribute('open'); $(`#${k}-body`).textContent = t`Carregando…`; }
+  diffItems = null; $<HTMLInputElement>('#diff-q').value = '';
   // a linha pode ter sido redesenhada com o modal aberto; foca o botão Logs atual dela (ou o do cabeçalho do projeto)
   document.querySelector<HTMLElement>(logProject ? `[data-id="${CSS.escape(`stack-${logProject.project}`)}"][data-a="plogs"]`
                                                  : `[data-id="${logId}"][data-a="logs"]`)?.focus();
@@ -1827,13 +2058,21 @@ function objItem(k: ObjKind, o: Obj) {
   const held = holds.length ? esc(holds.join(', ')) : '';
   const cls = armed ? 'ring-bad/60 text-bad-fg hover:bg-bad/10' : 'text-fg hover:bg-hover';
   const cols = OBJ_COLS[k].slice(1);
-  return `<tr class="border-t border-line/70 ${armed ? 'bg-bad/10' : ''} max-sm:block max-sm:py-3">
+  // imagens: um Atualizar (docker pull) por tag; sem tag (dangling), nada para atualizar
+  const tags = k === 'images' ? (o as Image).Tags : [];
+  const pullBtns = tags.map(tg => {
+    const run = pulls.get(tg)?.code === null, et = esc(tg);
+    return `<button data-id="pull-${et}" data-a="pull" data-r="${et}" ${run ? 'aria-disabled="true"' : ''} onclick="pullImage(this.dataset.r)"
+      title="docker pull ${et}" aria-label="${t`Atualizar ${et}`}" class="${BTN} text-fg hover:bg-hover">${run ? t`Baixando…` : tags.length > 1 ? t`Atualizar ${et}` : t`Atualizar`}</button>`;
+  }).join('');
+  const fresh = !!freshRef && tags.some(tg => sameRef(tg, freshRef));
+  return `<tr ${fresh ? 'data-fresh' : ''} class="border-t border-line/70 ${armed ? 'bg-bad/10' : fresh ? 'bg-accent/10' : ''} transition-[background-color] motion-reduce:transition-none max-sm:block max-sm:py-3">
     <th scope="row" class="py-2.5 pl-4 pr-6 max-sm:block max-sm:p-0 max-sm:px-4 text-left font-normal align-top">
       <div class="font-mono text-data font-semibold text-fg-strong [overflow-wrap:anywhere]">${title}</div>
       ${err ? `<div class="mt-1 [contain:inline-size] max-sm:[contain:none] text-xs text-bad-fg">${hint ? `<p class="font-sans">${hint}</p>` : ''}
         <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-bad-soft">${esc(err)}</pre></div>` : ''}</th>
     ${cells.map((c, i) => `<td class="py-2.5 pr-4 max-sm:block max-sm:p-0 max-sm:px-4 align-top font-mono text-xs leading-5 text-muted [overflow-wrap:anywhere]"><span class="sm:sr-only">${cols[i]}: </span>${c}</td>`).join('')}
-    <td class="py-2 pr-4 max-sm:block max-sm:p-0 max-sm:px-4 max-sm:pt-2 align-top"><div class="flex justify-end max-sm:justify-start items-center gap-1.5">${!canRm ? '' : held
+    <td class="py-2 pr-4 max-sm:block max-sm:p-0 max-sm:px-4 max-sm:pt-2 align-top"><div class="flex flex-wrap justify-end max-sm:justify-start items-center gap-1.5">${pullBtns}${!canRm ? '' : held
       ? `<button data-id="${esc(id)}" data-a="rm" aria-disabled="true" aria-label="${t`Remover (indisponível: em uso por ${held})`}"
       title="${k === 'networks' ? t`Em uso por ${held}: pare o container antes` : t`Em uso por ${held}: remova o container antes`}" class="${BTN} text-muted cursor-not-allowed">${t`Remover…`}</button>`
       : `<button data-id="${esc(id)}" data-a="rm" data-k="${k}" data-r="${esc(r)}" ${objBusy ? 'aria-disabled="true"' : ''} ${armed ? 'aria-expanded="true"' : ''}
@@ -1856,6 +2095,62 @@ function renderObjects() {
     if (html !== objHtml[k]) $(`#obj-${k}-list`).innerHTML = objHtml[k] = html;  // o render roda a cada poll
     $(`#obj-${k}-n`).textContent = Array.isArray(v) ? ` · ${v.length}` : '';
   }
+}
+
+// docker pull: um por referência (com a tag explícita), com a saída ao vivo pelo addOut do compose (chave
+// "pull:<ref>"). before: o ID da tag antes do pull (null se não havia), para dizer no fim se a imagem mudou
+const pulls = new Map<string, Out & {before: string | null}>();
+let freshRef = '';  // a imagem que acabou de chegar fica em destaque na lista por um momento
+const imageOf = (ref: string) => Array.isArray(objs.images) ? (objs.images as Image[]).find(i => i.Tags.some(tg => sameRef(tg, ref))) : undefined;
+function pullHint() {
+  const v = $<HTMLInputElement>('#pull-q').value.trim();
+  $('#pull-hint').textContent = !v ? '' : !imageOk(v) ? t`Imagem inválida: use repo[:tag] ou repo@sha256:…, com o caminho em minúsculas.`
+    : withTag(v) !== v ? t`(tag latest)` : '';
+}
+async function pullImage(typed = $<HTMLInputElement>('#pull-q').value.trim()) {
+  pullHint();
+  const ref = withTag(typed);
+  if (!typed || !imageOk(typed) || pulls.get(ref)?.code === null) return;
+  const p = {what: `docker pull ${ref}`, text: '', code: null as number | null, before: imageOf(ref)?.ID ?? null};
+  pulls.set(ref, p); renderPulls(); render();
+  $('#shown').textContent = t`Baixando ${ref}…`;
+  let msg = '';
+  try {
+    const r = await T.ndjson('/api/pull', {image: ref}, l => addOut(`pull:${ref}`, p, l + '\n'));
+    if (r.status >= 400) { p.code = -2; msg = String(r.error); } else p.code = r.code;
+  } catch { p.code = -1; msg = t`sem resposta do servidor do Stivo.`; }
+  await loadObjects('images');
+  if (p.code === 0) {
+    const out = pullOutcome(p.before, imageOf(ref)?.ID ?? null);
+    // atualizada: quem usava a versão anterior continua nela até ser recriado
+    const old = out === 'updated' && Array.isArray(objs.images) ? (objs.images as Image[]).find(i => i.ID === p.before)?.Containers ?? [] : [];
+    toast({new: t`Baixada: ${ref}.`, missing: t`Baixada: ${ref}.`, same: t`${ref} já estava em dia.`,
+           updated: t`Atualizada: ${ref}. A versão anterior ficou sem tag.`}[out]
+      + (old.length ? ' ' + t`${old.join(', ')} continuam com a versão anterior até serem recriados.` : ''), true);
+    pulls.delete(ref);
+    freshRef = ref;
+    setTimeout(() => { if (freshRef === ref) { freshRef = ''; render(); } }, 4000);
+    if ($<HTMLInputElement>('#pull-q').value.trim() === typed) { $<HTMLInputElement>('#pull-q').value = ''; pullHint(); }
+  } else {
+    msg ||= p.text;
+    toast(t`Não deu para baixar ${ref}. ${errHint(msg) || msg.trim().split('\n').at(-1) || t`Erro sem mensagem.`}`);
+    if (p.code === -2) pulls.delete(ref);  // recusado antes de rodar: não há saída para mostrar
+  }
+  renderPulls(); render();
+}
+function closePull(ref: string) { pulls.delete(ref); renderPulls(); $('#pull-q').focus(); }
+// a área dos pulls, acima da lista: o comando, o estado e a saída (o texto entra pelo addOut); o que falhou fica até o ×
+function renderPulls() {
+  $('#pulls').innerHTML = [...pulls].map(([ref, p]) => {
+    const running = p.code === null, er = esc(ref);
+    const state = running ? t`baixando…` : p.code === -1 ? t`sem resposta do servidor` : t`falhou (código ${p.code})`;
+    return `<div class="rounded-lg ring-1 ring-line bg-raised/40 p-3"><div class="flex items-center gap-2 font-mono text-xs ${running ? 'text-fg-soft' : 'text-bad-fg'}">
+      <span>docker pull ${er} · ${state}</span>${running ? '' : `<button data-r="${er}" onclick="closePull(this.dataset.r)" aria-label="${t`Fechar a saída do docker pull ${er}`}"
+        title="${t`Fechar`}" class="ml-auto grid place-items-center shrink-0 w-9 coarse:w-11 ${BTN} text-fg hover:bg-hover">${X_ICON}</button>`}</div>
+      <pre data-out="pull:${er}" tabindex="0" aria-label="${t`Saída do docker pull ${er}`}"
+        class="mt-1.5 max-h-64 overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] rounded bg-canvas p-2 font-mono text-xs text-fg-soft ring-1 ring-line focus-visible:outline-2 focus-visible:outline-accent"></pre></div>`;
+  }).join('');
+  pulls.forEach((p, ref) => { const pre = outPre(`pull:${ref}`); if (pre) { pre.textContent = p.text; pre.scrollTop = pre.scrollHeight; } });
 }
 
 // docker image/volume/network rm, com a confirmação em 2 passos. Em uso, o docker recusa e o erro fica no item
@@ -1894,6 +2189,8 @@ async function openPrefs() {
   ctx.value = p.context && p.contexts.includes(p.context) ? p.context : '';
   sel('lang').value = p.lang ?? '';
   $<HTMLInputElement>('#pref-notify').checked = p.notifications;
+  const auto = $<HTMLInputElement>('#pref-autostart');
+  auto.checked = auto.defaultChecked = p.autostart;  // defaultChecked: o estado real, para voltar se salvar falhar
   prefsContext();
   $('#prefs-msg').textContent = '';
   $<HTMLDialogElement>('#prefs').showModal();
@@ -1906,11 +2203,15 @@ async function savePrefs(e: SubmitEvent) {
   const v = (k: string) => $<HTMLSelectElement>(`#pref-${k}`).value || null, go = $('#prefs-go');
   if (go.getAttribute('aria-disabled') === 'true') return;
   go.setAttribute('aria-disabled', 'true');
+  const auto = $<HTMLInputElement>('#pref-autostart');
   const err = await T.prefs!.set({cli: v('cli'), context: v('cli') === 'podman' ? null : v('context'), lang: v('lang'),
-                                  notifications: $<HTMLInputElement>('#pref-notify').checked});
+                                  notifications: $<HTMLInputElement>('#pref-notify').checked, autostart: auto.checked});
   go.removeAttribute('aria-disabled');
-  if (err) $('#prefs-msg').textContent = err;
+  // com erro nada mudou (nem o início automático): a caixa volta ao que o sistema tem (RF1.4)
+  if (err) { $('#prefs-msg').textContent = err; auto.checked = auto.defaultChecked; }
 }
+$('#cp-form').addEventListener('submit', cpGo);
+$('#cp').addEventListener('close', cpClosed);
 if (T.prefs) {
   $('#prefs-open').hidden = false;
   T.prefs.onOpen(() => void openPrefs());
@@ -1919,9 +2220,9 @@ if (T.prefs) {
 }
 
 Object.assign(window, {
-  ackFail, act, afterClose, askNotify, confirmArm, bulkAct, clearFilters, clearSel, closeOut, composeAct, copyAddr, copyExec, copyLogs, disarm, downloadLogs,
-  filterBy, followClick, loadHealth, loadHistory, loadInspect, loadMore, loadTop, logPick, menuPick, openCreate, openPrefs, openShell, pickTab, placeMenu, projectLogs,
-  prune, refreshLogs, rmObj, serviceAct, runToastAction, selectAll, sinceChange, stackAct, toggleSel,
+  ackFail, act, afterClose, askNotify, confirmArm, bulkAct, clearFilters, clearSel, closeOut, closePull, composeAct, copyAddr, copyCp, copyDiff, copyExec, copyLogs, copyProbe, disarm, downloadLogs,
+  filterBy, followClick, loadDiff, loadHealth, loadHistory, loadInspect, loadMore, loadTop, logPick, menuPick, openCp, openCreate, openPrefs, openProcs, openShell, pickTab, placeMenu, projectDir, projectLogs, pullImage,
+  prune, refreshLogs, reloadHealth, rmObj, serviceAct, runToastAction, selectAll, sinceChange, stackAct, toggleSel,
 });
 
 $('#dlg').addEventListener('close', afterClose);
@@ -1945,6 +2246,13 @@ $('#lf').oninput = paint;
 $('#lf').addEventListener('keydown', e => {
   const f = e.target as HTMLInputElement;
   if (e.key === 'Escape' && f.value) { e.preventDefault(); f.value = ''; paint(); }
+});
+$('#pull-q').oninput = pullHint;
+// o filtro das mudanças funciona igual
+$('#diff-q').oninput = paintDiff;
+$('#diff-q').addEventListener('keydown', e => {
+  const f = e.target as HTMLInputElement;
+  if (e.key === 'Escape' && f.value) { e.preventDefault(); f.value = ''; paintDiff(); }
 });
 // aba escondida solta o stream de eventos (e o docker events do servidor); ao voltar, atualiza na hora
 document.addEventListener('visibilitychange', () => {

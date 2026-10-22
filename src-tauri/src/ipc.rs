@@ -33,6 +33,8 @@ pub async fn api(
     match stivo_core::handle(&state.ctx(), Request::new(self::method(&method), &path, body)).await {
         Reply::Json(r) => Ok(ApiReply { status: r.status, body: r.body }),
         Reply::Ndjson(_) => Err("rota com stream: use stream_open".into()),
+        // o desktop baixa pelo cp_save (a janela "Salvar como"), sem passar os bytes pela página
+        Reply::File(_) => Ok(ApiReply { status: 404, body: "not found".into() }),
     }
 }
 
@@ -68,6 +70,7 @@ pub async fn stream_open(
         let mut lines = match stivo_core::handle(&ctx, Request::new(Method::Post, &path, body)).await {
             Reply::Ndjson(lines) => lines,
             Reply::Json(r) => return Err(ApiReply { status: r.status, body: r.body }),
+            Reply::File(_) => return Err(ApiReply { status: 404, body: "not found".into() }), // só GET baixa
         };
         tauri::async_runtime::spawn(async move {
             // o compose segue até o fim mesmo que a página saia: aqui só deixa de mandar
@@ -143,6 +146,8 @@ pub struct PrefsView {
     context: Option<String>,
     lang: Option<String>,
     notifications: bool,
+    /// lido do sistema a cada vez, não do prefs.json (RF1.3)
+    autostart: bool,
     contexts: Vec<String>,
 }
 
@@ -161,6 +166,7 @@ pub async fn prefs_get(state: State<'_, AppState>) -> Result<PrefsView, String> 
         context: p.context.clone(),
         lang: p.lang.clone(),
         notifications: p.notifications(),
+        autostart: crate::autostart::enabled(),
         contexts: contexts().await,
     })
 }
@@ -175,6 +181,14 @@ pub async fn prefs_set(
 ) -> Result<(), String> {
     let en = state.ctx().lang == stivo_core::Lang::En;
     crate::prefs::validate(&prefs, &contexts().await, en)?;
+    // antes de salvar o resto: se o sistema recusar, nada muda (RF1.4). O kind, não o erro: o motivo, sem o caminho
+    if prefs.autostart != crate::autostart::enabled() {
+        crate::autostart::set(prefs.autostart).map_err(|e| {
+            log::warn!("iniciar com o sistema: {}", e.kind());
+            let (pt, en_) = ("O sistema recusou o início automático:", "The system refused to start Stivo at login:");
+            format!("{} {}", if en { en_ } else { pt }, e.kind())
+        })?;
+    }
     let saved = {
         let mut p = state.prefs.lock().unwrap();
         p.cli = prefs.cli;
@@ -203,4 +217,77 @@ pub async fn prefs_set(
         let _ = w.reload();
     }
     Ok(())
+}
+
+/// "Abrir pasta" do projeto compose: só a pasta que os labels declaram (a mesma conferência do up e do down), só com
+/// daemon local (com o remoto, a pasta está na outra máquina) e só pasta: o gerenciador de arquivos abre, nada executa.
+/// Err: o texto para o aviso
+#[tauri::command]
+pub async fn open_dir(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    project: String,
+    dir: String,
+) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let ctx = state.ctx();
+    let say = |pt: &str, en: &str| if ctx.lang == stivo_core::Lang::En { en } else { pt }.to_string();
+    if stivo_core::page::where_(&ctx).await.2 {
+        return Err(say(
+            "O daemon é remoto: a pasta fica na outra máquina.",
+            "The daemon is remote: the folder is on the other machine.",
+        ));
+    }
+    stivo_core::router::compose_project(&ctx, &project, &dir)
+        .await
+        .map_err(|r| r.body.as_str().unwrap_or_default().to_string())?;
+    if !std::path::Path::new(&dir).is_dir() {
+        return Err(format!("{} {dir}", say("A pasta não existe mais:", "The folder no longer exists:")));
+    }
+    app.opener().open_path(&dir, None::<&str>).map_err(|_| {
+        // sem o erro do opener, que traz o caminho (a regra de log do projeto)
+        log::warn!("abrir a pasta do projeto: o gerenciador de arquivos recusou");
+        format!("{} {dir}", say("Não consegui abrir a pasta:", "Could not open the folder:"))
+    })
+}
+
+#[derive(Serialize)]
+pub struct CpSaved {
+    saved: bool,
+    name: String,
+}
+
+/// "Baixar arquivo…": o mesmo cp_out da versão web, e o arquivo vai para onde a pessoa escolher na janela "Salvar
+/// como" do sistema (nada é gravado sem essa escolha). saved: false se ela cancelou. Err: {status, body}, como o api
+#[tauri::command]
+pub async fn cp_save(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    path: String,
+) -> Result<CpSaved, ApiReply> {
+    use tauri_plugin_dialog::DialogExt;
+    if !validate::ID_RE.is_match(&id) {
+        return Err(ApiReply { status: 404, body: "not found".into() });
+    }
+    let ctx = state.ctx();
+    let f = stivo_core::cp::cp_out(&ctx, &id, &path).await.map_err(|r| ApiReply { status: r.status, body: r.body })?;
+    let name = f.name.clone();
+    let mut dialog = app.dialog().file().set_file_name(&f.name);
+    if let Some(w) = app.get_webview_window("main") {
+        dialog = dialog.set_parent(&w);
+    }
+    let en = ctx.lang == stivo_core::Lang::En;
+    // o diálogo bloqueia: fora da thread da janela
+    let saved = tauri::async_runtime::spawn_blocking(move || {
+        let Some(dest) = dialog.blocking_save_file().and_then(|p| p.into_path().ok()) else { return Ok(false) };
+        std::fs::write(dest, f.data).map(|_| true).map_err(|e| {
+            log::warn!("baixar arquivo: não gravou ({})", e.kind()); // sem o caminho (a regra de log do projeto)
+            format!("{} {}", if en { "Could not save the file:" } else { "Não consegui gravar o arquivo:" }, e.kind())
+        })
+    })
+    .await
+    .map_err(|e| ApiReply { status: 500, body: e.to_string().into() })?
+    .map_err(|e| ApiReply { status: 500, body: e.into() })?;
+    Ok(CpSaved { saved, name })
 }

@@ -73,6 +73,7 @@ async fn contract() {
         let got = match handle(&ctx, Request::new(method, req["path"].as_str().unwrap(), body)).await {
             Reply::Json(r) => (r.status, r.body),
             Reply::Ndjson(_) => (0, Value::String("NDJSON fora do escopo do contrato".into())),
+            Reply::File(_) => (0, Value::String("arquivo fora do escopo do contrato".into())),
         };
         let want = (case["response"]["status"].as_u64().unwrap() as u16, case["response"]["body"].clone());
         let mut errs = fake.errors.lock().unwrap().clone();
