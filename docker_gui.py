@@ -2,10 +2,12 @@
 """Stivo: containers Docker e Podman no navegador. Só stdlib + docker CLI."""
 import argparse
 import base64
+import contextlib
 import errno
 import hashlib
 import hmac
 import html
+import io
 import json
 import locale
 import os
@@ -17,12 +19,13 @@ import signal
 import struct
 import subprocess
 import sys
+import tarfile
 import threading
 import time
 import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote
 
 PORT = 8765  # padrão; se estiver ocupada, serve() tenta as próximas
 # segredo por execução: sem ele a API não responde. Fecha a porta para o que roda na máquina
@@ -82,6 +85,7 @@ COMPOSE_FORMAT = ('[{{json (.Label "com.docker.compose.project")}},{{json (.Labe
 # timestamp do docker logs logo depois do prefixo do compose
 LOG_TIME = re.compile(r"\|\s(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?")
 MAX_BODY = 64 * 1024
+MAX_CP = 100 * 1024 * 1024  # baixar arquivo: o tar inteiro passa pela memória (da aba na web, do app no desktop)
 # comandos que imprimem um JSON por linha; o stats só lista os rodando e leva ~2 s para medir a CPU
 LISTS = {"/api/containers": ["ps", "-a"], "/api/stats": ["stats", "--no-stream"]}
 # eventos que não mudam nada na lista, além dos exec*: o healthcheck roda um exec a cada intervalo (exec_create,
@@ -173,6 +177,11 @@ EN = {
         "language of the page and messages: pt or en (default: $DOCKER_GUI_LANG or the system locale)",
     "Stivo em {url}  (Ctrl+C para sair)": "Stivo at {url}  (Ctrl+C to quit)",
     "não abre o navegador; o link sai só no terminal": "don't open the browser; the link is only printed in the terminal",
+    "caminho inválido: use um caminho absoluto (começa com /), de até 4096 caracteres":
+        "invalid path: use an absolute path (starting with /), up to 4096 characters",
+    "{path} não existe no container": "{path} does not exist in the container",
+    "o container não existe mais": "the container no longer exists",
+    "{path} passa de 100 MB, o limite daqui": "{path} is over 100 MB, the limit here",
 }
 
 
@@ -430,6 +439,55 @@ def diff(out):
             if len(line) > 2 and line[0] in "ACD" and line[1] == " "]
 
 
+def cp_name(path, folder):
+    """Nome do download: o último pedaço do caminho (a raiz vira root), sem barra nem caractere de controle."""
+    base = re.sub(r"[\x00-\x1f\x7f/\\]", "_", path.rstrip("/").rsplit("/", 1)[-1] or "root")
+    return base + ".tar" if folder else base
+
+
+def cp_out(cid, path):
+    """docker cp <id>:<path> - (um tar no stdout): (200, nome, bytes) ou (status, "", mensagem). Arquivo sai com o
+    conteúdo; pasta (ou o que não for arquivo comum) sai como o tar. O -L segue o link dentro do container; o podman
+    já segue e não tem a flag"""
+    if not path.startswith("/") or "\x00" in path or len(path) > 4096:
+        return 400, "", tr("caminho inválido: use um caminho absoluto (começa com /), de até 4096 caracteres")
+    try:
+        p = subprocess.Popen([*CLI, "cp", *([] if podman() else ["-L"]), f"{cid}:{path}", "-"],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except OSError as e:  # binário que não existe
+        return 500, "", str(e)
+    late = []
+    timer = threading.Timer(ACTION_TIMEOUT, lambda: (late.append(1), p.kill()))
+    timer.start()
+    with p:
+        try:
+            data = p.stdout.read(MAX_CP + 1)
+            if len(data) > MAX_CP:
+                p.kill()
+                return 413, "", tr("{path} passa de 100 MB, o limite daqui").format(path=path)
+            err = p.stderr.read().decode(errors="replace").strip()
+        finally:
+            timer.cancel()
+    if late:
+        return 500, "", tr("{cli} {cmd} não respondeu em {timeout}s. O daemon está travado?").format(
+            cli=CLI[0], cmd="cp", timeout=ACTION_TIMEOUT)
+    if p.returncode:
+        low = err.lower()
+        if "no such container" in low:  # antes: o do podman também diz "no such file or directory"
+            return 404, "", tr("o container não existe mais")
+        if "could not find the file" in low or "no such file or directory" in low:
+            return 404, "", tr("{path} não existe no container").format(path=path)
+        return 500, "", err
+    try:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as t:  # o docker cp entrega tar sem compressão
+            first = t.next()
+            if first is not None and first.isfile():
+                return 200, cp_name(path, False), t.extractfile(first).read()
+    except tarfile.TarError:
+        return 500, "", tr("formato inesperado na saída do {cmd}").format(cmd=f"{CLI[0]} cp")
+    return 200, cp_name(path, True), data
+
+
 def summary(info, reveal=False):
     """Resumo do `docker inspect`: restart policy, redes, mounts e env, e o que explica uma queda (se o kernel matou por
     falta de memória e quantas vezes o docker já reiniciou o container).
@@ -607,6 +665,19 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def send_bytes(self, data, name):
+        """O download do baixar arquivo: o conteúdo do container nunca é interpretado (octet-stream, attachment, nosniff)"""
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(name, safe='')}")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+        self.send_header("X-Frame-Options", "DENY")
+        self.end_headers()
+        with contextlib.suppress(OSError):  # a página cancelou: a conexão já fechou
+            self.wfile.write(data)
+
     def host_ok(self):
         # bloqueia DNS rebinding: só aceita acesso via localhost
         port = self.server.server_address[1]
@@ -711,6 +782,10 @@ class Handler(BaseHTTPRequestHandler):
         if m:  # o que mudou no filesystem do container em relação à imagem; percorre a camada gravável: prazo de ação
             r = docker("diff", m[1], timeout=ACTION_TIMEOUT)
             return self.send(500, json.dumps(r.stderr.strip())) if r.returncode else self.send(200, json.dumps(diff(r.stdout)))
+        m = re.fullmatch(r"/api/cp/([0-9a-f]{12,64})", path)
+        if m:  # baixar arquivo ou pasta do container (também parado): prazo de ação, até 100 MB
+            code, name, out = cp_out(m[1], parse_qs(query, keep_blank_values=True).get("path", [""])[0])
+            return self.send_bytes(out, name) if code == 200 else self.send(code, json.dumps(out))
         m = re.fullmatch(r"/api/inspect/([0-9a-f]{12,64})(/env)?", self.path)
         if m:  # resumo do inspect; só o /env (pedido explícito na página) traz os valores do env
             r = docker("inspect", "--format", "{{json .}}", m[1])
