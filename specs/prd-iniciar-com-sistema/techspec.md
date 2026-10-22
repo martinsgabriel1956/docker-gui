@@ -21,8 +21,8 @@ O estado real é lido do sistema a cada `prefs_get` (não fica no `prefs.json`).
   - o `window-state` deixa de restaurar a visibilidade (`StateFlags::all() - VISIBLE`).
 - **Front**: `src/page.html` ganha a caixa `#pref-autostart` na tela de preferências, junto das notificações. O `src/app.ts` (`openPrefs`/`savePrefs`) a lê e envia, e `src/transport.ts` acrescenta o campo aos tipos `DesktopPrefs` e `Prefs`.
 - **Instaladores do Windows**:
-  - NSIS: `src-tauri/windows/hooks.nsh` (`NSIS_HOOK_POSTUNINSTALL`), em `bundle.windows.nsis.installerHooks`.
-  - WiX: `src-tauri/windows/autostart.wxs` (custom action `reg delete … /f` com `Return="ignore"`, condicionada a `REMOVE="ALL"`), em `bundle.windows.wix.fragmentPaths` e `componentRefs` (ver o Histórico).
+  - NSIS: `src-tauri/windows/hooks.nsh` (`NSIS_HOOK_POSTUNINSTALL`, fora do `$UpdateMode`), em `bundle.windows.nsis.installerHooks`.
+  - WiX: `src-tauri/windows/autostart.wxs` (custom action `reg delete … /f` com `Return="ignore"`, condicionada a `REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE`), em `bundle.windows.wix.fragmentPaths`. O fragmento entra no MSI pelo `Component` vazio `AutostartCleanup`, em `componentRefs`: o Tauri não tem `customActionRefs`.
 
 ## Design de implementação
 
@@ -69,11 +69,10 @@ Nenhum. Só comandos Tauri que já existem (`prefs_get` e `prefs_set`).
 
 - **Unitário (Rust, Linux):** `set(true)` grava o arquivo com o `Exec` e o `TryExec` do executável atual em um `XDG_CONFIG_HOME` temporário; `enabled()` reflete o arquivo; `set(false)` apaga; apagar o arquivo por fora faz `enabled()` voltar `false`.
 - **Unitário (front):** o `transport-desktop` envia o campo `autostart` no `prefs_set`.
-- **Smoke do desktop** (`e2e/desktop-smoke.sh`):
-  - ligar pela IPC grava o arquivo;
+- **Smoke do desktop** (`e2e/desktop-smoke.sh`), que dirige o app só pelo X (gravar e apagar o arquivo fica no teste unitário):
   - executar com `--autostart` não mostra janela (`xdotool search --onlyvisible` vazio) e o ícone/processo está de pé;
   - uma segunda execução com `--autostart` não mostra a janela, e uma sem o argumento mostra.
-- **Windows:** item novo no checklist manual da release: ligar, fazer logout e login, desinstalar (MSI e NSIS) e conferir que o valor `Run` sumiu.
+- **Windows:** item novo no checklist manual da release (no [techspec do desktop](../prd-desktop-tauri/techspec.md), "Estratégia de teste"): ligar, fazer logout e login, atualizar por cima (a opção continua), desinstalar (MSI e NSIS) e conferir que o valor `Run` sumiu.
 
 ## Sequenciamento
 
@@ -133,5 +132,9 @@ Nenhum. Só comandos Tauri que já existem (`prefs_get` e `prefs_set`).
 - O WiX do Tauri não tem `customActionRefs`: o fragmento ganha um `Component` vazio, referenciado em `componentRefs`, que traz o fragmento inteiro (com a custom action) para o MSI.
 - Atualizar mantém a escolha (RF3.2): o hook do NSIS só apaga fora do `$UpdateMode`, e a custom action do MSI roda com `REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE`.
 - O smoke não liga a opção pela IPC (ele dirige o app só pelo X): gravar e apagar o arquivo fica no teste unitário; o smoke cobre o `--autostart`.
-- O checklist manual do Windows fica numa seção nova do `packaging/README.md`.
+- O checklist manual do Windows fica numa seção nova do `packaging/README.md` (revisto na implementação: ver a entrada seguinte).
 - Se o `prefs_set` falhar, a caixa volta ao estado de quando a tela abriu: nenhum erro acontece depois de o início automático mudar.
+
+**2026-10-22**. Reconciliação depois da implementação:
+- O checklist manual do Windows foi para o checklist da release que já existia, no [techspec do desktop](../prd-desktop-tauri/techspec.md) (com entrada no Histórico de lá), e não para o `packaging/README.md`: o repositório já tinha esse lugar, e dois checklists se desencontrariam.
+- O corpo deste documento passa a descrever o que os instaladores fazem (o `$UpdateMode`, o `NOT UPGRADINGPRODUCTCODE` e o `Component` do WiX) e o que o smoke cobre, no lugar de remeter só ao Histórico.
