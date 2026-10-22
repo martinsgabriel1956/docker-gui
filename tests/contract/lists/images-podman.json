@@ -1,0 +1,58 @@
+{
+  "desc": "podman image ls: Names, Size em bytes e Created em epoch",
+  "lang": "pt",
+  "cli": [
+    "podman"
+  ],
+  "calls": [
+    {
+      "stdout": "[{\"Id\": \"f00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafebeef\", \"Names\": [\"docker.io/library/nginx:latest\"], \"Size\": 187654321, \"Created\": 1758153600}, {\"Id\": \"2222222222222222222222222222222222222222222222222222222222222222\", \"Names\": null, \"RepoTags\": null, \"Size\": 999, \"Created\": 1758153601}]",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "image",
+        "ls",
+        "--no-trunc",
+        "--format",
+        "json"
+      ]
+    },
+    {
+      "stdout": "",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "ps",
+        "-a",
+        "-q",
+        "--no-trunc"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/images",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": [
+      {
+        "ID": "f00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafebeef",
+        "Tags": [
+          "docker.io/library/nginx:latest"
+        ],
+        "Size": "188MB",
+        "Created": 1758153600,
+        "Containers": []
+      },
+      {
+        "ID": "2222222222222222222222222222222222222222222222222222222222222222",
+        "Tags": [],
+        "Size": "999B",
+        "Created": 1758153601,
+        "Containers": []
+      }
+    ]
+  }
+}

@@ -26,6 +26,7 @@ for id in ids { db.get(id).await; }
 // GOOD: 1 round-trip
 let items = db.get_many(&ids).await;
 ```
+
 **Isomorphism:** Same results, order may change unless preserved.
 
 ### Buffer Reuse
@@ -83,6 +84,7 @@ let (tx, rx) = mpsc::channel(1000);
 let pool = Pool::new(|| expensive_create(), 10);
 let obj = pool.get();  // Reuse, don't create
 ```
+
 **Libraries:** `deadpool`, `bb8`, `r2d2`
 
 ### Arena Allocation
@@ -92,6 +94,7 @@ let arena = bumpalo::Bump::new();
 for _ in 0..1000 { arena.alloc_str("item"); }  // Fast bump
 // All freed when arena drops
 ```
+
 **Libraries:** `bumpalo`, `typed-arena`
 
 ### SmallVec
@@ -135,6 +138,7 @@ let map = Mutex::new(HashMap::new());
 let shards: [Mutex<HashMap<K, V>>; 16];
 fn shard(key: &K) -> usize { hash(key) % 16 }
 ```
+
 **Libraries:** `dashmap`, `flurry`
 
 ### Lock-Free
@@ -143,6 +147,7 @@ fn shard(key: &K) -> usize { hash(key) % 16 }
 use crossbeam::queue::SegQueue;
 let queue = SegQueue::new();  // Lock-free MPMC
 ```
+
 **Libraries:** `crossbeam`, `parking_lot`
 
 ### Work-Stealing
@@ -168,6 +173,7 @@ let answer = (lo..hi).binary_search_by(|mid| {
     if predicate(mid) { Ordering::Less } else { Ordering::Greater }
 });
 ```
+
 **O(n) → O(log n)**
 
 ### Two-Pointer
@@ -185,6 +191,7 @@ fn two_sum_sorted(arr: &[i32], target: i32) -> Option<(usize, usize)> {
     None
 }
 ```
+
 **O(n²) → O(n)**
 
 ### Sliding Window
@@ -232,6 +239,7 @@ impl UnionFind {
     }
 }
 ```
+
 **O(α(n)) per operation**
 
 ### Dijkstra
@@ -286,6 +294,7 @@ fn topological_sort(graph: &Graph) -> Option<Vec<Node>> {
     if result.len() == graph.node_count() { Some(result) } else { None }  // None = cycle
 }
 ```
+
 **Use when:** DAG processing, dependency resolution, build systems
 **O(V + E)**
 
@@ -331,6 +340,7 @@ fn dfs_path(graph: &Graph, start: Node, goal: Node) -> Option<Vec<Node>> {
     if dfs(graph, start, goal, &mut visited, &mut path) { Some(path) } else { None }
 }
 ```
+
 **Pattern:** Return early when condition met; avoid visiting entire graph
 **Use when:** Finding existence, first match, any valid path
 
@@ -340,16 +350,16 @@ fn dfs_path(graph: &Graph, start: Node, goal: Node) -> Option<Vec<Node>> {
 
 ### Selection Matrix
 
-| Access Pattern | Structure | Complexity |
-|----------------|-----------|------------|
-| Key → Value | `HashMap` | O(1) avg |
-| Ordered iteration | `BTreeMap` | O(log n) |
-| Range queries | `BTreeMap` | O(log n + k) |
-| Prefix matching | Trie | O(key length) |
-| Membership (approx) | Bloom filter | O(k) |
-| Min/max extraction | `BinaryHeap` | O(log n) |
-| FIFO | `VecDeque` | O(1) |
-| Set operations | `HashSet` | O(n) |
+| Access Pattern      | Structure    | Complexity    |
+| ------------------- | ------------ | ------------- |
+| Key → Value         | `HashMap`    | O(1) avg      |
+| Ordered iteration   | `BTreeMap`   | O(log n)      |
+| Range queries       | `BTreeMap`   | O(log n + k)  |
+| Prefix matching     | Trie         | O(key length) |
+| Membership (approx) | Bloom filter | O(k)          |
+| Min/max extraction  | `BinaryHeap` | O(log n)      |
+| FIFO                | `VecDeque`   | O(1)          |
+| Set operations      | `HashSet`    | O(n)          |
 
 ### Trie
 
@@ -359,6 +369,7 @@ let mut trie = Trie::new();
 trie.insert("hello", 1);
 for (k, v) in trie.iter_prefix("hel") { /* ... */ }
 ```
+
 **Libraries:** `radix_trie`, `fst`
 
 ### Bloom Filter
@@ -368,6 +379,7 @@ let mut filter = BloomFilter::new(1000, 0.01);  // 1% false positive
 filter.insert(&"item");
 if filter.contains(&"item") { /* maybe present */ }
 ```
+
 **Libraries:** `bloom`, `probabilistic-collections`
 
 ---
@@ -381,6 +393,7 @@ use lru::LruCache;
 let mut cache = LruCache::new(NonZeroUsize::new(100).unwrap());
 cache.put("key", expensive_compute());
 ```
+
 **Libraries:** `lru`, `cached`
 
 ### Memoization
@@ -399,13 +412,13 @@ fn expensive(x: u64) -> u64 { heavy_computation(x) }
 
 ### Format Comparison
 
-| Format | Parse | Size | Schema |
-|--------|-------|------|--------|
-| bincode | Fastest | Small | No |
-| MessagePack | Fast | Small | No |
-| protobuf | Fast | Small | Yes |
-| simd-json | Medium | Large | No |
-| serde_json | Slow | Large | No |
+| Format      | Parse   | Size  | Schema |
+| ----------- | ------- | ----- | ------ |
+| bincode     | Fastest | Small | No     |
+| MessagePack | Fast    | Small | No     |
+| protobuf    | Fast    | Small | Yes    |
+| simd-json   | Medium  | Large | No     |
+| serde_json  | Slow    | Large | No     |
 
 **Rule:** `bincode`/`rkyv` internal, JSON external only.
 
@@ -419,6 +432,7 @@ struct Data { values: Vec<u64> }
 let archived = rkyv::check_archived_root::<Data>(&bytes).unwrap();
 println!("{}", archived.values[0]);  // Direct memory access
 ```
+
 **Libraries:** `rkyv`, `zerocopy`
 
 ---
@@ -456,6 +470,7 @@ use memchr::memmem;
 let finder = memmem::Finder::new(b"pattern");
 if let Some(pos) = finder.find(haystack) { /* ... */ }
 ```
+
 **Libraries:** `memchr`, `aho-corasick`
 
 ---
@@ -463,11 +478,13 @@ if let Some(pos) = finder.find(haystack) { /* ... */ }
 ## Applicability Checks
 
 ### DP
+
 - [ ] Overlapping subproblems? → Memoize
 - [ ] Optimal partitioning? → Interval DP
 - [ ] DAG with repeated traversal? → Topological DP
 
 ### Data Structure Selection
+
 - [ ] Point lookups? → HashMap
 - [ ] Range queries? → BTreeMap / Segment tree
 - [ ] Prefix ops? → Trie
@@ -477,12 +494,12 @@ if let Some(pos) = finder.find(haystack) { /* ... */ }
 
 ## Library Quick Reference
 
-| Category | Libraries |
-|----------|-----------|
-| Hashing | `ahash`, `rustc-hash` |
-| Concurrency | `rayon`, `crossbeam` |
-| Serialization | `bincode`, `rkyv` |
-| Strings | `memchr`, `aho-corasick` |
-| Collections | `smallvec`, `indexmap` |
-| Caching | `lru`, `cached` |
-| Allocation | `bumpalo`, `typed-arena` |
+| Category      | Libraries                |
+| ------------- | ------------------------ |
+| Hashing       | `ahash`, `rustc-hash`    |
+| Concurrency   | `rayon`, `crossbeam`     |
+| Serialization | `bincode`, `rkyv`        |
+| Strings       | `memchr`, `aho-corasick` |
+| Collections   | `smallvec`, `indexmap`   |
+| Caching       | `lru`, `cached`          |
+| Allocation    | `bumpalo`, `typed-arena` |

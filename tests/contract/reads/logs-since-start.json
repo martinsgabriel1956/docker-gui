@@ -1,0 +1,43 @@
+{
+  "desc": "since=start: o StartedAt do inspect vira --since",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "\"2026-10-01T09:59:58.123456789Z\"\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "inspect",
+        "--format",
+        "{{json .State.StartedAt}}",
+        "0123456789ab"
+      ]
+    },
+    {
+      "stdout": "2026-10-01T10:00:00.000000000Z oi\n2026-10-01T10:00:01.000000000Z tchau\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "logs",
+        "--timestamps",
+        "--tail",
+        "2000",
+        "--since",
+        "2026-10-01T09:59:58.123456789Z",
+        "0123456789ab"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/logs/0123456789ab?since=start&tail=2000",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": "2026-10-01T10:00:00.000000000Z oi\n2026-10-01T10:00:01.000000000Z tchau\n"
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "desc": "logs do projeto em ordem cronológica (fração completada; sem timestamp vai para o topo)",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "[\"loja\", \"/srv/loja\", \"/srv/loja/compose.yml,/srv/loja/compose.override.yml\", \"api\"]\n[\"loja\", \"/srv/loja\", \"/srv/loja/compose.yml,/srv/loja/compose.override.yml\", \"db\"]\n[\"outro\", \"/srv/outro\", \"/srv/outro/docker-compose.yml\", \"web\"]\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "ps",
+        "-a",
+        "--filter",
+        "label=com.docker.compose.project",
+        "--format",
+        "[{{json (.Label \"com.docker.compose.project\")}},{{json (.Label \"com.docker.compose.project.working_dir\")}},{{json (.Label \"com.docker.compose.project.config_files\")}},{{json (.Label \"com.docker.compose.service\")}}]"
+      ]
+    },
+    {
+      "stdout": "db-1   | 2026-10-01T10:00:02.5Z b\napi-1  | 2026-10-01T10:00:01.123Z a\nsem timestamp\napi-1  | 2026-10-01T10:00:02.25Z c\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "compose",
+        "-p",
+        "loja",
+        "--project-directory",
+        "/srv/loja",
+        "-f",
+        "/srv/loja/compose.yml",
+        "-f",
+        "/srv/loja/compose.override.yml",
+        "logs",
+        "--no-color",
+        "--timestamps",
+        "--tail",
+        "500"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/compose/logs?project=loja&dir=%2Fsrv%2Floja",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": "sem timestamp\napi-1  | 2026-10-01T10:00:01.123Z a\napi-1  | 2026-10-01T10:00:02.25Z c\ndb-1   | 2026-10-01T10:00:02.5Z b\n"
+  }
+}

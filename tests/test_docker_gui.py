@@ -1,5 +1,6 @@
 """Testes do backend. Só stdlib: o docker CLI é trocado por mock, exceto em RealDockerTest."""
 import errno
+import gzip
 import http.client
 import io
 import json
@@ -10,6 +11,7 @@ import socket
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -83,6 +85,18 @@ class HostTest(ServerTest):
         _, body = self.request("GET", "/", token=None)
         self.assertNotIn("/*CSS*/", body)
         self.assertIn("tailwindcss", body)
+
+    def test_page_is_gzipped_when_accepted(self):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
+        conn.request("GET", "/", headers={"Host": f"localhost:{self.port}", "Accept-Encoding": "gzip, deflate"})
+        r = conn.getresponse()
+        data = r.read()
+        conn.close()
+        self.assertEqual(r.getheader("Content-Encoding"), "gzip")
+        self.assertEqual(gzip.decompress(data).decode(), docker_gui.PAGE)
+        # sem o Accept-Encoding (curl, http.client), o texto puro
+        _, body = self.request("GET", "/", token=None)
+        self.assertEqual(body, docker_gui.PAGE)
 
     def test_foreign_host_is_forbidden(self):
         for host in (f"evil.com:{self.port}", "evil.com", f"localhost:{self.port + 1}", "localhost", ""):
@@ -364,6 +378,16 @@ class LogsAndHealthTest(ServerTest):
         self.docker.assert_called_once_with("top", HEX_ID)
         self.docker.return_value = fail("Error response from daemon: container 0123 is not running\n")
         self.assertEqual(self.request("GET", f"/api/top/{HEX_ID}"), (500, "Error response from daemon: container 0123 is not running"))
+
+
+class DiffTest(unittest.TestCase):
+    """docker diff -> [{k, p}]: o caminho inteiro (com espaço), sem as linhas fora do formato."""
+
+    def test_lines(self):
+        out = "C /etc\nA /app/meu arquivo.txt\n\nX /y\nC\nD /tmp/x"
+        self.assertEqual(docker_gui.diff(out), [{"k": "C", "p": "/etc"}, {"k": "A", "p": "/app/meu arquivo.txt"},
+                                                {"k": "D", "p": "/tmp/x"}])
+        self.assertEqual(docker_gui.diff(""), [])
 
 
 class HistoryTest(unittest.TestCase):
@@ -671,6 +695,98 @@ EOF""")
             self.fail("a vaga do stream não foi devolvida")
 
 
+class CpTest(StreamTest):
+    """Baixar arquivo: o docker cp escreve um tar no stdout; arquivo vira o conteúdo, pasta vira o tar."""
+
+    def tar(self, *members):  # (nome, conteúdo | None para pasta)
+        path = os.path.join(self.dir, "out.tar")
+        with tarfile.open(path, "w") as t:
+            for name, data in members:
+                info = tarfile.TarInfo(name)
+                if data is None:
+                    info.type = tarfile.DIRTYPE
+                    t.addfile(info)
+                else:
+                    info.size = len(data)
+                    t.addfile(info, io.BytesIO(data))
+        return path
+
+    def args(self):
+        with open(os.path.join(self.dir, "args")) as f:
+            return f.read().split()
+
+    def test_file_comes_with_its_name_and_bytes(self):
+        path = self.tar(("error.log", b"\x00bin\xff"))
+        self.fake_docker(f"cat {path}")
+        self.assertEqual(docker_gui.cp_out(HEX_ID, "/var/log/nginx/error.log"), (200, "error.log", b"\x00bin\xff"))
+        self.assertEqual(self.args(), ["cp", "-L", f"{HEX_ID}:/var/log/nginx/error.log", "-"])
+
+    def test_folder_comes_as_tar(self):
+        path = self.tar(("reports", None), ("reports/a.txt", b"a"))
+        self.fake_docker(f"cat {path}")
+        with open(path, "rb") as f:
+            self.assertEqual(docker_gui.cp_out(HEX_ID, "/app/reports/"), (200, "reports.tar", f.read()))
+
+    def test_podman_has_no_dash_l(self):
+        self.fake_docker(f"cat {self.tar(('x', b'1'))}", name="podman")
+        with mock.patch.object(docker_gui, "CLI", ["podman"]):
+            self.assertEqual(docker_gui.cp_out(HEX_ID, "/x"), (200, "x", b"1"))
+        self.assertEqual(self.args(), ["cp", f"{HEX_ID}:/x", "-"])
+
+    def test_invalid_path_never_runs(self):
+        self.fake_docker("exit 0")
+        for path in ["", "etc/passwd", "/a\x00b", "/" + "a" * 4096]:
+            with self.subTest(path[:10]):
+                self.assertEqual(docker_gui.cp_out(HEX_ID, path), (400, "", "caminho inválido: use um caminho absoluto (começa com /), de até 4096 caracteres"))
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "args")))
+        self.assertEqual(docker_gui.cp_out(HEX_ID, "/" + "a" * 4095)[0], 500)  # 4096 passa (o tar vazio do exit 0 não)
+
+    def test_docker_errors(self):
+        for stderr, code, msg in [
+            ("Error response from daemon: Could not find the file /x in container web", 404, "/x não existe no container"),
+            ('Error: "/x" could not be found on container web: no such file or directory', 404, "/x não existe no container"),
+            ("Error response from daemon: No such container: 0123456789ab", 404, "o container não existe mais"),
+            ('Error: no container with name or ID "0123456789ab" found: no such container', 404, "o container não existe mais"),
+            ("Error response from daemon: permission denied", 500, "Error response from daemon: permission denied"),
+        ]:
+            with self.subTest(stderr):
+                self.fake_docker(f"echo '{stderr}' >&2; exit 1")
+                self.assertEqual(docker_gui.cp_out(HEX_ID, "/x"), (code, "", msg))
+
+    def test_over_the_limit_is_413_and_kills_docker(self):
+        self.fake_docker(f"echo $$ > {self.dir}/pid; exec head -c 100000 /dev/zero")  # exec: o pid é o do head
+        with mock.patch.object(docker_gui, "MAX_CP", 1000):
+            self.assertEqual(docker_gui.cp_out(HEX_ID, "/big"), (413, "", "/big passa de 100 MB, o limite daqui"))
+        self.wait_dead("o docker cp")
+
+    def test_deadline(self):
+        self.fake_docker(f"echo $$ > {self.dir}/pid; exec sleep 30")
+        with mock.patch.object(docker_gui, "ACTION_TIMEOUT", 0.3):
+            self.assertEqual(docker_gui.cp_out(HEX_ID, "/x"),
+                             (500, "", "docker cp não respondeu em 0.3s. O daemon está travado?"))
+        self.wait_dead("o docker cp")
+
+    def test_route_sends_attachment(self):
+        self.fake_docker(f"cat {self.tar(('relatório.txt', b'ok'))}")
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
+        conn.request("GET", f"/api/cp/{HEX_ID}?path=/app/relat%C3%B3rio.txt",
+                     headers={"Host": f"localhost:{self.port}", "X-Docker-GUI-Token": docker_gui.TOKEN})
+        r = conn.getresponse()
+        self.assertEqual((r.status, r.read()), (200, b"ok"))
+        self.assertEqual(r.getheader("Content-Type"), "application/octet-stream")
+        self.assertEqual(r.getheader("Content-Disposition"), "attachment; filename*=UTF-8''relat%C3%B3rio.txt")
+        self.assertEqual(r.getheader("X-Content-Type-Options"), "nosniff")
+        conn.close()
+        self.assertEqual(self.request("GET", f"/api/cp/{HEX_ID}?path=relativo"),
+                         (400, "caminho inválido: use um caminho absoluto (começa com /), de até 4096 caracteres"))
+        # só o header: com o token na query (um link direto), recusa
+        self.assertEqual(self.request("GET", f"/api/cp/{HEX_ID}?path=/x&t={docker_gui.TOKEN}", token=None)[0], 401)
+
+    def test_name_is_sanitized(self):
+        self.assertEqual(docker_gui.cp_name("/", True), "root.tar")
+        self.assertEqual(docker_gui.cp_name("/a\\b\x01c", False), "a_b_c")
+
+
 class InspectTest(ServerTest):
     """Resumo do inspect. O env sai mascarado; o valor real só vem pelo /env."""
 
@@ -740,8 +856,9 @@ class ActionsTest(ServerTest):
         self.docker.assert_not_called()
 
 
-class ComposeTest(ServerTest):
-    """O cliente só escolhe o projeto (e o serviço); diretório, arquivos e serviços saem dos labels dos containers."""
+class ComposeTest(StreamTest):
+    """O cliente só escolhe o projeto (e o serviço); diretório, arquivos e serviços saem dos labels dos containers.
+    O ps e o config passam pelo mock; o compose em si é um script de verdade, porque a saída dele vem em stream."""
 
     # uma linha por container: projeto, pasta, arquivos e serviço
     PS = "\n".join(json.dumps(r) for r in (
@@ -756,33 +873,73 @@ class ComposeTest(ServerTest):
     def ps_call():
         return mock.call("ps", "-a", "--filter", "label=com.docker.compose.project", "--format", docker_gui.COMPOSE_FORMAT)
 
+    def compose(self, action, body, script="echo 'Container shop-api-1  Started' >&2"):
+        """POST da ação com o compose trocado por script: (status, linhas do stream já decodificadas, argv do compose)."""
+        self.fake_docker(script)
+        status, text = self.request("POST", f"/api/compose/{action}", body=body)
+        with open(os.path.join(self.dir, "args")) as f:
+            return status, [json.loads(line) for line in text.splitlines()], f.read().split()
+
     def test_each_action_builds_argv_from_labels(self):
         self.assertEqual(docker_gui.COMPOSE, {"up": ["up", "-d"], "rebuild": ["up", "-d", "--build"],
                                               "down": ["down"], "pull": ["pull"]})
         for action, args in docker_gui.COMPOSE.items():
             self.docker.reset_mock()
-            self.docker.side_effect = [ok(self.PS), ok(stderr="Container shop-api-1  Started\n")]
-            self.assertEqual(self.request("POST", f"/api/compose/{action}", body=self.SHOP),
-                             (200, "Container shop-api-1  Started"), action)
-            self.assertEqual(self.docker.call_args_list, [self.ps_call(), mock.call(
-                *self.BASE, *args, timeout=docker_gui.COMPOSE_TIMEOUT)])
+            self.docker.side_effect = [ok(self.PS)]
+            self.assertEqual(self.compose(action, self.SHOP),
+                             (200, ["Container shop-api-1  Started", {"code": 0}], [*self.BASE, *args]), action)
+            self.assertEqual(self.docker.call_args_list, [self.ps_call()])
 
     def test_restart_one_service(self):
         self.assertEqual(docker_gui.COMPOSE_SERVICE, {"restart": ["restart"], "build": ["up", "-d", "--build", "--no-deps"],
                                                       "svcup": ["up", "-d"]})
-        self.docker.side_effect = [ok(self.PS), ok(stderr="Container shop-db-1  Started\n")]
-        self.assertEqual(self.request("POST", "/api/compose/restart", body={**self.SHOP, "service": "db"}),
-                         (200, "Container shop-db-1  Started"))
-        self.assertEqual(self.docker.call_args_list, [self.ps_call(), mock.call(
-            *self.BASE, "restart", "--", "db", timeout=docker_gui.COMPOSE_TIMEOUT)])
+        self.docker.side_effect = [ok(self.PS)]
+        self.assertEqual(self.compose("restart", {**self.SHOP, "service": "db"}),
+                         (200, ["Container shop-api-1  Started", {"code": 0}], [*self.BASE, "restart", "--", "db"]))
 
     def test_build_one_service(self):
         # reconstrói e recria só o api: --no-deps deixa o db como está
-        self.docker.side_effect = [ok(self.PS), ok(stderr="Container shop-api-1  Started\n")]
-        self.assertEqual(self.request("POST", "/api/compose/build", body={**self.SHOP, "service": "api"}),
-                         (200, "Container shop-api-1  Started"))
-        self.assertEqual(self.docker.call_args_list, [self.ps_call(), mock.call(
-            *self.BASE, "up", "-d", "--build", "--no-deps", "--", "api", timeout=docker_gui.COMPOSE_TIMEOUT)])
+        self.docker.side_effect = [ok(self.PS)]
+        self.assertEqual(self.compose("build", {**self.SHOP, "service": "api"}),
+                         (200, ["Container shop-api-1  Started", {"code": 0}],
+                          [*self.BASE, "up", "-d", "--build", "--no-deps", "--", "api"]))
+
+    def test_output_streams_stdout_and_stderr_line_by_line(self):
+        # o build sai no stdout e o progresso no stderr, na ordem em que saem; o \r do fim e o UTF-8 sobrevivem
+        self.docker.side_effect = [ok(self.PS)]
+        status, lines, _ = self.compose("rebuild", self.SHOP, "printf '#1 [api] RUN npm ci\\r\\n'; printf 'ação\\n' >&2; "
+                                                              "printf 'sem quebra no fim'")
+        self.assertEqual((status, lines), (200, ["#1 [api] RUN npm ci", "ação", "sem quebra no fim", {"code": 0}]))
+
+    def test_compose_error_keeps_output_and_exit_code(self):
+        # o status já saiu (200) quando o compose começa: quem diz se falhou é o code do fim
+        self.docker.side_effect = [ok(self.PS)]
+        self.assertEqual(self.compose("pull", self.SHOP, "echo 'pull access denied' >&2; exit 18")[:2],
+                         (200, ["pull access denied", {"code": 18}]))
+
+    def test_compose_past_deadline_is_killed(self):
+        self.docker.side_effect = [ok(self.PS)]
+        with mock.patch.object(docker_gui, "COMPOSE_TIMEOUT", 0.3):
+            start = time.monotonic()
+            status, lines, _ = self.compose("up", self.SHOP, "echo baixando; exec sleep 30")
+        self.assertLess(time.monotonic() - start, 10)
+        self.assertEqual((status, lines[0], lines[-1]), (200, "baixando", {"code": 124}))
+        self.assertIn("não respondeu em 0.3s", lines[-2])
+
+    def test_compose_runs_to_the_end_when_the_page_closes(self):
+        # um down interrompido deixaria o projeto pela metade: fechar a aba não mata o compose
+        self.docker.side_effect = [ok(self.PS)]
+        self.fake_docker(f"echo começou; sleep 0.5; echo fim > {self.dir}/done")
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
+        conn.request("POST", "/api/compose/down", body=json.dumps(self.SHOP),
+                     headers={"Host": f"localhost:{self.port}", "X-Docker-GUI-Token": docker_gui.TOKEN})
+        conn.getresponse().readline()  # o compose já começou
+        conn.close()
+        for _ in range(50):
+            if os.path.exists(os.path.join(self.dir, "done")):
+                return
+            time.sleep(0.1)
+        self.fail("o compose morreu quando a página fechou")
 
     def test_services_come_from_the_compose_file(self):
         self.docker.side_effect = [ok(self.PS), ok("api\ndb\nworker\n")]
@@ -799,11 +956,10 @@ class ComposeTest(ServerTest):
 
     def test_up_one_service_without_container(self):
         # o worker não tem container (não está nos labels), mas está no arquivo do compose
-        self.docker.side_effect = [ok(self.PS), ok("api\ndb\nworker\n"), ok(stderr="Container shop-worker-1  Started\n")]
-        self.assertEqual(self.request("POST", "/api/compose/svcup", body={**self.SHOP, "service": "worker"}),
-                         (200, "Container shop-worker-1  Started"))
-        self.assertEqual(self.docker.call_args_list, [self.ps_call(), mock.call(*self.BASE, "config", "--services"), mock.call(
-            *self.BASE, "up", "-d", "--", "worker", timeout=docker_gui.COMPOSE_TIMEOUT)])
+        self.docker.side_effect = [ok(self.PS), ok("api\ndb\nworker\n")]
+        self.assertEqual(self.compose("svcup", {**self.SHOP, "service": "worker"}),
+                         (200, ["Container shop-api-1  Started", {"code": 0}], [*self.BASE, "up", "-d", "--", "worker"]))
+        self.assertEqual(self.docker.call_args_list, [self.ps_call(), mock.call(*self.BASE, "config", "--services")])
 
     def test_up_one_service_must_be_in_the_compose_file(self):
         for config in (ok("api\ndb\n"), fail("yaml: line 3: bad indentation\n")):
@@ -903,10 +1059,6 @@ class ComposeTest(ServerTest):
         self.docker.assert_not_called()
         self.docker.side_effect = [ok(self.PS), fail("no such service\n")]
         self.assertEqual(self.request("GET", self.logs_path(**self.SHOP)), (500, "no such service"))
-
-    def test_compose_error_is_500_with_stderr(self):
-        self.docker.side_effect = [ok(self.PS), fail("pull access denied\n")]
-        self.assertEqual(self.request("POST", "/api/compose/pull", body=self.SHOP), (500, "pull access denied"))
 
     def test_ps_error_is_500(self):
         self.docker.return_value = fail("Cannot connect to the Docker daemon\n")

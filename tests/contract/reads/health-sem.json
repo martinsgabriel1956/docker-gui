@@ -1,0 +1,29 @@
+{
+  "desc": "container sem healthcheck: null",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "null\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "inspect",
+        "--format",
+        "{{json .State.Health}}",
+        "0123456789ab"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/health/0123456789ab",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": null
+  }
+}

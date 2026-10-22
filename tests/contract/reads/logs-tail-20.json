@@ -1,0 +1,30 @@
+{
+  "desc": "tail=20: a linha de quem caiu",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "2026-10-01T10:00:00.000000000Z oi\n2026-10-01T10:00:01.000000000Z tchau\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "logs",
+        "--timestamps",
+        "--tail",
+        "20",
+        "0123456789ab"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/logs/0123456789ab?tail=20",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": "2026-10-01T10:00:00.000000000Z oi\n2026-10-01T10:00:01.000000000Z tchau\n"
+  }
+}

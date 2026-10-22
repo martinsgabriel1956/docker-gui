@@ -1,5 +1,5 @@
 import type { Locator } from '@playwright/test';
-import { test, expect, ctr } from './fixtures';
+import { test, expect, ctr, BACKEND } from './fixtures';
 
 // o docker falso troca o `docker exec -it` por um sh local (fake-docker/docker)
 test('Abrir terminal roda comandos, Esc não fecha e exit encerra a sessão', async ({ page, gui }) => {
@@ -25,15 +25,30 @@ test('Abrir terminal roda comandos, Esc não fecha e exit encerra a sessão', as
 
   await page.keyboard.type('exit\n');
   await expect(page.locator('#shell-status')).toHaveText('Sessão encerrada.');
-
-  await dlg.getByRole('button', { name: 'Fechar terminal' }).click();
+  // a sessão acabou: o foco sai do terminal, e o Esc fecha
+  await expect(dlg.getByRole('button', { name: 'Fechar terminal' })).toBeFocused();
+  await page.keyboard.press('Escape');
   await expect(dlg).toBeHidden();
+});
+
+test('Ctrl+] tira o foco do terminal, e aí o Esc fecha', async ({ page, gui }) => {
+  await gui.open({ containers: [ctr('web')] });
+  await page.locator('summary[aria-label="Mais ações para web"]').click();
+  await page.getByRole('button', { name: 'Abrir terminal' }).click();
+  const dlg = page.locator('#shell');
+  await expect(dlg.locator('.xterm-rows')).toContainText('$');
+  await page.keyboard.press('Control+BracketRight');
+  await expect(dlg.getByRole('button', { name: 'Fechar terminal' })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(dlg).toBeHidden();
+  await expect(page.locator('summary[aria-label="Mais ações para web"]')).toBeFocused();
 });
 
 // terminal do Windows (sem PTY no host), forçado em Linux: o docker falso roda o comando do container aqui, com o script
 const sizeOnScreen = async (screen: Locator) => [...(await screen.innerText()).matchAll(/tam=(\d+ \d+)/g)].at(-1)?.[1];
 
 test('Sem PTY no host (Windows), o TTY nasce no container e acompanha o tamanho da janela', async ({ page, gui }) => {
+  test.skip(BACKEND === 'rust', 'modo pipe só existe no Python (o desktop usa ConPTY no Windows)');
   await gui.open({ containers: [ctr('web')] }, { env: { DOCKER_GUI_TERMINAL: 'pipe' } });
   await page.locator('summary[aria-label="Mais ações para web"]').click();
   await page.getByRole('button', { name: 'Abrir terminal' }).click();
@@ -57,6 +72,7 @@ test('Sem PTY no host (Windows), o TTY nasce no container e acompanha o tamanho 
 });
 
 test('Imagem sem script no Windows: o status avisa que não há TTY e o eco vem do servidor', async ({ page, gui }) => {
+  test.skip(BACKEND === 'rust', 'modo pipe só existe no Python (o desktop usa ConPTY no Windows)');
   await gui.open({ containers: [ctr('web', { noscript: true })] }, { env: { DOCKER_GUI_TERMINAL: 'pipe' } });
   await page.locator('summary[aria-label="Mais ações para web"]').click();
   await page.getByRole('button', { name: 'Abrir terminal' }).click();

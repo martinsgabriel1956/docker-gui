@@ -1,0 +1,23 @@
+{
+  "desc": "run recusado (porta-repetida): 400 sem chamar o docker",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [],
+  "request": {
+    "method": "POST",
+    "path": "/api/run",
+    "body": {
+      "image": "nginx",
+      "ports": [
+        "80:80",
+        "80:81/tcp"
+      ]
+    }
+  },
+  "response": {
+    "status": 400,
+    "body": "porta do host repetida: 80/tcp"
+  }
+}

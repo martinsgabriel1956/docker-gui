@@ -1,0 +1,39 @@
+{
+  "desc": "podman 3: portas em camelCase, porta sem host, configured vira created",
+  "lang": "pt",
+  "cli": [
+    "/usr/bin/podman"
+  ],
+  "calls": [
+    {
+      "stdout": "[{\"Id\": \"2222222222223333333333334444444444445555555555556666666666667777\", \"Names\": [\"api\"], \"Image\": \"api\", \"State\": \"configured\", \"Status\": \"Created\", \"Labels\": {}, \"Ports\": [{\"hostIP\": \"127.0.0.1\", \"containerPort\": 3000, \"hostPort\": 3001, \"protocol\": \"tcp\"}, {\"containerPort\": 9229, \"protocol\": \"tcp\"}]}]",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "ps",
+        "-a",
+        "--format",
+        "json"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/containers",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": [
+      {
+        "ID": "2222222222223333333333334444444444445555555555556666666666667777",
+        "Names": "api",
+        "Image": "api",
+        "State": "created",
+        "Status": "Created",
+        "Ports": "127.0.0.1:3001->3000/tcp, 9229/tcp",
+        "Labels": ""
+      }
+    ]
+  }
+}

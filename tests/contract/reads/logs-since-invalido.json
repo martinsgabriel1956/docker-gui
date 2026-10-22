@@ -1,0 +1,17 @@
+{
+  "desc": "since fora da lista: 400",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [],
+  "request": {
+    "method": "GET",
+    "path": "/api/logs/0123456789ab?since=2d",
+    "body": null
+  },
+  "response": {
+    "status": 400,
+    "body": "since inválido"
+  }
+}

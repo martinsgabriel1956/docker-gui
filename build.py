@@ -3,7 +3,10 @@
 
     python3 build.py            HTML + JS (o esbuild compila src/app.ts; precisa de `npm ci` antes)
     python3 build.py --css      também regenera o CSS com o Tailwind
-    python3 build.py --check    não escreve; sai com 1 se o docker_gui.py estiver desatualizado
+    python3 build.py --check    não escreve; sai com 1 se o docker_gui.py (ou a página do desktop) estiver desatualizado
+
+A mesma página vai para o app desktop em src-tauri/dist/index.html, com o transporte do Tauri (a condição "desktop" do
+esbuild troca o '#transport' do package.json): o --check confere os dois.
 """
 import argparse
 import pathlib
@@ -15,6 +18,7 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parent
 SRC = ROOT / "src"
 TARGET = ROOT / "docker_gui.py"
+DESKTOP = ROOT / "src-tauri" / "dist" / "index.html"
 ENTRY = SRC / "app.ts"  # o esbuild segue os imports a partir daqui e gera um único <script>
 ESBUILD = ROOT / "node_modules" / ".bin" / "esbuild"  # versão fixa no package-lock.json: saída reproduzível
 TAILWIND = "4.3.3"  # versão fixa: outra versão gera CSS diferente e o --check acusaria sem mudança real
@@ -29,12 +33,13 @@ def raw(name, text):
     return f'{name} = r"""{text}"""\n'
 
 
-def bundle():
+def bundle(desktop=False):
     """TypeScript -> um JS só, em IIFE: os tipos somem e os imports viram um arquivo. Não checa tipos (é o tsc)."""
     if not ESBUILD.exists():
         sys.exit("esbuild não encontrado: rode npm ci")
     r = subprocess.run([str(ESBUILD), str(ENTRY), "--bundle", "--format=iife", "--target=es2022", "--charset=utf8",
                         "--loader:.css=text",  # o CSS do xterm vira string, injetada num <style> pelo app.ts
+                        *(["--conditions=desktop"] if desktop else []),  # '#transport' -> transport-desktop.ts
                         "--log-level=warning"], cwd=ROOT, capture_output=True, text=True, check=False)
     if r.returncode:
         sys.exit(r.stderr)
@@ -43,11 +48,11 @@ def bundle():
     return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", lambda m: f"\\x{ord(m[0]):02x}", r.stdout)
 
 
-def page():
+def page(desktop=False):
     html = (SRC / "page.html").read_text()
     if html.count("/*JS*/\n") != 1:
         sys.exit("src/page.html precisa ter exatamente um /*JS*/ numa linha própria")
-    return html.replace("/*JS*/\n", bundle())
+    return html.replace("/*JS*/\n", bundle(desktop))
 
 
 def css():
@@ -68,13 +73,16 @@ def current_css(text):
 
 
 def build(regen_css=False):
-    """Devolve (texto atual, texto novo) do docker_gui.py."""
+    """Devolve [(arquivo, texto atual, texto novo)]: o docker_gui.py e a página do desktop."""
     text = TARGET.read_text()
     if text.count(BEGIN) != 1 or text.count(END) != 1:
         sys.exit(f"{TARGET.name}: marcadores do bloco gerado não encontrados")
-    block = raw("CSS", css() if regen_css else current_css(text)) + raw("PAGE", page())
+    style = css() if regen_css else current_css(text)
+    block = raw("CSS", style) + raw("PAGE", page())
     a, b = text.index(BEGIN) + len(BEGIN), text.index(END)
-    return text, text[:a] + block + text[b:]
+    desktop = page(desktop=True).replace("/*CSS*/", style)
+    return [(TARGET, text, text[:a] + block + text[b:]),
+            (DESKTOP, DESKTOP.read_text() if DESKTOP.exists() else "", desktop)]
 
 
 def main():
@@ -82,16 +90,18 @@ def main():
     ap.add_argument("--css", action="store_true", help="regenera o CSS com o Tailwind (precisa de Node/npm)")
     ap.add_argument("--check", action="store_true", help="só confere se o docker_gui.py está em dia")
     args = ap.parse_args()
-    old, new = build(args.css)
-    if args.check:
-        if old != new:
-            sys.exit(f"{TARGET.name} desatualizado em relação a src/. Rode: python3 build.py{' --css' if args.css else ''}")
-        print(f"{TARGET.name} em dia com src/")
-    elif old == new:
-        print(f"{TARGET.name} já estava em dia")
-    else:
-        TARGET.write_text(new)
-        print(f"{TARGET.name} atualizado")
+    for path, old, new in build(args.css):
+        name = path.relative_to(ROOT)
+        if args.check:
+            if old != new:
+                sys.exit(f"{name} desatualizado em relação a src/. Rode: python3 build.py{' --css' if args.css else ''}")
+            print(f"{name} em dia com src/")
+        elif old == new:
+            print(f"{name} já estava em dia")
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(new)
+            print(f"{name} atualizado")
 
 
 if __name__ == "__main__":

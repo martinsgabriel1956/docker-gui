@@ -1,0 +1,17 @@
+{
+  "desc": "pull sem corpo: 400 sem chamar o docker",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [],
+  "request": {
+    "method": "POST",
+    "path": "/api/pull",
+    "body": null
+  },
+  "response": {
+    "status": 400,
+    "body": "imagem inválida: use repo[:tag] ou repo@sha256:…"
+  }
+}

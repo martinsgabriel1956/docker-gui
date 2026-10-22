@@ -1,0 +1,28 @@
+{
+  "desc": "imagem em uso: 500 com a recusa do docker",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "",
+      "stderr": "Error response from daemon: conflict: unable to delete (image is being used by running container)\n",
+      "code": 1,
+      "args": [
+        "image",
+        "rm",
+        "f00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafebeef"
+      ]
+    }
+  ],
+  "request": {
+    "method": "POST",
+    "path": "/api/rm/image/f00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafebeef",
+    "body": null
+  },
+  "response": {
+    "status": 500,
+    "body": "Error response from daemon: conflict: unable to delete (image is being used by running container)"
+  }
+}

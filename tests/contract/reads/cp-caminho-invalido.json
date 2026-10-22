@@ -1,0 +1,17 @@
+{
+  "desc": "baixar arquivo com caminho relativo: 400 sem chamar o docker",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [],
+  "request": {
+    "method": "GET",
+    "path": "/api/cp/0123456789ab?path=etc/passwd",
+    "body": null
+  },
+  "response": {
+    "status": 400,
+    "body": "caminho inválido: use um caminho absoluto (começa com /), de até 4096 caracteres"
+  }
+}

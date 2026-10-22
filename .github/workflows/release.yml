@@ -1,0 +1,86 @@
+name: Release
+
+# Numa tag v* (v0.1.0...): roda o CI inteiro, confere que a versão do app é a da tag, gera os instaladores de Linux e
+# Windows e publica a release com os checksums. Pelo workflow_dispatch, a release sai como rascunho (para testar).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      # uma versão só: tauri.conf.json e o Cargo.toml do app têm que bater com a tag
+      - id: v
+        run: |
+          conf=$(python3 -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
+          cargo=$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -1)
+          [ "$conf" = "$cargo" ] || { echo "tauri.conf.json ($conf) e Cargo.toml ($cargo) divergem" >&2; exit 1; }
+          if [ "${GITHUB_REF_TYPE}" = tag ] && [ "${GITHUB_REF_NAME}" != "v$conf" ]; then
+            echo "a tag ${GITHUB_REF_NAME} não é v$conf" >&2; exit 1
+          fi
+          echo "version=$conf" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: [ci, version]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf rpm
+      - run: npm ci
+      - run: npx tauri build --bundles ${{ runner.os == 'Linux' && 'deb,rpm' || 'msi,nsis' }}
+      - run: scripts/size.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundles-${{ matrix.os }}
+          path: |
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/rpm/*.rpm
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+
+  publish:
+    needs: [build, version]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Stivo ${{ needs.version.outputs.version }}
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', needs.version.outputs.version) }}
+          draft: ${{ github.event_name == 'workflow_dispatch' }}
+          generate_release_notes: true
+          files: dist/*

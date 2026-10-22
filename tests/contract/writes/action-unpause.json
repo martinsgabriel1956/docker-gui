@@ -1,0 +1,27 @@
+{
+  "desc": "unpause: docker unpause <id>",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "0123456789ab\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "unpause",
+        "0123456789ab"
+      ]
+    }
+  ],
+  "request": {
+    "method": "POST",
+    "path": "/api/unpause/0123456789ab",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": ""
+  }
+}

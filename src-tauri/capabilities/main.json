@@ -1,0 +1,22 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "A janela do Stivo: só ela fala com o núcleo, e só pelos comandos do app",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "allow-api",
+    "allow-stream-open",
+    "allow-stream-close",
+    "allow-term-open",
+    "allow-term-input",
+    "allow-term-resize",
+    "allow-term-close",
+    "allow-attention",
+    "allow-notify",
+    "allow-prefs-get",
+    "allow-prefs-set",
+    "allow-open-dir",
+    "allow-cp-save"
+  ]
+}

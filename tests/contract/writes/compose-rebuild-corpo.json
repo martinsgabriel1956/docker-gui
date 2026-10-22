@@ -1,0 +1,19 @@
+{
+  "desc": "compose rebuild sem project: 400",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [],
+  "request": {
+    "method": "POST",
+    "path": "/api/compose/rebuild",
+    "body": {
+      "dir": "/srv/loja"
+    }
+  },
+  "response": {
+    "status": 400,
+    "body": "corpo inválido: esperado {project, dir}"
+  }
+}

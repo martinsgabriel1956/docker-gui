@@ -1,0 +1,73 @@
+{
+  "desc": "image ls: tags da mesma imagem juntas, dangling sem tag, quem usa cada imagem",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "{\"ID\": \"sha256:f00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafebeef\", \"Repository\": \"nginx\", \"Tag\": \"1.27\", \"Size\": \"187MB\", \"CreatedAt\": \"2026-09-18 00:00:00 +0000 UTC\"}\n{\"ID\": \"sha256:f00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafebeef\", \"Repository\": \"nginx\", \"Tag\": \"latest\", \"Size\": \"187MB\", \"CreatedAt\": \"2026-09-18 00:00:00 +0000 UTC\"}\n{\"ID\": \"sha256:1111111111111111111111111111111111111111111111111111111111111111\", \"Repository\": \"<none>\", \"Tag\": \"<none>\", \"Size\": \"5MB\", \"CreatedAt\": \"data estranha\"}\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "image",
+        "ls",
+        "--no-trunc",
+        "--format",
+        "{{json .}}"
+      ]
+    },
+    {
+      "stdout": "0123456789abfull\nabcdef012345full\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "ps",
+        "-a",
+        "-q",
+        "--no-trunc"
+      ]
+    },
+    {
+      "stdout": "[{\"Name\": \"/web\", \"Image\": \"sha256:f00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafebeef\", \"Mounts\": [{\"Type\": \"volume\", \"Name\": \"dados\"}, {\"Type\": \"bind\", \"Name\": \"\"}], \"NetworkSettings\": {\"Networks\": {\"bridge\": {}, \"loja_default\": {}}}}, {\"Name\": \"/db\", \"Image\": \"sha256:f00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafebeef\", \"Mounts\": [{\"Type\": \"volume\", \"Name\": \"pg\"}], \"NetworkSettings\": {\"Networks\": {\"loja_default\": {}}}}]",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "container",
+        "inspect",
+        "0123456789abfull",
+        "abcdef012345full"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/images",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": [
+      {
+        "ID": "f00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafebeef",
+        "Tags": [
+          "nginx:1.27",
+          "nginx:latest"
+        ],
+        "Size": "187MB",
+        "Created": 1789689600,
+        "Containers": [
+          "web",
+          "db"
+        ]
+      },
+      {
+        "ID": "1111111111111111111111111111111111111111111111111111111111111111",
+        "Tags": [],
+        "Size": "5MB",
+        "Created": null,
+        "Containers": []
+      }
+    ]
+  }
+}

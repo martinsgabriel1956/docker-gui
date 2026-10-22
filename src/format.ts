@@ -59,8 +59,10 @@ export const bucket = (c: Container): Bucket =>
 export const isProblem = (c: Container): boolean => bucket(c) === 'problema';
 // quem entrou na faixa de atenção desde a leitura anterior (IDs que já estavam nela); null = primeira leitura,
 // que só serve de base: o que já estava com problema ao abrir a página não vira notificação
-export const newProblems = (before: Set<string> | null, cs: Container[]): Container[] =>
-  before ? cs.filter(c => isProblem(c) && !before.has(c.ID)) : [];
+// is: o critério de entrada na faixa; key: o que o before guarda (uma chave por causa faz a troca de causa contar como entrada)
+export const newProblems = (before: Set<string> | null, cs: Container[], is: (c: Container) => boolean = isProblem,
+                            key: (c: Container) => string = c => c.ID): Container[] =>
+  before ? cs.filter(c => is(c) && !before.has(key(c))) : [];
 // depends_on tem vírgulas no valor, então não dá para fazer split nos Labels; regex só no project
 export const project = (c: Pick<Container, 'Labels'>): string =>
   (c.Labels || '').match(/(?:^|,)com\.docker\.compose\.project=([^,]*)/)?.[1] || '';
@@ -70,6 +72,55 @@ export const workingDir = (c: Pick<Container, 'Labels'>): string =>
 // serviço do compose (vai para o compose restart; o servidor confere contra os serviços do projeto)
 export const service = (c: Pick<Container, 'Labels'>): string =>
   (c.Labels || '').match(/(?:^|,)com\.docker\.compose\.service=([^,]*)/)?.[1] || '';
+
+// depends_on do compose: "db:service_healthy:false,redis:service_started:false". O 3º campo (restart) entrou no Compose 2.17
+// e é opcional. O valor tem vírgulas: a regex vai até o próximo ",chave=", que não casa com "nome:condição"
+const DEP = '[^,=:]+:[^,=:]+(?::(?:true|false))?';
+const DEPS_RE = new RegExp(`(?:^|,)com\\.docker\\.compose\\.depends_on=(${DEP}(?:,${DEP})*)`);
+export type Cond = 'service_started' | 'service_healthy' | 'service_completed_successfully';
+export type Dep = {service: string; cond: Cond};
+const CONDS: readonly string[] = ['service_started', 'service_healthy', 'service_completed_successfully'];
+export function dependsOn(c: Pick<Container, 'Labels'>): Dep[] {
+  const v = (c.Labels || '').match(DEPS_RE)?.[1];
+  return !v ? [] : v.split(',').map(d => {
+    const [service, cond] = d.split(':');
+    return {service, cond: (CONDS.includes(cond) ? cond : 'service_started') as Cond};  // condição desconhecida: a mais branda
+  });
+}
+
+// por que a dependência não cumpre a condição; null = cumpre. "verificando saúde" e um migrate ainda rodando são a espera
+// normal de um compose up: não seguram ninguém (senão cada up acenderia a faixa)
+export type DepState = 'unhealthy' | 'exited' | 'stopped' | 'missing';
+function oneState(c: Container, cond: Cond): DepState | null {
+  if (c.State === 'running') return cond === 'service_healthy' && /\(unhealthy\)/.test(c.Status) ? 'unhealthy' : null;
+  if (cond === 'service_completed_successfully' && /^Exited \(0\)/.test(c.Status)) return null;
+  if (c.State === 'restarting' && !restartCode(c)) return null;  // voltando, sem crash
+  return tone(c) === 'bad' ? 'exited' : 'stopped';
+}
+export function depState(d: Dep, p: string, cs: Container[]): DepState | null {
+  const st = cs.filter(c => project(c) === p && service(c) === d.service).map(c => oneState(c, d.cond));
+  if (!st.length) return 'missing';
+  return st.includes(null) ? null : st.find(s => s === 'unhealthy' || s === 'exited') ?? st[0];  // réplicas: basta uma
+}
+
+// as dependências diretas que seguram o container. Container de pé e bem não é segurado por ninguém.
+// ponytail: O(n) por container, O(n²) por render; listas locais têm dezenas de containers
+export type Blocker = {service: string; state: DepState; c?: Container};
+export function blockers(c: Container, cs: Container[]): Blocker[] {
+  const p = project(c);
+  if (!p || (c.State === 'running' && !isProblem(c))) return [];
+  return dependsOn(c).flatMap(d => {
+    const state = depState(d, p, cs);
+    return state ? [{service: d.service, state, c: cs.find(x => project(x) === p && service(x) === d.service)}] : [];
+  });
+}
+// "Created" esperando uma dependência quebrada: entra na faixa (o criado à mão, sem causa, continua parado)
+export const held = (c: Container, cs: Container[]): boolean => c.State === 'created' && blockers(c, cs).length > 0;
+// quem este container segura (no mesmo projeto)
+export function holds(c: Container, cs: Container[]): Container[] {
+  const p = project(c), s = service(c);
+  return !p ? [] : cs.filter(d => d.ID !== c.ID && project(d) === p && blockers(d, cs).some(b => b.service === s));
+}
 // prefixo do `docker compose logs` -> serviço, para os containers do projeto p. O compose escreve o nome do container
 // sem o projeto quando é o nome padrão ("shop-api-2" -> "api-2"), e o nome inteiro com container_name ("postgres-17"):
 // só o nome e o label dizem qual dos dois é, o "-<número>" no fim do prefixo não
@@ -174,6 +225,38 @@ export function fmtBytes(n: number): string {
   for (; n >= 1024 && i < u.length - 1; i++) n /= 1024;
   return `${i && n < 100 ? n.toFixed(1) : Math.round(n)} ${u[i]}`;
 }
+
+// memória: uso e limite do "476MiB / 512MiB" do stats. Sem limite, o docker põe a RAM toda do daemon no lugar do limite
+export function memLimit(s: Stats): {used: number; limit: number} | null {
+  const [u, l] = s.MemUsage.split(' / ').map(x => bytes(x ?? ''));
+  return u !== null && l ? {used: u, limit: l} : null;
+}
+// o MemPerc do docker vem das contas exatas; sem ele ("--" no podman), a conta com o que veio
+export const memPct = (s: Stats): number | null => {
+  const m = memLimit(s);
+  return percent(s.MemPerc) ?? (m && m.used / m.limit * 100);
+};
+// container quente: 2 leituras seguidas em 90% ou mais do limite; sai abaixo de 85% (entre os dois, fica como está).
+// Limite acima de 95% da RAM total conta como sem limite (o stats arredonda a RAM: "7.6GiB" são 7,63 GiB). first: a
+// primeira leitura da página, que serve de base (quem já estava no alto fica quente sem esperar, e não notifica)
+export type MemState = Map<string, {n: number; on: boolean}>;
+const MEM_IN = 90, MEM_OUT = 85, MEM_READS = 2, NO_LIMIT = 0.95;
+export function memWatch(prev: MemState, stats: Record<string, Stats>, memTotal: number | null, first = false): MemState {
+  const next: MemState = new Map();
+  if (!memTotal) return next;
+  for (const [id, s] of Object.entries(stats)) {
+    const m = memLimit(s), pct = memPct(s), was = prev.get(id) ?? {n: 0, on: false};
+    if (!m || pct === null || m.limit >= NO_LIMIT * memTotal) continue;
+    if (pct >= MEM_IN) next.set(id, {n: was.n + 1, on: was.on || first || was.n + 1 >= MEM_READS});
+    else if (pct >= MEM_OUT && was.on) next.set(id, {n: 0, on: true});
+  }
+  return next;
+}
+export const memHot = (st: MemState, id: string): boolean => !!st.get(id)?.on;
+export const memText = (s: Stats): string => {
+  const m = memLimit(s)!;
+  return t`Memória em ${Math.round(memPct(s)!)}% do limite (${fmtBytes(m.used)} de ${fmtBytes(m.limit)})`;
+};
 
 // "1.2kB / 648B" -> ["1.2kB", "648B"]; null se faltar o campo ou um dos lados não for tamanho
 export function pair(s?: string): [string, string] | null {
@@ -292,6 +375,30 @@ export function topTable(text: string): string[][] {
   return [head, ...lines.map(c => [...c.slice(0, head.length - 1), c.slice(head.length - 1).join('  ')])];
 }
 
+// um probe do healthcheck, como o `inspect` guarda (as 5 últimas execuções, a mais velha primeiro)
+export type Probe = {Start: string; End: string; ExitCode: number; Output: string};
+// o docker usa 1 para "falhou" e -1 para timeout ou probe que nem rodou; outro código também é "não rodou como esperado"
+export const probeResult = (p: Probe): 'ok' | 'fail' | 'error' => p.ExitCode === 0 ? 'ok' : p.ExitCode === 1 ? 'fail' : 'error';
+// o Date.parse não garante mais de 3 casas na fração: corta os nanossegundos do docker
+export const probeTime = (s: string): number => Date.parse(s.replace(/(\.\d{3})\d+/, '$1'));
+export function probeDuration(p: Probe): number | null {
+  const d = probeTime(p.End) - probeTime(p.Start);
+  return Number.isFinite(d) && d >= 0 ? d : null;
+}
+export function healthSummary(log: Probe[]): string {
+  const bad = log.filter(p => probeResult(p) !== 'ok').length;
+  return !log.length ? '' : bad ? t`${bad} de ${log.length} falharam` : t`as ${log.length} passaram`;
+}
+
+// uma linha do `docker diff`, já separada pelo servidor: A (adicionado), C (alterado), D (apagado)
+export type DiffItem = {k: 'A' | 'C' | 'D'; p: string};
+export const DIFF_MAX = 500;  // a lista mostra até aqui; o filtro e o Copiar valem para todos
+export function diffSummary(items: DiffItem[]): string {
+  const n = (k: DiffItem['k']) => items.filter(d => d.k === k).length, a = n('A'), c = n('C'), d = n('D');
+  return [a && (a === 1 ? t`1 adicionado` : t`${a} adicionados`), c && (c === 1 ? t`1 alterado` : t`${c} alterados`),
+          d && (d === 1 ? t`1 apagado` : t`${d} apagados`)].filter(Boolean).join(' · ');
+}
+
 // criar container: as mesmas regras do run_argv do servidor, para apontar o erro no campo antes de enviar.
 // Quem decide é o servidor, que confere tudo de novo
 export const RESTART = ['no', 'on-failure', 'unless-stopped', 'always'] as const;
@@ -315,6 +422,17 @@ const PORT_RE = /^([0-9]{1,5}):([0-9]{1,5})(?:\/(tcp|udp))?$/;
 const ENV_RE = /^[A-Za-z_][A-Za-z0-9_]{0,255}$/;
 const VOLUME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{1,127}:((?:\/[A-Za-z0-9._@+-]+)+)$/;
 export const MAX_ENV_VALUE = 4096, MAX_ITEMS = 64;
+// a regra de referência de imagem do run e do pull (o image_ok dos servidores, que conferem de novo)
+export const imageOk = (image: string): boolean => image.length <= 512 && IMAGE_RE.test(image);
+// a referência com a tag explícita: sem tag (nem digest), o docker usa a latest. O ":" depois da última "/" é tag;
+// antes dela, é a porta do registry
+export const withTag = (ref: string): string => /@sha256:|:[^/]*$/.test(ref) ? ref : `${ref}:latest`;
+// a tag da lista é a digitada? O podman lista as do Docker Hub com o prefixo (docker.io/library/postgres:17)
+export const sameRef = (tag: string, ref: string): boolean =>
+  [ref, `docker.io/${ref}`, `docker.io/library/${ref}`].includes(tag);
+// o que o pull fez com a tag, pelo ID antes e depois (vale para docker e podman, sem ler o texto de status)
+export const pullOutcome = (before: string | null, after: string | null): 'new' | 'updated' | 'same' | 'missing' =>
+  !after ? 'missing' : !before ? 'new' : before === after ? 'same' : 'updated';
 
 // "8080:80, 5353:53/udp" -> ["8080:80", "5353:53/udp"]
 export const splitPorts = (s: string): string[] => s.split(/[\s,]+/).filter(Boolean);
@@ -326,7 +444,7 @@ export function runSpec(f: RunForm): {spec: RunSpec; errors: RunErrors} {
   const errors: RunErrors = {}, image = f.image.trim(), name = f.name.trim(), volume = f.volume.trim();
   const ports = splitPorts(f.ports), env = splitEnv(f.env);
   if (!image) errors.image = t`Informe a imagem, ex.: nginx:1.27 ou ghcr.io/acme/api:1.4.`;
-  else if (image.length > 512 || !IMAGE_RE.test(image)) errors.image = t`Imagem inválida: use repo[:tag] ou repo@sha256:…, com o caminho em minúsculas.`;
+  else if (!imageOk(image)) errors.image = t`Imagem inválida: use repo[:tag] ou repo@sha256:…, com o caminho em minúsculas.`;
   if (name && !NAME_RE.test(name)) errors.name = t`Nome inválido: 2 a 128 caracteres entre letras, números, _ . e -, começando por letra ou número.`;
 
   const seen = new Set<string>();
@@ -389,6 +507,17 @@ export const logLevel = (line: string): LogLevel => LEVEL.find(([, word, mark]) 
 // linha que continua a de cima num stack trace (indentada, "Caused by:", "... 3 more"): ela herda o nível da linha que
 // abriu o trace, para "Só erros" mostrar o trace inteiro. Recebe a linha sem o prefixo do serviço e sem o timestamp
 export const continues = (body: string): boolean => /^(\s+\S|Caused by:|\.\.\. \d+ more)/.test(body);
+
+// a linha que a faixa de atenção mostra de quem caiu, sem o timestamp: a que explica a queda. O timestamp ordena (stdout
+// e stderr chegam um depois do outro); no empate vale a ordem do docker (o sort é estável), e não a alfabética, que punha
+// "Traceback…" depois de "KeyError…". Entre as linhas, a última de erro que não continua um stack trace nem o abre;
+// sem nenhuma, a última
+export function tailLine(text: string): string {
+  const ts = /^\d{4}-\d\d-\d\dT\S+\s/;
+  const lines = text.split('\n').filter(l => l.trim()).map(l => [l.match(ts)?.[0] ?? '', l.replace(ts, '')])
+    .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([, l]) => l);
+  return lines.reverse().find(l => logLevel(l) === 'bad' && !continues(l) && !l.startsWith('Traceback (')) ?? lines[0] ?? '';
+}
 
 // fatia liberável de uma categoria do docker system df (0 a 1), para a barra: o "(40%)" do Reclaimable, ou a
 // conta pelos tamanhos quando ele não vem (o build cache manda só "3.3GB"); null se não der para saber

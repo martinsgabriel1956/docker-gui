@@ -22,3 +22,6 @@ playwright-report/
 
 # Configuração pessoal do Claude Code
 .claude/settings.local.json
+
+# Rust (src-tauri)
+src-tauri/target/

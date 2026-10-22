@@ -1,0 +1,22 @@
+{
+  "desc": "run recusado (env-chave): 400 sem chamar o docker",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [],
+  "request": {
+    "method": "POST",
+    "path": "/api/run",
+    "body": {
+      "image": "nginx",
+      "env": [
+        "1A=x"
+      ]
+    }
+  },
+  "response": {
+    "status": 400,
+    "body": "variável inválida: '1A=x' (use CHAVE=valor; a chave com letras, números e _)"
+  }
+}

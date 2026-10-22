@@ -1,0 +1,29 @@
+{
+  "desc": "inspect que falha: 500",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "",
+      "stderr": "Error: No such object\n",
+      "code": 1,
+      "args": [
+        "inspect",
+        "--format",
+        "{{json .}}",
+        "0123456789ab"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/inspect/0123456789ab",
+    "body": null
+  },
+  "response": {
+    "status": 500,
+    "body": "Error: No such object"
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "desc": "só a imagem",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "run",
+        "-d",
+        "--restart=no",
+        "--",
+        "alpine"
+      ]
+    }
+  ],
+  "request": {
+    "method": "POST",
+    "path": "/api/run",
+    "body": {
+      "image": "alpine"
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  }
+}

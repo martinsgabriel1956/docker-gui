@@ -13,6 +13,9 @@ ação que falha ou demora) viram dados. Campos extras por container, fora do fo
   after   {ação: {State, Status}}: estado depois da ação, no lugar do padrão (ex.: start que cai)
   events  lista de eventos (linhas do `docker events --format {{json .}}`) que o histórico (`events --until`) devolve
   top     texto do `docker top` (padrão: um sh); com o container parado, o top falha como o docker
+  diff    texto do `docker diff` ("C /etc", um por linha; padrão: vazio); vale com o container parado
+  files   {caminho: texto}: o que o `docker cp <id>:<caminho> -` acha (uma pasta é qualquer prefixo com /); sai um tar,
+          como o docker, e vale com o container parado
   stats   {CPUPerc, MemUsage, MemPerc, NetIO, BlockIO}: linha do `docker stats`; sem ele, o container não
           aparece lá. Numa lista, cada `docker stats` usa o item seguinte (o último se repete), para a
           página ver os números mudando; "stats_calls", no topo do JSON, conta as leituras
@@ -34,6 +37,8 @@ recusa o que está em uso, com a mensagem do docker, e cada rm que deu certo fic
 faz o run falhar com esse stderr, "run_delay" o faz demorar (segundos) e "run_after" ({State, Status}) é o estado
 do container criado (ex.: um que sobe e cai).
 "context" ({Name, Host}) é o que o `context inspect` responde (padrão: default em unix://).
+`pull -- <ref>` consulta "registry" ({ref com tag: ID}): fora dele, falha como uma imagem que não existe ou pede
+login; "pull_delay" (segundos) espalha a saída no tempo.
 O `docker exec -it` do terminal vira um sh local; o `docker exec -i` do modo do Windows roda o comando do
 container aqui mesmo (com o `script` local), e "noscript": true simula uma imagem sem `script` (alpine).
 O `docker events` manda uma linha por container que mudou
@@ -42,11 +47,13 @@ no que o `docker ps` mostra, enquanto o servidor o mantiver vivo.
 import contextlib
 import fcntl
 import hashlib
+import io
 import json
 import os
 import re
 import secrets
 import sys
+import tarfile
 import time
 
 PS_FIELDS = ("Command", "CreatedAt", "ID", "Image", "Labels", "LocalVolumes", "Mounts", "Names",
@@ -266,6 +273,58 @@ def run(state, args):
     return full, None
 
 
+def pull(path, ref):
+    """docker pull: o "registry" ({ref: ID}) diz o que existe lá; "pull_delay" espalha as linhas no tempo. Sem tag, vale
+    a latest. A imagem entra em "images" (a antiga com a mesma tag fica sem tag, como no docker); com o mesmo ID, o
+    pull só diz que já estava em dia."""
+    full = ref if re.search(r"@sha256:|:[^/]*$", ref) else f"{ref}:latest"
+    repo, tag = full.rsplit(":", 1)
+    with locked(path, exclusive=False) as (_, state):
+        new, delay = state.get("registry", {}).get(full), state.get("pull_delay", 0)
+    if not new:
+        fail(f"Error response from daemon: pull access denied for {repo}, repository does not exist or may require 'docker login'")
+    for line in (f"{tag}: Pulling from library/{repo}", f"{new[7:19]}: Pull complete", f"Digest: {new}"):
+        print(line, flush=True)
+        time.sleep(delay / 3)
+    with locked(path, exclusive=True) as (f, state):
+        imgs = state.setdefault("images", [])
+        old = next((i for i in imgs if i["Repository"] == repo and i["Tag"] == tag), None)
+        if old and old["ID"] == new:
+            return print(f"Status: Image is up to date for {full}")
+        if old:
+            old["Repository"] = old["Tag"] = "<none>"
+        imgs.append({"ID": new, "Repository": repo, "Tag": tag, "Size": "100MB", "CreatedAt": "2026-10-21 00:00:00 +0000 UTC"})
+        save(f, state)
+    return print(f"Status: Downloaded newer image for {full}")
+
+
+def cp(state, args):
+    """cp [-L] <id>:<caminho> -: um tar no stdout, como o docker; arquivo ou pasta a partir de "files"."""
+    ref, _, src = args[-2].partition(":")
+    c, src = find(state, ref), src.rstrip("/") or "/"
+    files = c.get("files", {})
+    inside = {p: v for p, v in files.items() if p.startswith(src.rstrip("/") + "/")}
+    if src not in files and not inside:
+        fail(f"Error response from daemon: Could not find the file {src} in container {c['Names']}")
+    base, buf = src.rsplit("/", 1)[-1] or "/", io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as t:
+        def add(name, text=None):
+            info = tarfile.TarInfo(name)
+            if text is None:
+                info.type = tarfile.DIRTYPE
+                return t.addfile(info)
+            data = text.encode()
+            info.size = len(data)
+            return t.addfile(info, io.BytesIO(data))
+        if src in files:
+            add(base, files[src])
+        else:
+            add(base)
+            for p, text in sorted(inside.items()):
+                add(base + p[len(src.rstrip("/")):], text)
+    sys.stdout.buffer.write(buf.getvalue())
+
+
 def main(args):
     path = os.environ["FAKE_DOCKER_STATE"]
     cmd, ref = args[0], args[-1]
@@ -313,6 +372,11 @@ def main(args):
         cmd = args[3:] if args[1] == "-i" else args[2:]
         os.execvp(cmd[0], cmd)
 
+    if cmd == "pull":  # pull -- <ref>: as linhas saem aos poucos, fora do lock
+        if args[1:2] != ["--"] or len(args) != 3:  # o servidor sempre fecha as opções antes da imagem
+            fail(f"pull inesperado: {args}")
+        return pull(path, ref)
+
     if cmd == "run":  # dorme fora do lock, como as ações
         with locked(path, exclusive=False) as (_, state):
             delay = state.get("run_delay", 0)
@@ -348,6 +412,8 @@ def main(args):
             save(f, state)
             if err:
                 fail(err)
+        elif cmd == "info":  # info --format '{{json .}}': só a RAM total, que a página usa no alerta de memória
+            print(json.dumps({"MemTotal": state.get("mem_total", 16 * 2**30)}))
         elif cmd == "stats":
             n = state["stats_calls"] = state.get("stats_calls", 0) + 1
             save(f, state)
@@ -361,6 +427,10 @@ def main(args):
         elif cmd == "system":
             for row in state.get("df", []):
                 print(json.dumps(row))
+        elif cmd == "cp":  # cp [-L] <id>:<caminho> -
+            cp(state, args)
+        elif cmd == "diff":  # o docker diff funciona com o container parado
+            print(find(state, ref).get("diff", ""))
         elif cmd == "top":
             c = find(state, ref)
             if c["State"] != "running":

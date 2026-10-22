@@ -1,0 +1,20 @@
+{
+  "desc": "run recusado (restart): 400 sem chamar o docker",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [],
+  "request": {
+    "method": "POST",
+    "path": "/api/run",
+    "body": {
+      "image": "nginx",
+      "restart": "sometimes"
+    }
+  },
+  "response": {
+    "status": 400,
+    "body": "restart inválido: use no, on-failure, unless-stopped, always"
+  }
+}

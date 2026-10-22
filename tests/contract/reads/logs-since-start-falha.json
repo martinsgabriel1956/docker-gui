@@ -1,0 +1,29 @@
+{
+  "desc": "since=start com inspect que falha: 500 com o stderr",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "",
+      "stderr": "Error: No such object\n",
+      "code": 1,
+      "args": [
+        "inspect",
+        "--format",
+        "{{json .State.StartedAt}}",
+        "0123456789ab"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/logs/0123456789ab?since=start",
+    "body": null
+  },
+  "response": {
+    "status": 500,
+    "body": "Error: No such object"
+  }
+}

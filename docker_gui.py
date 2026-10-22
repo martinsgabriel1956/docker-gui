@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Gerenciador de containers Docker no navegador. Só stdlib + docker CLI."""
+"""Stivo: containers Docker e Podman no navegador. Só stdlib + docker CLI."""
 import argparse
 import base64
+import contextlib
 import errno
+import functools
+import gzip
 import hashlib
 import hmac
 import html
+import io
 import json
 import locale
 import os
@@ -17,12 +21,13 @@ import signal
 import struct
 import subprocess
 import sys
+import tarfile
 import threading
 import time
 import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote
 
 PORT = 8765  # padrão; se estiver ocupada, serve() tenta as próximas
 # segredo por execução: sem ele a API não responde. Fecha a porta para o que roda na máquina
@@ -82,6 +87,7 @@ COMPOSE_FORMAT = ('[{{json (.Label "com.docker.compose.project")}},{{json (.Labe
 # timestamp do docker logs logo depois do prefixo do compose
 LOG_TIME = re.compile(r"\|\s(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?")
 MAX_BODY = 64 * 1024
+MAX_CP = 100 * 1024 * 1024  # baixar arquivo: o tar inteiro passa pela memória (da aba na web, do app no desktop)
 # comandos que imprimem um JSON por linha; o stats só lista os rodando e leva ~2 s para medir a CPU
 LISTS = {"/api/containers": ["ps", "-a"], "/api/stats": ["stats", "--no-stream"]}
 # eventos que não mudam nada na lista, além dos exec*: o healthcheck roda um exec a cada intervalo (exec_create,
@@ -96,7 +102,7 @@ STREAMS = set()
 # quanto histórico dos logs a página pode pedir (?tail=): o argv sai daqui, nunca da query. "all" é sem --tail
 # (o padrão do docker e do podman; o podman não aceita "--tail all")
 LOG_TAIL = {"500": ["--tail", "500"], "2000": ["--tail", "2000"], "10000": ["--tail", "10000"], "all": [],
-            "5": ["--tail", "5"]}  # 5: a última linha de quem caiu, que a lista mostra na faixa de atenção
+            "20": ["--tail", "20"]}  # 20: a linha de quem caiu que a faixa de atenção mostra (o erro antes do stack trace)
 # histórico de um container (GET /api/history/<id>): o que o docker events ainda guarda das últimas 24 h (o daemon
 # só guarda os eventos mais recentes, de todos os containers juntos). Só o que explica uma queda; o resto é ruído
 HISTORY_EVENTS = ("start", "die", "oom", "pause", "unpause", "health_status")
@@ -165,14 +171,19 @@ EN = {
     "serviço não encontrado no projeto": "service not found in the project",
     "Porta {port} ocupada. Escolha outra com --port.": "Port {port} is in use. Pick another with --port.",
     "Portas {first}-{last} ocupadas. Escolha uma com --port.": "Ports {first}-{last} are in use. Pick one with --port.",
-    "Gerenciador de containers Docker no navegador. Só stdlib + docker CLI.": "Docker container manager in the browser. Stdlib + docker CLI only.",
+    "Stivo: containers Docker e Podman no navegador. Só stdlib + docker CLI.": "Stivo: Docker and Podman containers in the browser. Stdlib + docker CLI only.",
     "porta local (padrão: {port}, ou a próxima livre)": "local port (default: {port}, or the next free one)",
     "CLI de containers: docker ou podman (padrão: $DOCKER_GUI_CLI ou docker)": "container CLI: docker or podman (default: $DOCKER_GUI_CLI or docker)",
     "contexto do docker (docker --context); sem ele vale o DOCKER_CONTEXT ou o atual": "docker context (docker --context); without it, DOCKER_CONTEXT or the current one",
     "língua da página e das mensagens: pt ou en (padrão: $DOCKER_GUI_LANG ou o locale do sistema)":
         "language of the page and messages: pt or en (default: $DOCKER_GUI_LANG or the system locale)",
-    "Docker GUI em {url}  (Ctrl+C para sair)": "Docker GUI at {url}  (Ctrl+C to quit)",
+    "Stivo em {url}  (Ctrl+C para sair)": "Stivo at {url}  (Ctrl+C to quit)",
     "não abre o navegador; o link sai só no terminal": "don't open the browser; the link is only printed in the terminal",
+    "caminho inválido: use um caminho absoluto (começa com /), de até 4096 caracteres":
+        "invalid path: use an absolute path (starting with /), up to 4096 characters",
+    "{path} não existe no container": "{path} does not exist in the container",
+    "o container não existe mais": "the container no longer exists",
+    "{path} passa de 100 MB, o limite daqui": "{path} is over 100 MB, the limit here",
 }
 
 
@@ -357,6 +368,17 @@ def from_podman_stats(s):
             "BlockIO": f"{podman_size(s.get('BlockInput') or 0)} / {podman_size(s.get('BlockOutput') or 0)}"}
 
 
+def mem_total(out):
+    """RAM total do daemon, do `info --format {{json .}}`: MemTotal no docker, host.memTotal no podman (e no
+    podman-docker, que o nome do binário não denuncia). None se não vier."""
+    try:
+        d = json.loads(out)
+    except ValueError:
+        return None
+    v = (d.get("MemTotal") or (d.get("host") or {}).get("memTotal")) if isinstance(d, dict) else None
+    return v if isinstance(v, int) and v > 0 else None
+
+
 def stats(out):
     """Saída do stats -> lista no formato do docker (ID curto, CPUPerc, MemUsage, MemPerc, NetIO, BlockIO).
     Como no ps, a forma da linha decide: o docker manda um JSON por linha, o podman um array indentado."""
@@ -412,6 +434,62 @@ def history(out):
     return events[-HISTORY_MAX:]
 
 
+def diff(out):
+    """Saída do `docker diff` (e do `podman diff`): "C /etc", "A /etc/x" -> [{"k": "C", "p": "/etc"}, ...]. O caminho é
+    tudo depois do espaço (pode ter espaço); linha fora do formato fica de fora."""
+    return [{"k": line[0], "p": line[2:]} for line in out.splitlines()
+            if len(line) > 2 and line[0] in "ACD" and line[1] == " "]
+
+
+def cp_name(path, folder):
+    """Nome do download: o último pedaço do caminho (a raiz vira root), sem barra nem caractere de controle."""
+    base = re.sub(r"[\x00-\x1f\x7f/\\]", "_", path.rstrip("/").rsplit("/", 1)[-1] or "root")
+    return base + ".tar" if folder else base
+
+
+def cp_out(cid, path):
+    """docker cp <id>:<path> - (um tar no stdout): (200, nome, bytes) ou (status, "", mensagem). Arquivo sai com o
+    conteúdo; pasta (ou o que não for arquivo comum) sai como o tar. O -L segue o link dentro do container; o podman
+    já segue e não tem a flag"""
+    if not path.startswith("/") or "\x00" in path or len(path) > 4096:
+        return 400, "", tr("caminho inválido: use um caminho absoluto (começa com /), de até 4096 caracteres")
+    try:
+        p = subprocess.Popen([*CLI, "cp", *([] if podman() else ["-L"]), f"{cid}:{path}", "-"],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except OSError as e:  # binário que não existe
+        return 500, "", str(e)
+    late = []
+    timer = threading.Timer(ACTION_TIMEOUT, lambda: (late.append(1), p.kill()))
+    timer.start()
+    with p:
+        try:
+            data = p.stdout.read(MAX_CP + 1)
+            if len(data) > MAX_CP:
+                p.kill()
+                return 413, "", tr("{path} passa de 100 MB, o limite daqui").format(path=path)
+            err = p.stderr.read().decode(errors="replace").strip()
+        finally:
+            timer.cancel()
+    if late:
+        return 500, "", tr("{cli} {cmd} não respondeu em {timeout}s. O daemon está travado?").format(
+            cli=CLI[0], cmd="cp", timeout=ACTION_TIMEOUT)
+    if p.returncode:
+        low = err.lower()
+        if "no such container" in low:  # antes: o do podman também diz "no such file or directory"
+            return 404, "", tr("o container não existe mais")
+        if "could not find the file" in low or "no such file or directory" in low:
+            return 404, "", tr("{path} não existe no container").format(path=path)
+        return 500, "", err
+    try:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as t:  # o docker cp entrega tar sem compressão
+            first = t.next()
+            if first is not None and first.isfile():
+                return 200, cp_name(path, False), t.extractfile(first).read()
+    except tarfile.TarError:
+        return 500, "", tr("formato inesperado na saída do {cmd}").format(cmd=f"{CLI[0]} cp")
+    return 200, cp_name(path, True), data
+
+
 def summary(info, reveal=False):
     """Resumo do `docker inspect`: restart policy, redes, mounts e env, e o que explica uma queda (se o kernel matou por
     falta de memória e quantas vezes o docker já reiniciou o container).
@@ -428,6 +506,11 @@ def summary(info, reveal=False):
         "RestartCount": info.get("RestartCount") or 0,
         "FinishedAt": (info.get("State") or {}).get("FinishedAt") or "",
     }
+
+
+def image_ok(image):
+    """A regra de referência de imagem do run e do pull: repo[:tag] ou repo@sha256:..., até MAX_IMAGE."""
+    return isinstance(image, str) and len(image) <= MAX_IMAGE and bool(IMAGE_RE.fullmatch(image))
 
 
 def run_argv(body):
@@ -450,7 +533,7 @@ def run_argv(body):
 
     image, name, volume = field("image", str, ""), field("name", str, ""), field("volume", str, "")
     restart, public = field("restart", str, "no"), field("all_interfaces", bool, False)
-    if len(image) > MAX_IMAGE or not IMAGE_RE.fullmatch(image):
+    if not image_ok(image):
         raise ValueError(tr("imagem inválida: use repo[:tag] ou repo@sha256:…"))
     if name and not NAME_RE.fullmatch(name):
         raise ValueError(tr("nome inválido: 2 a 128 caracteres entre letras, números, _ . e -, começando por letra ou número"))
@@ -572,17 +655,41 @@ def kill(proc):
     proc.wait()
 
 
+@functools.lru_cache(maxsize=1)
+def gzipped(text):
+    """A página comprimida uma vez só: ela não muda enquanto o servidor roda."""
+    return gzip.compress(text.encode(), 6)
+
+
 class Handler(BaseHTTPRequestHandler):
-    def send(self, code, body, ctype="application/json"):
-        data = body.encode()
+    def send(self, code, body, ctype="application/json", gz=False):
+        # gz: a página (~700 KB, com o xterm) vai comprimida se o navegador aceita; pesa por SSH e no celular
+        gz = gz and re.search(r"\bgzip\b", self.headers.get("Accept-Encoding", "")) is not None
+        data = gzipped(body) if gz else body.encode()
         self.send_response(code)
         self.send_header("Content-Type", ctype + "; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
+        if gz:
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Vary", "Accept-Encoding")
         # a página nunca vai num iframe de outro site (clickjacking); o X-Frame-Options é para navegador antigo
         self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
         self.send_header("X-Frame-Options", "DENY")
         self.end_headers()
         self.wfile.write(data)
+
+    def send_bytes(self, data, name):
+        """O download do baixar arquivo: o conteúdo do container nunca é interpretado (octet-stream, attachment, nosniff)"""
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(name, safe='')}")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+        self.send_header("X-Frame-Options", "DENY")
+        self.end_headers()
+        with contextlib.suppress(OSError):  # a página cancelou: a conexão já fechou
+            self.wfile.write(data)
 
     def host_ok(self):
         # bloqueia DNS rebinding: só aceita acesso via localhost
@@ -598,7 +705,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.host_ok():
             return self.send(403, '"forbidden"')
         if self.path == "/":  # a página em si não tem dados; só a API exige o token
-            return self.send(200, PAGE, "text/html")
+            return self.send(200, PAGE, "text/html", gz=True)
         path, _, query = self.path.partition("?")
         m = re.fullmatch(r"/api/exec/([0-9a-f]{12,64})", path)
         if m:
@@ -634,6 +741,13 @@ class Handler(BaseHTTPRequestHandler):
             base = self.compose_query(query)
             services = None if base is None else self.compose_services(base)
             return None if services is None else self.send(200, json.dumps(services))
+        if self.path == "/api/info":  # sem limite, o stats reporta a RAM total como limite: a página precisa dela
+            r = docker("info", "--format", "{{json .}}")
+            if r.returncode:
+                return self.send(500, json.dumps(r.stderr.strip()))
+            total = mem_total(r.stdout)
+            return (self.send(200, json.dumps({"MemTotal": total})) if total else
+                    self.send(500, json.dumps(tr("formato inesperado na saída do {cmd}").format(cmd=f"{CLI[0]} info"))))
         if self.path in LISTS or self.path == "/api/df":
             ps, st = self.path == "/api/containers", self.path == "/api/stats"
             # o ps e o stats do podman só saem completos em "json" (um array); containers() e stats() convertem
@@ -677,6 +791,14 @@ class Handler(BaseHTTPRequestHandler):
         if m:  # processos do container (a tabela do docker top, como o CLI imprime)
             r = docker("top", m[1])
             return self.send(500 if r.returncode else 200, json.dumps((r.stderr if r.returncode else r.stdout).strip()))
+        m = re.fullmatch(r"/api/diff/([0-9a-f]{12,64})", self.path)
+        if m:  # o que mudou no filesystem do container em relação à imagem; percorre a camada gravável: prazo de ação
+            r = docker("diff", m[1], timeout=ACTION_TIMEOUT)
+            return self.send(500, json.dumps(r.stderr.strip())) if r.returncode else self.send(200, json.dumps(diff(r.stdout)))
+        m = re.fullmatch(r"/api/cp/([0-9a-f]{12,64})", path)
+        if m:  # baixar arquivo ou pasta do container (também parado): prazo de ação, até 100 MB
+            code, name, out = cp_out(m[1], parse_qs(query, keep_blank_values=True).get("path", [""])[0])
+            return self.send_bytes(out, name) if code == 200 else self.send(code, json.dumps(out))
         m = re.fullmatch(r"/api/inspect/([0-9a-f]{12,64})(/env)?", self.path)
         if m:  # resumo do inspect; só o /env (pedido explícito na página) traz os valores do env
             r = docker("inspect", "--format", "{{json .}}", m[1])
@@ -782,6 +904,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(403, '"forbidden"')
         if not self.token_ok():
             return self.send(401, json.dumps(tr("token ausente ou inválido")))
+        if self.path == "/api/pull":
+            return self.pull()
         m = re.fullmatch(r"/api/compose/(\w+)", self.path)
         if m and (m[1] in COMPOSE or m[1] in COMPOSE_SERVICE):
             return self.compose(m[1])
@@ -1028,8 +1152,54 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(404, json.dumps(tr("serviço não encontrado no projeto")))
         # o "--" encerra as flags: mesmo vindo de um label, o nome do serviço nunca vira opção do compose
         args = [*COMPOSE_SERVICE[action], "--", key[2]] if service else COMPOSE[action]
-        r = docker(*base, *args, timeout=COMPOSE_TIMEOUT)
-        return self.send(500 if r.returncode else 200, json.dumps(r.stderr.strip()))
+        return self.compose_stream([*base, *args])
+
+    def pull(self):
+        """docker pull da imagem do corpo {image}, com a saída em stream como a do compose: segue até o fim mesmo que a
+        página feche, e só o prazo de 10 min o interrompe. O "--" fecha as opções, mesmo com a regex já impedindo o "-"."""
+        try:
+            image = self.json_body().get("image")
+        except (ValueError, AttributeError):
+            image = None
+        if not image_ok(image):
+            return self.send(400, json.dumps(tr("imagem inválida: use repo[:tag] ou repo@sha256:…")))
+        return self.compose_stream(["pull", "--", image])
+
+    def compose_stream(self, args):
+        """Roda o compose e manda a saída enquanto ela sai (o progresso e o build vão para o stderr, que vem junto):
+        um JSON por linha, cada linha da saída como string e, no fim, {"code": <código de saída>}. O compose vai até
+        o fim mesmo que a página feche, como antes do stream (um down interrompido deixaria o projeto pela metade);
+        só o prazo o interrompe. Sem select: os pipes no Windows não têm."""
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        alive = True
+
+        def out(obj):
+            nonlocal alive
+            if alive:
+                try:
+                    self.wfile.write((json.dumps(obj) + "\n").encode())
+                except OSError:  # a página fechou: o compose continua, só ninguém mais lê
+                    alive = False
+
+        try:
+            p = subprocess.Popen([*CLI, *args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        except OSError as e:  # binário não encontrado
+            out(str(e))
+            return out({"code": 127})
+        late = []
+        timer = threading.Timer(COMPOSE_TIMEOUT, lambda: (late.append(1), p.kill()))
+        timer.start()
+        with p:
+            for line in p.stdout:  # readline devolve cada linha assim que ela chega, inteira (UTF-8 inteiro)
+                out(line.decode(errors="replace").rstrip("\r\n"))
+        timer.cancel()
+        if late:
+            out(tr("{cli} {cmd} não respondeu em {timeout}s. O daemon está travado?").format(
+                cli=CLI[0], cmd=args[0], timeout=COMPOSE_TIMEOUT))
+        out({"code": 124 if late else p.returncode})
 
     def log_tail(self, qs):
         """?tail= (padrão 500) -> as flags da whitelist LOG_TAIL; fora dela responde 400 e devolve None."""
@@ -1138,7 +1308,7 @@ def main():
     pre.add_argument("--lang", nargs="?")
     lang = pre.parse_known_args()[0].lang
     LANG = lang if lang in ("pt", "en") else system_lang()
-    ap = argparse.ArgumentParser(description=tr("Gerenciador de containers Docker no navegador. Só stdlib + docker CLI."))
+    ap = argparse.ArgumentParser(description=tr("Stivo: containers Docker e Podman no navegador. Só stdlib + docker CLI."))
     ap.add_argument("--port", type=int, help=tr("porta local (padrão: {port}, ou a próxima livre)").format(port=PORT))
     ap.add_argument("--cli", default=os.environ.get("DOCKER_GUI_CLI", "docker"),
                     help=tr("CLI de containers: docker ou podman (padrão: $DOCKER_GUI_CLI ou docker)"))
@@ -1157,7 +1327,7 @@ def main():
     server = serve(args.port)
     # o token vai no #fragmento: não é enviado ao servidor nem fica em log; a página guarda e o tira da URL
     url = f"http://localhost:{server.server_address[1]}/#t={TOKEN}"
-    print(tr("Docker GUI em {url}  (Ctrl+C para sair)").format(url=url))
+    print(tr("Stivo em {url}  (Ctrl+C para sair)").format(url=url))
     if not args.no_browser:
         webbrowser.open(url)
     # SIGTERM vira saída normal (SystemExit), para o finally rodar; o código 143 é o de quem morre por SIGTERM
@@ -1176,12 +1346,12 @@ def main():
 # A fonte fica em src/; para mudar o visual ou o comportamento da página, veja o README.
 # >>> gerado por build.py a partir de src/: não edite à mão, mude src/ e rode python3 build.py
 CSS = r"""/*! tailwindcss v4.3.3 | MIT License | https://tailwindcss.com */
-@layer properties{@supports (((-webkit-hyphens:none)) and (not (margin-trim:inline))) or ((-moz-orient:inline) and (not (color:rgb(from red r g b)))){*,:before,:after,::backdrop{--tw-translate-x:0;--tw-translate-y:0;--tw-translate-z:0;--tw-space-y-reverse:0;--tw-divide-x-reverse:0;--tw-border-style:solid;--tw-divide-y-reverse:0;--tw-leading:initial;--tw-font-weight:initial;--tw-tracking:initial;--tw-ordinal:initial;--tw-slashed-zero:initial;--tw-numeric-figure:initial;--tw-numeric-spacing:initial;--tw-numeric-fraction:initial;--tw-shadow:0 0 #0000;--tw-shadow-color:initial;--tw-shadow-alpha:100%;--tw-inset-shadow:0 0 #0000;--tw-inset-shadow-color:initial;--tw-inset-shadow-alpha:100%;--tw-ring-color:initial;--tw-ring-shadow:0 0 #0000;--tw-inset-ring-color:initial;--tw-inset-ring-shadow:0 0 #0000;--tw-ring-inset:initial;--tw-ring-offset-width:0px;--tw-ring-offset-color:#fff;--tw-ring-offset-shadow:0 0 #0000;--tw-blur:initial;--tw-brightness:initial;--tw-contrast:initial;--tw-grayscale:initial;--tw-hue-rotate:initial;--tw-invert:initial;--tw-opacity:initial;--tw-saturate:initial;--tw-sepia:initial;--tw-drop-shadow:initial;--tw-drop-shadow-color:initial;--tw-drop-shadow-alpha:100%;--tw-drop-shadow-size:initial;--tw-content:"";--tw-outline-style:solid}}}@layer theme{:root,:host{--font-sans:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";--font-mono:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;--color-black:#000;--color-white:#fff;--spacing:.25rem;--container-7xl:80rem;--text-xs:.75rem;--text-xs--line-height:calc(1 / .75);--text-sm:.875rem;--text-sm--line-height:calc(1.25 / .875);--text-lg:1.125rem;--text-lg--line-height:calc(1.75 / 1.125);--text-xl:1.25rem;--text-xl--line-height:calc(1.75 / 1.25);--text-2xl:1.5rem;--text-2xl--line-height:calc(2 / 1.5);--font-weight-normal:400;--font-weight-medium:500;--font-weight-semibold:600;--tracking-tight:-.025em;--leading-relaxed:1.625;--radius-sm:.25rem;--radius-lg:.5rem;--animate-pulse:pulse 2s cubic-bezier(.4, 0, .6, 1) infinite;--default-transition-duration:.15s;--default-transition-timing-function:cubic-bezier(.4, 0, .2, 1);--default-font-family:var(--font-sans);--default-mono-font-family:var(--font-mono);--color-canvas:oklch(16% .012 255);--color-raised:oklch(20.5% .014 255);--color-hover:oklch(26% .016 255);--color-line:oklch(27% .014 255);--color-line-strong:oklch(37% .018 255);--color-dim:oklch(58% .02 255);--color-muted:oklch(72% .02 255);--color-fg-soft:oklch(86% .012 255);--color-fg:oklch(92% .008 255);--color-fg-strong:oklch(97% .004 255);--color-ok:oklch(78% .17 148);--color-ok-fg:oklch(85% .14 148);--color-ok-soft:oklch(91% .08 148);--color-warn:oklch(84% .16 92);--color-warn-fg:oklch(88% .14 95);--color-warn-soft:oklch(92.5% .1 97);--color-warn-strong:oklch(96% .05 97);--color-bad:oklch(69% .19 25);--color-bad-fg:oklch(79% .11 22);--color-bad-soft:oklch(88% .05 20);--color-danger:oklch(52% .2 27);--color-danger-hover:oklch(46% .18 27);--color-pause:oklch(72% .17 330);--color-pause-fg:oklch(82% .11 330);--color-accent:oklch(80% .12 200);--color-accent-fg:oklch(86% .09 200);--color-accent-soft:oklch(92% .05 200);--color-svc-1:oklch(82% .11 55);--color-svc-2:oklch(82% .09 355);--color-svc-3:oklch(78% .11 250);--color-svc-4:oklch(78% .11 295);--text-data:.8125rem;--text-data--line-height:1.25rem;--text-group:1rem;--text-group--line-height:1.5rem}}@layer base{*,:after,:before,::backdrop{box-sizing:border-box;border:0 solid;margin:0;padding:0}::file-selector-button{box-sizing:border-box;border:0 solid;margin:0;padding:0}html,:host{-webkit-text-size-adjust:100%;tab-size:4;line-height:1.5;font-family:var(--default-font-family,-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji");font-feature-settings:var(--default-font-feature-settings,normal);font-variation-settings:var(--default-font-variation-settings,normal);-webkit-tap-highlight-color:transparent}hr{height:0;color:inherit;border-top-width:1px}abbr:where([title]){-webkit-text-decoration:underline dotted;text-decoration:underline dotted}h1,h2,h3,h4,h5,h6{font-size:inherit;font-weight:inherit}a{color:inherit;-webkit-text-decoration:inherit;-webkit-text-decoration:inherit;-webkit-text-decoration:inherit;text-decoration:inherit}b,strong{font-weight:bolder}code,kbd,samp,pre{font-family:var(--default-mono-font-family,ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);font-feature-settings:var(--default-mono-font-feature-settings,normal);font-variation-settings:var(--default-mono-font-variation-settings,normal);font-size:1em}small{font-size:80%}sub,sup{vertical-align:baseline;font-size:75%;line-height:0;position:relative}sub{bottom:-.25em}sup{top:-.5em}table{text-indent:0;border-color:inherit;border-collapse:collapse}:-moz-focusring:where(:not(iframe)){outline:auto}progress{vertical-align:baseline}summary{display:list-item}ol,ul,menu{list-style:none}img,svg,video,canvas,audio,iframe,embed,object{vertical-align:middle;display:block}img,video{max-width:100%;height:auto}button,input,select,optgroup,textarea{font:inherit;font-feature-settings:inherit;font-variation-settings:inherit;letter-spacing:inherit;color:inherit;opacity:1;background-color:#0000;border-radius:0}::file-selector-button{font:inherit;font-feature-settings:inherit;font-variation-settings:inherit;letter-spacing:inherit;color:inherit;opacity:1;background-color:#0000;border-radius:0}:where(select:is([multiple],[size])) optgroup{font-weight:bolder}:where(select:is([multiple],[size])) optgroup option{padding-inline-start:20px}::file-selector-button{margin-inline-end:4px}::placeholder{opacity:1}@supports (not ((-webkit-appearance:-apple-pay-button))) or (contain-intrinsic-size:1px){::placeholder{color:currentColor}@supports (color:color-mix(in lab, red, red)){::placeholder{color:color-mix(in oklab, currentcolor 50%, transparent)}}}textarea{resize:vertical}::-webkit-search-decoration{-webkit-appearance:none}::-webkit-date-and-time-value{min-height:1lh;text-align:inherit}::-webkit-datetime-edit{display:inline-flex}::-webkit-datetime-edit-fields-wrapper{padding:0}::-webkit-datetime-edit{padding-block:0}::-webkit-datetime-edit-year-field{padding-block:0}::-webkit-datetime-edit-month-field{padding-block:0}::-webkit-datetime-edit-day-field{padding-block:0}::-webkit-datetime-edit-hour-field{padding-block:0}::-webkit-datetime-edit-minute-field{padding-block:0}::-webkit-datetime-edit-second-field{padding-block:0}::-webkit-datetime-edit-millisecond-field{padding-block:0}::-webkit-datetime-edit-meridiem-field{padding-block:0}::-webkit-calendar-picker-indicator{line-height:1}:-moz-ui-invalid{box-shadow:none}button,input:where([type=button],[type=reset],[type=submit]){appearance:button}::file-selector-button{appearance:button}::-webkit-inner-spin-button{height:auto}::-webkit-outer-spin-button{height:auto}[hidden]:where(:not([hidden=until-found])){display:none!important}}@layer components;@layer utilities{.visible{visibility:visible}.sr-only{clip-path:inset(50%);white-space:nowrap;border-width:0;width:1px;height:1px;margin:-1px;padding:0;position:absolute;overflow:hidden}.fixed{position:fixed}.sticky{position:sticky}.top-0{top:0}.bottom-4{bottom:calc(var(--spacing) * 4)}.bottom-\[calc\(1rem\+var\(--bulk\,0px\)\)\]{bottom:calc(1rem + var(--bulk,0px))}.bottom-\[calc\(1rem\+var\(--dock\,0px\)\)\]{bottom:calc(1rem + var(--dock,0px))}.left-1\/2{left:50%}.z-30{z-index:30}.z-40{z-index:40}.container{width:100%}@media (min-width:40rem){.container{max-width:40rem}}@media (min-width:48rem){.container{max-width:48rem}}@media (min-width:64rem){.container{max-width:64rem}}@media (min-width:80rem){.container{max-width:80rem}}@media (min-width:96rem){.container{max-width:96rem}}.m-auto{margin:auto}.mx-4{margin-inline:calc(var(--spacing) * 4)}.mx-auto{margin-inline:auto}.my-1{margin-block:var(--spacing)}.-mt-0\.5{margin-top:calc(var(--spacing) * -.5)}.mt-0\.5{margin-top:calc(var(--spacing) * .5)}.mt-1{margin-top:var(--spacing)}.mt-1\.5{margin-top:calc(var(--spacing) * 1.5)}.mt-2{margin-top:calc(var(--spacing) * 2)}.mr-0\.5{margin-right:calc(var(--spacing) * .5)}.mr-1\.5{margin-right:calc(var(--spacing) * 1.5)}.mr-auto{margin-right:auto}.-mb-px{margin-bottom:-1px}.mb-1{margin-bottom:var(--spacing)}.mb-3{margin-bottom:calc(var(--spacing) * 3)}.mb-4{margin-bottom:calc(var(--spacing) * 4)}.mb-6{margin-bottom:calc(var(--spacing) * 6)}.-ml-1{margin-left:calc(var(--spacing) * -1)}.ml-1{margin-left:var(--spacing)}.ml-1\.5{margin-left:calc(var(--spacing) * 1.5)}.ml-3{margin-left:calc(var(--spacing) * 3)}.ml-auto{margin-left:auto}.block{display:block}.flex{display:flex}.grid{display:grid}.hidden{display:none}.inline{display:inline}.inline-block{display:inline-block}.inline-flex{display:inline-flex}.table{display:table}.size-1\.5{width:calc(var(--spacing) * 1.5);height:calc(var(--spacing) * 1.5)}.size-2{width:calc(var(--spacing) * 2);height:calc(var(--spacing) * 2)}.size-3{width:calc(var(--spacing) * 3);height:calc(var(--spacing) * 3)}.size-4{width:calc(var(--spacing) * 4);height:calc(var(--spacing) * 4)}.size-8{width:calc(var(--spacing) * 8);height:calc(var(--spacing) * 8)}.h-1\.5{height:calc(var(--spacing) * 1.5)}.h-3{height:calc(var(--spacing) * 3)}.h-\[65vh\]{height:65vh}.h-\[min\(56rem\,92dvh\)\]{height:min(56rem,92dvh)}.h-full{height:100%}.max-h-40{max-height:calc(var(--spacing) * 40)}.max-h-48{max-height:calc(var(--spacing) * 48)}.max-h-\[65vh\]{max-height:65vh}.min-h-0{min-height:0}.min-h-11{min-height:calc(var(--spacing) * 11)}.min-h-40{min-height:calc(var(--spacing) * 40)}.min-h-screen{min-height:100vh}.w-1\.5{width:calc(var(--spacing) * 1.5)}.w-9{width:calc(var(--spacing) * 9)}.w-11{width:calc(var(--spacing) * 11)}.w-20{width:calc(var(--spacing) * 20)}.w-\[min\(26rem\,calc\(100vw-2rem\)\)\]{width:min(26rem,100vw - 2rem)}.w-\[min\(640px\,95vw\)\]{width:min(640px,95vw)}.w-\[min\(1100px\,95vw\)\]{width:min(1100px,95vw)}.w-fit{width:fit-content}.w-full{width:100%}.w-max{width:max-content}.max-w-7xl{max-width:var(--container-7xl)}.max-w-80{max-width:calc(var(--spacing) * 80)}.max-w-\[60ch\]{max-width:60ch}.max-w-\[70ch\]{max-width:70ch}.max-w-\[min\(28rem\,calc\(100vw-2rem\)\)\]{max-width:min(28rem,100vw - 2rem)}.max-w-\[min\(48rem\,calc\(100vw-2rem\)\)\]{max-width:min(48rem,100vw - 2rem)}.max-w-\[min\(64rem\,calc\(100vw-2rem\)\)\]{max-width:min(64rem,100vw - 2rem)}.min-w-0{min-width:0}.min-w-48{min-width:calc(var(--spacing) * 48)}.flex-1{flex:1}.shrink-0{flex-shrink:0}.basis-56{flex-basis:calc(var(--spacing) * 56)}.basis-full{flex-basis:100%}.-translate-x-1\/2{--tw-translate-x:calc(calc(1 / 2 * 100%) * -1);translate:var(--tw-translate-x) var(--tw-translate-y)}.animate-pulse{animation:var(--animate-pulse)}.cursor-not-allowed{cursor:not-allowed}.cursor-pointer{cursor:pointer}.resize{resize:both}.\[scrollbar-width\:none\]{scrollbar-width:none}.list-none{list-style-type:none}.grid-cols-\[auto_1fr\]{grid-template-columns:auto 1fr}.flex-col{flex-direction:column}.flex-wrap{flex-wrap:wrap}.place-items-center{place-items:center}.items-center{align-items:center}.items-start{align-items:flex-start}.justify-between{justify-content:space-between}.justify-end{justify-content:flex-end}.gap-0\.5{gap:calc(var(--spacing) * .5)}.gap-1{gap:var(--spacing)}.gap-1\.5{gap:calc(var(--spacing) * 1.5)}.gap-2{gap:calc(var(--spacing) * 2)}.gap-3{gap:calc(var(--spacing) * 3)}.gap-4{gap:calc(var(--spacing) * 4)}:where(.space-y-0\.5>:not(:last-child)){--tw-space-y-reverse:0;margin-block-start:calc(calc(var(--spacing) * .5) * var(--tw-space-y-reverse));margin-block-end:calc(calc(var(--spacing) * .5) * calc(1 - var(--tw-space-y-reverse)))}:where(.space-y-2>:not(:last-child)){--tw-space-y-reverse:0;margin-block-start:calc(calc(var(--spacing) * 2) * var(--tw-space-y-reverse));margin-block-end:calc(calc(var(--spacing) * 2) * calc(1 - var(--tw-space-y-reverse)))}:where(.space-y-4>:not(:last-child)){--tw-space-y-reverse:0;margin-block-start:calc(calc(var(--spacing) * 4) * var(--tw-space-y-reverse));margin-block-end:calc(calc(var(--spacing) * 4) * calc(1 - var(--tw-space-y-reverse)))}.gap-x-3{column-gap:calc(var(--spacing) * 3)}.gap-x-4{column-gap:calc(var(--spacing) * 4)}.gap-y-1{row-gap:var(--spacing)}.gap-y-1\.5{row-gap:calc(var(--spacing) * 1.5)}.gap-y-2{row-gap:calc(var(--spacing) * 2)}.gap-y-3{row-gap:calc(var(--spacing) * 3)}:where(.divide-x>:not(:last-child)){--tw-divide-x-reverse:0;border-inline-style:var(--tw-border-style);border-inline-start-width:calc(1px * var(--tw-divide-x-reverse));border-inline-end-width:calc(1px * calc(1 - var(--tw-divide-x-reverse)))}:where(.divide-y>:not(:last-child)){--tw-divide-y-reverse:0;border-bottom-style:var(--tw-border-style);border-top-style:var(--tw-border-style);border-top-width:calc(1px * var(--tw-divide-y-reverse));border-bottom-width:calc(1px * calc(1 - var(--tw-divide-y-reverse)))}:where(.divide-line>:not(:last-child)){border-color:var(--color-line)}:where(.divide-line\/70>:not(:last-child)){border-color:#22272db3}@supports (color:color-mix(in lab, red, red)){:where(.divide-line\/70>:not(:last-child)){border-color:color-mix(in oklab, var(--color-line) 70%, transparent)}}.truncate{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.overflow-auto{overflow:auto}.overflow-hidden{overflow:hidden}.overflow-x-auto{overflow-x:auto}.rounded{border-radius:.25rem}.rounded-\[1px\]{border-radius:1px}.rounded-full{border-radius:3.40282e38px}.rounded-lg{border-radius:var(--radius-lg)}.rounded-none{border-radius:0}.rounded-sm{border-radius:var(--radius-sm)}.border-t{border-top-style:var(--tw-border-style);border-top-width:1px}.border-b{border-bottom-style:var(--tw-border-style);border-bottom-width:1px}.border-b-2{border-bottom-style:var(--tw-border-style);border-bottom-width:2px}.border-accent\/50{border-color:#43d5dc80}@supports (color:color-mix(in lab, red, red)){.border-accent\/50{border-color:color-mix(in oklab, var(--color-accent) 50%, transparent)}}.border-line{border-color:var(--color-line)}.border-line-strong{border-color:var(--color-line-strong)}.border-line\/70{border-color:#22272db3}@supports (color:color-mix(in lab, red, red)){.border-line\/70{border-color:color-mix(in oklab, var(--color-line) 70%, transparent)}}.border-transparent{border-color:#0000}.border-warn\/40{border-color:#f0c63066}@supports (color:color-mix(in lab, red, red)){.border-warn\/40{border-color:color-mix(in oklab, var(--color-warn) 40%, transparent)}}.bg-accent{background-color:var(--color-accent)}.bg-accent\/10{background-color:#43d5dc1a}@supports (color:color-mix(in lab, red, red)){.bg-accent\/10{background-color:color-mix(in oklab, var(--color-accent) 10%, transparent)}}.bg-accent\/15{background-color:#43d5dc26}@supports (color:color-mix(in lab, red, red)){.bg-accent\/15{background-color:color-mix(in oklab, var(--color-accent) 15%, transparent)}}.bg-accent\/30{background-color:#43d5dc4d}@supports (color:color-mix(in lab, red, red)){.bg-accent\/30{background-color:color-mix(in oklab, var(--color-accent) 30%, transparent)}}.bg-bad{background-color:var(--color-bad)}.bg-bad\/10{background-color:#fb605c1a}@supports (color:color-mix(in lab, red, red)){.bg-bad\/10{background-color:color-mix(in oklab, var(--color-bad) 10%, transparent)}}.bg-black{background-color:var(--color-black)}.bg-canvas{background-color:var(--color-canvas)}.bg-danger{background-color:var(--color-danger)}.bg-dim{background-color:var(--color-dim)}.bg-fg{background-color:var(--color-fg)}.bg-line-strong{background-color:var(--color-line-strong)}.bg-ok{background-color:var(--color-ok)}.bg-ok\/40{background-color:#5ed47666}@supports (color:color-mix(in lab, red, red)){.bg-ok\/40{background-color:color-mix(in oklab, var(--color-ok) 40%, transparent)}}.bg-pause{background-color:var(--color-pause)}.bg-raised{background-color:var(--color-raised)}.bg-raised\/40{background-color:#13181e66}@supports (color:color-mix(in lab, red, red)){.bg-raised\/40{background-color:color-mix(in oklab, var(--color-raised) 40%, transparent)}}.bg-warn{background-color:var(--color-warn)}.bg-warn\/10{background-color:#f0c6301a}@supports (color:color-mix(in lab, red, red)){.bg-warn\/10{background-color:color-mix(in oklab, var(--color-warn) 10%, transparent)}}.bg-warn\/15{background-color:#f0c63026}@supports (color:color-mix(in lab, red, red)){.bg-warn\/15{background-color:color-mix(in oklab, var(--color-warn) 15%, transparent)}}.stroke-accent{stroke:var(--color-accent)}.p-0{padding:0}.p-1{padding:var(--spacing)}.p-2{padding:calc(var(--spacing) * 2)}.p-4{padding:calc(var(--spacing) * 4)}.px-1{padding-inline:var(--spacing)}.px-1\.5{padding-inline:calc(var(--spacing) * 1.5)}.px-2{padding-inline:calc(var(--spacing) * 2)}.px-2\.5{padding-inline:calc(var(--spacing) * 2.5)}.px-3{padding-inline:calc(var(--spacing) * 3)}.px-4{padding-inline:calc(var(--spacing) * 4)}.py-0\.5{padding-block:calc(var(--spacing) * .5)}.py-1{padding-block:var(--spacing)}.py-1\.5{padding-block:calc(var(--spacing) * 1.5)}.py-2{padding-block:calc(var(--spacing) * 2)}.py-2\.5{padding-block:calc(var(--spacing) * 2.5)}.py-3{padding-block:calc(var(--spacing) * 3)}.py-4{padding-block:calc(var(--spacing) * 4)}.py-16{padding-block:calc(var(--spacing) * 16)}.pt-3{padding-top:calc(var(--spacing) * 3)}.pt-4{padding-top:calc(var(--spacing) * 4)}.pt-5{padding-top:calc(var(--spacing) * 5)}.pt-6{padding-top:calc(var(--spacing) * 6)}.pr-3{padding-right:calc(var(--spacing) * 3)}.pr-4{padding-right:calc(var(--spacing) * 4)}.pr-6{padding-right:calc(var(--spacing) * 6)}.pb-2{padding-bottom:calc(var(--spacing) * 2)}.pb-2\.5{padding-bottom:calc(var(--spacing) * 2.5)}.pb-3{padding-bottom:calc(var(--spacing) * 3)}.pb-\[calc\(2rem\+var\(--dock\,0px\)\)\]{padding-bottom:calc(2rem + var(--dock,0px))}.pl-4{padding-left:calc(var(--spacing) * 4)}.text-center{text-align:center}.text-left{text-align:left}.align-middle{vertical-align:middle}.align-top{vertical-align:top}.font-mono{font-family:var(--font-mono)}.font-sans{font-family:var(--font-sans)}.text-2xl{font-size:var(--text-2xl);line-height:var(--tw-leading,var(--text-2xl--line-height))}.text-data{font-size:var(--text-data);line-height:var(--tw-leading,var(--text-data--line-height))}.text-group{font-size:var(--text-group);line-height:var(--tw-leading,var(--text-group--line-height))}.text-lg{font-size:var(--text-lg);line-height:var(--tw-leading,var(--text-lg--line-height))}.text-sm{font-size:var(--text-sm);line-height:var(--tw-leading,var(--text-sm--line-height))}.text-xs{font-size:var(--text-xs);line-height:var(--tw-leading,var(--text-xs--line-height))}.text-\[0px\]{font-size:0}.text-\[11px\]{font-size:11px}.leading-5{--tw-leading:calc(var(--spacing) * 5);line-height:calc(var(--spacing) * 5)}.leading-relaxed{--tw-leading:var(--leading-relaxed);line-height:var(--leading-relaxed)}.font-medium{--tw-font-weight:var(--font-weight-medium);font-weight:var(--font-weight-medium)}.font-normal{--tw-font-weight:var(--font-weight-normal);font-weight:var(--font-weight-normal)}.font-semibold{--tw-font-weight:var(--font-weight-semibold);font-weight:var(--font-weight-semibold)}.tracking-tight{--tw-tracking:var(--tracking-tight);letter-spacing:var(--tracking-tight)}.text-balance{text-wrap:balance}.\[overflow-wrap\:anywhere\]{overflow-wrap:anywhere}.whitespace-nowrap{white-space:nowrap}.whitespace-pre-wrap{white-space:pre-wrap}.text-accent-fg{color:var(--color-accent-fg)}.text-bad-fg{color:var(--color-bad-fg)}.text-bad-soft{color:var(--color-bad-soft)}.text-bad-soft\/80{color:#f7cbcacc}@supports (color:color-mix(in lab, red, red)){.text-bad-soft\/80{color:color-mix(in oklab, var(--color-bad-soft) 80%, transparent)}}.text-dim{color:var(--color-dim)}.text-fg{color:var(--color-fg)}.text-fg-soft{color:var(--color-fg-soft)}.text-fg-strong{color:var(--color-fg-strong)}.text-muted{color:var(--color-muted)}.text-ok-fg{color:var(--color-ok-fg)}.text-ok-soft{color:var(--color-ok-soft)}.text-pause-fg{color:var(--color-pause-fg)}.text-svc-1{color:var(--color-svc-1)}.text-svc-2{color:var(--color-svc-2)}.text-svc-3{color:var(--color-svc-3)}.text-svc-4{color:var(--color-svc-4)}.text-warn-fg{color:var(--color-warn-fg)}.text-warn-soft{color:var(--color-warn-soft)}.text-warn-strong{color:var(--color-warn-strong)}.text-white{color:var(--color-white)}.normal-case{text-transform:none}.uppercase{text-transform:uppercase}.tabular-nums{--tw-numeric-spacing:tabular-nums;font-variant-numeric:var(--tw-ordinal,) var(--tw-slashed-zero,) var(--tw-numeric-figure,) var(--tw-numeric-spacing,) var(--tw-numeric-fraction,)}.underline{text-decoration-line:underline}.underline-offset-4{text-underline-offset:4px}.antialiased{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}.accent-accent{accent-color:var(--color-accent)}.accent-danger{accent-color:var(--color-danger)}.opacity-40{opacity:.4}.opacity-70{opacity:.7}.shadow-lg{--tw-shadow:0 10px 15px -3px var(--tw-shadow-color,#0000001a), 0 4px 6px -4px var(--tw-shadow-color,#0000001a);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}.ring-1{--tw-ring-shadow:var(--tw-ring-inset,) 0 0 0 calc(1px + var(--tw-ring-offset-width)) var(--tw-ring-color,currentcolor);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}.shadow-black\/30{--tw-shadow-color:#0000004d}@supports (color:color-mix(in lab, red, red)){.shadow-black\/30{--tw-shadow-color:color-mix(in oklab, color-mix(in oklab, var(--color-black) 30%, transparent) var(--tw-shadow-alpha), transparent)}}.shadow-black\/40{--tw-shadow-color:#0006}@supports (color:color-mix(in lab, red, red)){.shadow-black\/40{--tw-shadow-color:color-mix(in oklab, color-mix(in oklab, var(--color-black) 40%, transparent) var(--tw-shadow-alpha), transparent)}}.ring-accent\/40{--tw-ring-color:#43d5dc66}@supports (color:color-mix(in lab, red, red)){.ring-accent\/40{--tw-ring-color:color-mix(in oklab, var(--color-accent) 40%, transparent)}}.ring-bad\/40{--tw-ring-color:#fb605c66}@supports (color:color-mix(in lab, red, red)){.ring-bad\/40{--tw-ring-color:color-mix(in oklab, var(--color-bad) 40%, transparent)}}.ring-bad\/50{--tw-ring-color:#fb605c80}@supports (color:color-mix(in lab, red, red)){.ring-bad\/50{--tw-ring-color:color-mix(in oklab, var(--color-bad) 50%, transparent)}}.ring-bad\/60{--tw-ring-color:#fb605c99}@supports (color:color-mix(in lab, red, red)){.ring-bad\/60{--tw-ring-color:color-mix(in oklab, var(--color-bad) 60%, transparent)}}.ring-current{--tw-ring-color:currentcolor}.ring-danger{--tw-ring-color:var(--color-danger)}.ring-dim{--tw-ring-color:var(--color-dim)}.ring-line{--tw-ring-color:var(--color-line)}.ring-line-strong{--tw-ring-color:var(--color-line-strong)}.ring-line-strong\/80{--tw-ring-color:#394049cc}@supports (color:color-mix(in lab, red, red)){.ring-line-strong\/80{--tw-ring-color:color-mix(in oklab, var(--color-line-strong) 80%, transparent)}}.ring-ok\/50{--tw-ring-color:#5ed47680}@supports (color:color-mix(in lab, red, red)){.ring-ok\/50{--tw-ring-color:color-mix(in oklab, var(--color-ok) 50%, transparent)}}.ring-warn\/30{--tw-ring-color:#f0c6304d}@supports (color:color-mix(in lab, red, red)){.ring-warn\/30{--tw-ring-color:color-mix(in oklab, var(--color-warn) 30%, transparent)}}.ring-warn\/60{--tw-ring-color:#f0c63099}@supports (color:color-mix(in lab, red, red)){.ring-warn\/60{--tw-ring-color:color-mix(in oklab, var(--color-warn) 60%, transparent)}}.filter{filter:var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,)}.transition-\[background-color\]{transition-property:background-color;transition-timing-function:var(--tw-ease,var(--default-transition-timing-function));transition-duration:var(--tw-duration,var(--default-transition-duration))}.transition-opacity{transition-property:opacity;transition-timing-function:var(--tw-ease,var(--default-transition-timing-function));transition-duration:var(--tw-duration,var(--default-transition-duration))}.\[contain\:inline-size\]{contain:inline-size}.\[direction\:rtl\]{direction:rtl}.group-has-checked\:block:is(:where(.group):has(:checked) *){display:block}.group-aria-pressed\:inline-block:is(:where(.group)[aria-pressed=true] *){display:inline-block}.selection\:bg-accent\/30 ::selection{background-color:#43d5dc4d}@supports (color:color-mix(in lab, red, red)){.selection\:bg-accent\/30 ::selection{background-color:color-mix(in oklab, var(--color-accent) 30%, transparent)}}.selection\:bg-accent\/30::selection{background-color:#43d5dc4d}@supports (color:color-mix(in lab, red, red)){.selection\:bg-accent\/30::selection{background-color:color-mix(in oklab, var(--color-accent) 30%, transparent)}}.placeholder\:font-sans::placeholder{font-family:var(--font-sans)}.placeholder\:text-muted::placeholder{color:var(--color-muted)}.backdrop\:bg-black\/40::backdrop{background-color:#0006}@supports (color:color-mix(in lab, red, red)){.backdrop\:bg-black\/40::backdrop{background-color:color-mix(in oklab, var(--color-black) 40%, transparent)}}.backdrop\:bg-black\/70::backdrop{background-color:#000000b3}@supports (color:color-mix(in lab, red, red)){.backdrop\:bg-black\/70::backdrop{background-color:color-mix(in oklab, var(--color-black) 70%, transparent)}}.before\:text-xs:before{content:var(--tw-content);font-size:var(--text-xs);line-height:var(--tw-leading,var(--text-xs--line-height))}.before\:content-\[attr\(data-mark\)\]:before{--tw-content:attr(data-mark);content:var(--tw-content)}.before\:content-\[attr\(data-t\)\]:before{--tw-content:attr(data-t);content:var(--tw-content)}.open\:flex:is([open],:popover-open,:open){display:flex}.empty\:hidden:empty{display:none}.empty\:before\:font-sans:empty:before{content:var(--tw-content);font-family:var(--font-sans)}.empty\:before\:text-muted:empty:before{content:var(--tw-content);color:var(--color-muted)}.empty\:before\:content-\[attr\(data-empty\)\]:empty:before{--tw-content:attr(data-empty);content:var(--tw-content)}@media (hover:hover){.hover\:bg-accent\/10:hover{background-color:#43d5dc1a}@supports (color:color-mix(in lab, red, red)){.hover\:bg-accent\/10:hover{background-color:color-mix(in oklab, var(--color-accent) 10%, transparent)}}.hover\:bg-accent\/20:hover{background-color:#43d5dc33}@supports (color:color-mix(in lab, red, red)){.hover\:bg-accent\/20:hover{background-color:color-mix(in oklab, var(--color-accent) 20%, transparent)}}.hover\:bg-accent\/25:hover{background-color:#43d5dc40}@supports (color:color-mix(in lab, red, red)){.hover\:bg-accent\/25:hover{background-color:color-mix(in oklab, var(--color-accent) 25%, transparent)}}.hover\:bg-bad\/10:hover{background-color:#fb605c1a}@supports (color:color-mix(in lab, red, red)){.hover\:bg-bad\/10:hover{background-color:color-mix(in oklab, var(--color-bad) 10%, transparent)}}.hover\:bg-danger-hover:hover{background-color:var(--color-danger-hover)}.hover\:bg-hover:hover{background-color:var(--color-hover)}.hover\:bg-ok\/10:hover{background-color:#5ed4761a}@supports (color:color-mix(in lab, red, red)){.hover\:bg-ok\/10:hover{background-color:color-mix(in oklab, var(--color-ok) 10%, transparent)}}.hover\:bg-raised\/70:hover{background-color:#13181eb3}@supports (color:color-mix(in lab, red, red)){.hover\:bg-raised\/70:hover{background-color:color-mix(in oklab, var(--color-raised) 70%, transparent)}}.hover\:bg-transparent:hover{background-color:#0000}.hover\:text-accent-soft:hover{color:var(--color-accent-soft)}.hover\:text-fg:hover{color:var(--color-fg)}.hover\:text-fg-strong:hover{color:var(--color-fg-strong)}.hover\:underline:hover{text-decoration-line:underline}}.focus\:not-sr-only:focus{clip-path:none;white-space:normal;width:auto;height:auto;margin:0;padding:0;position:static;overflow:visible}.focus\:fixed:focus{position:fixed}.focus\:top-3:focus{top:calc(var(--spacing) * 3)}.focus\:left-3:focus{left:calc(var(--spacing) * 3)}.focus\:z-50:focus{z-index:50}.focus\:rounded:focus{border-radius:.25rem}.focus\:bg-fg-strong:focus{background-color:var(--color-fg-strong)}.focus\:px-3:focus{padding-inline:calc(var(--spacing) * 3)}.focus\:py-2:focus{padding-block:calc(var(--spacing) * 2)}.focus\:text-sm:focus{font-size:var(--text-sm);line-height:var(--tw-leading,var(--text-sm--line-height))}.focus\:text-canvas:focus{color:var(--color-canvas)}.focus\:ring-accent:focus{--tw-ring-color:var(--color-accent)}.focus\:outline-none:focus{--tw-outline-style:none;outline-style:none}.focus-visible\:outline-2:focus-visible{outline-style:var(--tw-outline-style);outline-width:2px}.focus-visible\:-outline-offset-2:focus-visible{outline-offset:calc(2px * -1)}.focus-visible\:outline-offset-2:focus-visible{outline-offset:2px}.focus-visible\:outline-accent:focus-visible{outline-color:var(--color-accent)}.disabled\:cursor-default:disabled{cursor:default}.aria-disabled\:cursor-wait[aria-disabled=true]{cursor:wait}.aria-disabled\:opacity-40[aria-disabled=true]{opacity:.4}.aria-disabled\:opacity-60[aria-disabled=true]{opacity:.6}.aria-invalid\:ring-bad[aria-invalid=true],.aria-invalid\:focus\:ring-bad[aria-invalid=true]:focus{--tw-ring-color:var(--color-bad)}.aria-pressed\:bg-accent\/15[aria-pressed=true]{background-color:#43d5dc26}@supports (color:color-mix(in lab, red, red)){.aria-pressed\:bg-accent\/15[aria-pressed=true]{background-color:color-mix(in oklab, var(--color-accent) 15%, transparent)}}.aria-pressed\:bg-fg-strong[aria-pressed=true]{background-color:var(--color-fg-strong)}.aria-pressed\:text-accent-soft[aria-pressed=true]{color:var(--color-accent-soft)}.aria-pressed\:text-canvas[aria-pressed=true]{color:var(--color-canvas)}.aria-pressed\:ring-accent\/40[aria-pressed=true]{--tw-ring-color:#43d5dc66}@supports (color:color-mix(in lab, red, red)){.aria-pressed\:ring-accent\/40[aria-pressed=true]{--tw-ring-color:color-mix(in oklab, var(--color-accent) 40%, transparent)}}.aria-selected\:border-accent[aria-selected=true]{border-color:var(--color-accent)}.aria-selected\:text-fg-strong[aria-selected=true]{color:var(--color-fg-strong)}.data-done\:min-h-0[data-done]{min-height:0}.data-done\:cursor-default[data-done]{cursor:default}.data-done\:px-0[data-done]{padding-inline:0}.data-done\:text-muted[data-done]{color:var(--color-muted)}.data-done\:opacity-100[data-done]{opacity:1}.data-done\:ring-0[data-done]{--tw-ring-shadow:var(--tw-ring-inset,) 0 0 0 calc(0px + var(--tw-ring-offset-width)) var(--tw-ring-color,currentcolor);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}@media (prefers-reduced-motion:reduce){.motion-reduce\:animate-none{animation:none}.motion-reduce\:transition-none{transition-property:none}}@media not all and (min-width:80rem){.max-xl\:block{display:block}.max-xl\:hidden{display:none}}@media not all and (min-width:40rem){.max-sm\:order-2{order:2}.max-sm\:order-3{order:3}.max-sm\:order-last{order:9999}.max-sm\:mb-4{margin-bottom:calc(var(--spacing) * 4)}.max-sm\:block{display:block}.max-sm\:hidden{display:none}.max-sm\:h-dvh{height:100dvh}.max-sm\:max-h-none{max-height:none}.max-sm\:w-full{width:100%}.max-sm\:w-screen{width:100vw}.max-sm\:max-w-full{max-width:100%}.max-sm\:max-w-none{max-width:none}.max-sm\:min-w-24{min-width:calc(var(--spacing) * 24)}.max-sm\:basis-full{flex-basis:100%}.max-sm\:justify-start{justify-content:flex-start}:where(.max-sm\:space-y-1\.5>:not(:last-child)){--tw-space-y-reverse:0;margin-block-start:calc(calc(var(--spacing) * 1.5) * var(--tw-space-y-reverse));margin-block-end:calc(calc(var(--spacing) * 1.5) * calc(1 - var(--tw-space-y-reverse)))}.max-sm\:overflow-x-auto{overflow-x:auto}.max-sm\:rounded-none{border-radius:0}.max-sm\:p-0{padding:0}.max-sm\:px-2{padding-inline:calc(var(--spacing) * 2)}.max-sm\:px-4{padding-inline:calc(var(--spacing) * 4)}.max-sm\:py-3{padding-block:calc(var(--spacing) * 3)}.max-sm\:py-4{padding-block:calc(var(--spacing) * 4)}.max-sm\:pt-2{padding-top:calc(var(--spacing) * 2)}.max-sm\:pt-3{padding-top:calc(var(--spacing) * 3)}.max-sm\:pt-4{padding-top:calc(var(--spacing) * 4)}.max-sm\:pl-12{padding-left:calc(var(--spacing) * 12)}.max-sm\:text-xl{font-size:var(--text-xl);line-height:var(--tw-leading,var(--text-xl--line-height))}.max-sm\:ring-0{--tw-ring-shadow:var(--tw-ring-inset,) 0 0 0 calc(0px + var(--tw-ring-offset-width)) var(--tw-ring-color,currentcolor);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}.max-sm\:\[contain\:none\]{contain:none}}@media (min-width:40rem){.sm\:sr-only{clip-path:inset(50%);white-space:nowrap;border-width:0;width:1px;height:1px;margin:-1px;padding:0;position:absolute;overflow:hidden}.sm\:ml-auto{margin-left:auto}.sm\:hidden{display:none}.sm\:w-20{width:calc(var(--spacing) * 20)}.sm\:w-72{width:calc(var(--spacing) * 72)}.sm\:max-w-72{max-width:calc(var(--spacing) * 72)}.sm\:max-w-\[28ch\]{max-width:28ch}.sm\:min-w-\[20ch\]{min-width:20ch}.sm\:grid-cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}.sm\:truncate{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.sm\:text-left{text-align:left}.sm\:\[direction\:rtl\]{direction:rtl}}@media (min-width:80rem){.xl\:w-40{width:calc(var(--spacing) * 40)}.xl\:w-44{width:calc(var(--spacing) * 44)}.xl\:w-\[17\.5rem\]{width:17.5rem}.xl\:w-\[17rem\]{width:17rem}.xl\:table-fixed{table-layout:fixed}}@media (pointer:coarse){.coarse\:mt-0{margin-top:0}.coarse\:mt-2{margin-top:calc(var(--spacing) * 2)}.coarse\:-ml-2{margin-left:calc(var(--spacing) * -2)}.coarse\:hidden{display:none}.coarse\:size-6{width:calc(var(--spacing) * 6);height:calc(var(--spacing) * 6)}.coarse\:size-11{width:calc(var(--spacing) * 11);height:calc(var(--spacing) * 11)}.coarse\:min-h-11{min-height:calc(var(--spacing) * 11)}.coarse\:w-11{width:calc(var(--spacing) * 11)}.coarse\:gap-2{gap:calc(var(--spacing) * 2)}.coarse\:gap-x-2{column-gap:calc(var(--spacing) * 2)}.coarse\:px-2{padding-inline:calc(var(--spacing) * 2)}.coarse\:px-4{padding-inline:calc(var(--spacing) * 4)}.coarse\:py-2{padding-block:calc(var(--spacing) * 2)}.coarse\:py-3{padding-block:calc(var(--spacing) * 3)}.coarse\:py-3\.5{padding-block:calc(var(--spacing) * 3.5)}.coarse\:text-sm{font-size:var(--text-sm);line-height:var(--tw-leading,var(--text-sm--line-height))}}@media not all and (min-width:40rem){@media (pointer:coarse){.max-sm\:coarse\:pl-14{padding-left:calc(var(--spacing) * 14)}}}.\[\&_kbd\]\:rounded kbd{border-radius:.25rem}.\[\&_kbd\]\:px-1\.5 kbd{padding-inline:calc(var(--spacing) * 1.5)}.\[\&_kbd\]\:font-mono kbd{font-family:var(--font-mono)}.\[\&_kbd\]\:text-xs kbd{font-size:var(--text-xs);line-height:var(--tw-leading,var(--text-xs--line-height))}.\[\&_kbd\]\:text-fg-strong kbd{color:var(--color-fg-strong)}.\[\&_kbd\]\:ring-1 kbd{--tw-ring-shadow:var(--tw-ring-inset,) 0 0 0 calc(1px + var(--tw-ring-offset-width)) var(--tw-ring-color,currentcolor);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}.\[\&_kbd\]\:ring-line-strong kbd{--tw-ring-color:var(--color-line-strong)}.\[\&\:\:-webkit-details-marker\]\:hidden::-webkit-details-marker{display:none}}@media (prefers-color-scheme:light){:root{--color-canvas:oklch(98.6% .003 255);--color-raised:#fff;--color-hover:oklch(96% .006 255);--color-line:oklch(91.5% .008 255);--color-line-strong:oklch(85% .012 255);--color-dim:oklch(64% .018 255);--color-muted:oklch(47% .02 255);--color-fg-soft:oklch(38% .018 255);--color-fg:oklch(28% .016 255);--color-fg-strong:oklch(17% .012 255);--color-ok:oklch(62% .17 148);--color-ok-fg:oklch(47% .13 148);--color-ok-soft:oklch(40% .11 148);--color-warn:oklch(65% .135 68);--color-warn-fg:oklch(52% .105 70);--color-warn-soft:oklch(45% .09 65);--color-warn-strong:oklch(38% .09 60);--color-bad:oklch(60% .22 25);--color-bad-fg:oklch(50% .2 27);--color-bad-soft:oklch(43% .17 27);--color-danger:oklch(50% .2 27);--color-danger-hover:oklch(44% .18 27);--color-pause:oklch(58% .22 330);--color-pause-fg:oklch(48% .2 330);--color-accent:oklch(55% .09 210);--color-accent-fg:oklch(47% .08 215);--color-accent-soft:oklch(40% .07 215);--color-svc-1:oklch(50% .13 50);--color-svc-2:oklch(50% .14 355);--color-svc-3:oklch(48% .12 250);--color-svc-4:oklch(47% .18 295)}}:root{scrollbar-color:var(--color-line-strong) transparent;caret-color:var(--color-accent)}html{scrollbar-gutter:stable}#tabs{animation:linear both tabs-more;animation-timeline:scroll(self inline)}@keyframes tabs-more{0%,95%{-webkit-mask-image:linear-gradient(90deg,#000 calc(100% - 2.5rem),#0000);mask-image:linear-gradient(90deg,#000 calc(100% - 2.5rem),#0000)}to{-webkit-mask-image:none;mask-image:none}}@property --tw-translate-x{syntax:"*";inherits:false;initial-value:0}@property --tw-translate-y{syntax:"*";inherits:false;initial-value:0}@property --tw-translate-z{syntax:"*";inherits:false;initial-value:0}@property --tw-space-y-reverse{syntax:"*";inherits:false;initial-value:0}@property --tw-divide-x-reverse{syntax:"*";inherits:false;initial-value:0}@property --tw-border-style{syntax:"*";inherits:false;initial-value:solid}@property --tw-divide-y-reverse{syntax:"*";inherits:false;initial-value:0}@property --tw-leading{syntax:"*";inherits:false}@property --tw-font-weight{syntax:"*";inherits:false}@property --tw-tracking{syntax:"*";inherits:false}@property --tw-ordinal{syntax:"*";inherits:false}@property --tw-slashed-zero{syntax:"*";inherits:false}@property --tw-numeric-figure{syntax:"*";inherits:false}@property --tw-numeric-spacing{syntax:"*";inherits:false}@property --tw-numeric-fraction{syntax:"*";inherits:false}@property --tw-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-shadow-color{syntax:"*";inherits:false}@property --tw-shadow-alpha{syntax:"<percentage>";inherits:false;initial-value:100%}@property --tw-inset-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-inset-shadow-color{syntax:"*";inherits:false}@property --tw-inset-shadow-alpha{syntax:"<percentage>";inherits:false;initial-value:100%}@property --tw-ring-color{syntax:"*";inherits:false}@property --tw-ring-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-inset-ring-color{syntax:"*";inherits:false}@property --tw-inset-ring-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-ring-inset{syntax:"*";inherits:false}@property --tw-ring-offset-width{syntax:"<length>";inherits:false;initial-value:0}@property --tw-ring-offset-color{syntax:"*";inherits:false;initial-value:#fff}@property --tw-ring-offset-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-blur{syntax:"*";inherits:false}@property --tw-brightness{syntax:"*";inherits:false}@property --tw-contrast{syntax:"*";inherits:false}@property --tw-grayscale{syntax:"*";inherits:false}@property --tw-hue-rotate{syntax:"*";inherits:false}@property --tw-invert{syntax:"*";inherits:false}@property --tw-opacity{syntax:"*";inherits:false}@property --tw-saturate{syntax:"*";inherits:false}@property --tw-sepia{syntax:"*";inherits:false}@property --tw-drop-shadow{syntax:"*";inherits:false}@property --tw-drop-shadow-color{syntax:"*";inherits:false}@property --tw-drop-shadow-alpha{syntax:"<percentage>";inherits:false;initial-value:100%}@property --tw-drop-shadow-size{syntax:"*";inherits:false}@property --tw-content{syntax:"*";inherits:false;initial-value:""}@property --tw-outline-style{syntax:"*";inherits:false;initial-value:solid}@keyframes pulse{50%{opacity:.5}}"""
+@layer properties{@supports (((-webkit-hyphens:none)) and (not (margin-trim:inline))) or ((-moz-orient:inline) and (not (color:rgb(from red r g b)))){*,:before,:after,::backdrop{--tw-translate-x:0;--tw-translate-y:0;--tw-translate-z:0;--tw-space-y-reverse:0;--tw-divide-x-reverse:0;--tw-border-style:solid;--tw-divide-y-reverse:0;--tw-leading:initial;--tw-font-weight:initial;--tw-tracking:initial;--tw-ordinal:initial;--tw-slashed-zero:initial;--tw-numeric-figure:initial;--tw-numeric-spacing:initial;--tw-numeric-fraction:initial;--tw-shadow:0 0 #0000;--tw-shadow-color:initial;--tw-shadow-alpha:100%;--tw-inset-shadow:0 0 #0000;--tw-inset-shadow-color:initial;--tw-inset-shadow-alpha:100%;--tw-ring-color:initial;--tw-ring-shadow:0 0 #0000;--tw-inset-ring-color:initial;--tw-inset-ring-shadow:0 0 #0000;--tw-ring-inset:initial;--tw-ring-offset-width:0px;--tw-ring-offset-color:#fff;--tw-ring-offset-shadow:0 0 #0000;--tw-blur:initial;--tw-brightness:initial;--tw-contrast:initial;--tw-grayscale:initial;--tw-hue-rotate:initial;--tw-invert:initial;--tw-opacity:initial;--tw-saturate:initial;--tw-sepia:initial;--tw-drop-shadow:initial;--tw-drop-shadow-color:initial;--tw-drop-shadow-alpha:100%;--tw-drop-shadow-size:initial;--tw-content:"";--tw-outline-style:solid}}}@layer theme{:root,:host{--font-sans:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";--font-mono:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;--color-black:#000;--color-white:#fff;--spacing:.25rem;--container-7xl:80rem;--text-xs:.75rem;--text-xs--line-height:calc(1 / .75);--text-sm:.875rem;--text-sm--line-height:calc(1.25 / .875);--text-lg:1.125rem;--text-lg--line-height:calc(1.75 / 1.125);--text-xl:1.25rem;--text-xl--line-height:calc(1.75 / 1.25);--text-2xl:1.5rem;--text-2xl--line-height:calc(2 / 1.5);--font-weight-normal:400;--font-weight-medium:500;--font-weight-semibold:600;--tracking-tight:-.025em;--leading-relaxed:1.625;--radius-sm:.25rem;--radius-lg:.5rem;--animate-pulse:pulse 2s cubic-bezier(.4, 0, .6, 1) infinite;--default-transition-duration:.15s;--default-transition-timing-function:cubic-bezier(.4, 0, .2, 1);--default-font-family:var(--font-sans);--default-mono-font-family:var(--font-mono);--color-canvas:oklch(16% .012 255);--color-raised:oklch(20.5% .014 255);--color-hover:oklch(26% .016 255);--color-line:oklch(27% .014 255);--color-line-strong:oklch(37% .018 255);--color-dim:oklch(58% .02 255);--color-muted:oklch(72% .02 255);--color-fg-soft:oklch(86% .012 255);--color-fg:oklch(92% .008 255);--color-fg-strong:oklch(97% .004 255);--color-ok:oklch(78% .17 148);--color-ok-fg:oklch(85% .14 148);--color-ok-soft:oklch(91% .08 148);--color-warn:oklch(84% .16 92);--color-warn-fg:oklch(88% .14 95);--color-warn-soft:oklch(92.5% .1 97);--color-warn-strong:oklch(96% .05 97);--color-bad:oklch(69% .19 25);--color-bad-fg:oklch(79% .11 22);--color-bad-soft:oklch(88% .05 20);--color-danger:oklch(52% .2 27);--color-danger-hover:oklch(46% .18 27);--color-pause:oklch(72% .17 330);--color-pause-fg:oklch(82% .11 330);--color-accent:oklch(80% .12 200);--color-accent-fg:oklch(86% .09 200);--color-accent-soft:oklch(92% .05 200);--color-svc-1:oklch(82% .11 55);--color-svc-2:oklch(82% .09 355);--color-svc-3:oklch(78% .11 250);--color-svc-4:oklch(78% .11 295);--text-data:.8125rem;--text-data--line-height:1.25rem;--text-group:1rem;--text-group--line-height:1.5rem}}@layer base{*,:after,:before,::backdrop{box-sizing:border-box;border:0 solid;margin:0;padding:0}::file-selector-button{box-sizing:border-box;border:0 solid;margin:0;padding:0}html,:host{-webkit-text-size-adjust:100%;tab-size:4;line-height:1.5;font-family:var(--default-font-family,-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji");font-feature-settings:var(--default-font-feature-settings,normal);font-variation-settings:var(--default-font-variation-settings,normal);-webkit-tap-highlight-color:transparent}hr{height:0;color:inherit;border-top-width:1px}abbr:where([title]){-webkit-text-decoration:underline dotted;text-decoration:underline dotted}h1,h2,h3,h4,h5,h6{font-size:inherit;font-weight:inherit}a{color:inherit;-webkit-text-decoration:inherit;-webkit-text-decoration:inherit;-webkit-text-decoration:inherit;text-decoration:inherit}b,strong{font-weight:bolder}code,kbd,samp,pre{font-family:var(--default-mono-font-family,ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);font-feature-settings:var(--default-mono-font-feature-settings,normal);font-variation-settings:var(--default-mono-font-variation-settings,normal);font-size:1em}small{font-size:80%}sub,sup{vertical-align:baseline;font-size:75%;line-height:0;position:relative}sub{bottom:-.25em}sup{top:-.5em}table{text-indent:0;border-color:inherit;border-collapse:collapse}:-moz-focusring:where(:not(iframe)){outline:auto}progress{vertical-align:baseline}summary{display:list-item}ol,ul,menu{list-style:none}img,svg,video,canvas,audio,iframe,embed,object{vertical-align:middle;display:block}img,video{max-width:100%;height:auto}button,input,select,optgroup,textarea{font:inherit;font-feature-settings:inherit;font-variation-settings:inherit;letter-spacing:inherit;color:inherit;opacity:1;background-color:#0000;border-radius:0}::file-selector-button{font:inherit;font-feature-settings:inherit;font-variation-settings:inherit;letter-spacing:inherit;color:inherit;opacity:1;background-color:#0000;border-radius:0}:where(select:is([multiple],[size])) optgroup{font-weight:bolder}:where(select:is([multiple],[size])) optgroup option{padding-inline-start:20px}::file-selector-button{margin-inline-end:4px}::placeholder{opacity:1}@supports (not ((-webkit-appearance:-apple-pay-button))) or (contain-intrinsic-size:1px){::placeholder{color:currentColor}@supports (color:color-mix(in lab, red, red)){::placeholder{color:color-mix(in oklab, currentcolor 50%, transparent)}}}textarea{resize:vertical}::-webkit-search-decoration{-webkit-appearance:none}::-webkit-date-and-time-value{min-height:1lh;text-align:inherit}::-webkit-datetime-edit{display:inline-flex}::-webkit-datetime-edit-fields-wrapper{padding:0}::-webkit-datetime-edit{padding-block:0}::-webkit-datetime-edit-year-field{padding-block:0}::-webkit-datetime-edit-month-field{padding-block:0}::-webkit-datetime-edit-day-field{padding-block:0}::-webkit-datetime-edit-hour-field{padding-block:0}::-webkit-datetime-edit-minute-field{padding-block:0}::-webkit-datetime-edit-second-field{padding-block:0}::-webkit-datetime-edit-millisecond-field{padding-block:0}::-webkit-datetime-edit-meridiem-field{padding-block:0}::-webkit-calendar-picker-indicator{line-height:1}:-moz-ui-invalid{box-shadow:none}button,input:where([type=button],[type=reset],[type=submit]){appearance:button}::file-selector-button{appearance:button}::-webkit-inner-spin-button{height:auto}::-webkit-outer-spin-button{height:auto}[hidden]:where(:not([hidden=until-found])){display:none!important}}@layer components;@layer utilities{.visible{visibility:visible}.sr-only{clip-path:inset(50%);white-space:nowrap;border-width:0;width:1px;height:1px;margin:-1px;padding:0;position:absolute;overflow:hidden}.absolute{position:absolute}.fixed{position:fixed}.sticky{position:sticky}.top-0{top:0}.bottom-4{bottom:calc(var(--spacing) * 4)}.bottom-\[calc\(1rem\+var\(--bulk\,0px\)\)\]{bottom:calc(1rem + var(--bulk,0px))}.bottom-\[calc\(1rem\+var\(--dock\,0px\)\)\]{bottom:calc(1rem + var(--dock,0px))}.left-1\/2{left:50%}.z-10{z-index:10}.z-30{z-index:30}.z-40{z-index:40}.container{width:100%}@media (min-width:40rem){.container{max-width:40rem}}@media (min-width:48rem){.container{max-width:48rem}}@media (min-width:64rem){.container{max-width:64rem}}@media (min-width:80rem){.container{max-width:80rem}}@media (min-width:96rem){.container{max-width:96rem}}.m-auto{margin:auto}.-mx-1{margin-inline:calc(var(--spacing) * -1)}.mx-4{margin-inline:calc(var(--spacing) * 4)}.mx-auto{margin-inline:auto}.my-1{margin-block:var(--spacing)}.-mt-0\.5{margin-top:calc(var(--spacing) * -.5)}.mt-0\.5{margin-top:calc(var(--spacing) * .5)}.mt-1{margin-top:var(--spacing)}.mt-1\.5{margin-top:calc(var(--spacing) * 1.5)}.mt-2{margin-top:calc(var(--spacing) * 2)}.mr-0\.5{margin-right:calc(var(--spacing) * .5)}.mr-1\.5{margin-right:calc(var(--spacing) * 1.5)}.mr-auto{margin-right:auto}.-mb-px{margin-bottom:-1px}.mb-1{margin-bottom:var(--spacing)}.mb-3{margin-bottom:calc(var(--spacing) * 3)}.mb-4{margin-bottom:calc(var(--spacing) * 4)}.mb-6{margin-bottom:calc(var(--spacing) * 6)}.-ml-1{margin-left:calc(var(--spacing) * -1)}.ml-1{margin-left:var(--spacing)}.ml-1\.5{margin-left:calc(var(--spacing) * 1.5)}.ml-3{margin-left:calc(var(--spacing) * 3)}.ml-6{margin-left:calc(var(--spacing) * 6)}.ml-auto{margin-left:auto}.block{display:block}.flex{display:flex}.grid{display:grid}.hidden{display:none}.inline{display:inline}.inline-block{display:inline-block}.inline-flex{display:inline-flex}.table{display:table}.size-1\.5{width:calc(var(--spacing) * 1.5);height:calc(var(--spacing) * 1.5)}.size-2{width:calc(var(--spacing) * 2);height:calc(var(--spacing) * 2)}.size-3{width:calc(var(--spacing) * 3);height:calc(var(--spacing) * 3)}.size-4{width:calc(var(--spacing) * 4);height:calc(var(--spacing) * 4)}.size-8{width:calc(var(--spacing) * 8);height:calc(var(--spacing) * 8)}.h-1\.5{height:calc(var(--spacing) * 1.5)}.h-3{height:calc(var(--spacing) * 3)}.h-\[65vh\]{height:65vh}.h-\[min\(56rem\,92dvh\)\]{height:min(56rem,92dvh)}.h-full{height:100%}.max-h-40{max-height:calc(var(--spacing) * 40)}.max-h-48{max-height:calc(var(--spacing) * 48)}.max-h-64{max-height:calc(var(--spacing) * 64)}.max-h-\[65vh\]{max-height:65vh}.min-h-0{min-height:0}.min-h-11{min-height:calc(var(--spacing) * 11)}.min-h-40{min-height:calc(var(--spacing) * 40)}.min-h-screen{min-height:100vh}.w-1\.5{width:calc(var(--spacing) * 1.5)}.w-9{width:calc(var(--spacing) * 9)}.w-11{width:calc(var(--spacing) * 11)}.w-20{width:calc(var(--spacing) * 20)}.w-24{width:calc(var(--spacing) * 24)}.w-\[min\(26rem\,calc\(100vw-2rem\)\)\]{width:min(26rem,100vw - 2rem)}.w-\[min\(520px\,95vw\)\]{width:min(520px,95vw)}.w-\[min\(640px\,95vw\)\]{width:min(640px,95vw)}.w-\[min\(1100px\,95vw\)\]{width:min(1100px,95vw)}.w-fit{width:fit-content}.w-full{width:100%}.w-max{width:max-content}.max-w-7xl{max-width:var(--container-7xl)}.max-w-80{max-width:calc(var(--spacing) * 80)}.max-w-\[60ch\]{max-width:60ch}.max-w-\[70ch\]{max-width:70ch}.max-w-\[min\(28rem\,calc\(100\%-2rem\)\)\]{max-width:min(28rem,100% - 2rem)}.max-w-\[min\(28rem\,calc\(100vw-2rem\)\)\]{max-width:min(28rem,100vw - 2rem)}.max-w-\[min\(48rem\,calc\(100vw-2rem\)\)\]{max-width:min(48rem,100vw - 2rem)}.max-w-\[min\(64rem\,calc\(100vw-2rem\)\)\]{max-width:min(64rem,100vw - 2rem)}.min-w-0{min-width:0}.min-w-48{min-width:calc(var(--spacing) * 48)}.flex-1{flex:1}.shrink-0{flex-shrink:0}.basis-56{flex-basis:calc(var(--spacing) * 56)}.-translate-x-1\/2{--tw-translate-x:calc(calc(1 / 2 * 100%) * -1);translate:var(--tw-translate-x) var(--tw-translate-y)}.animate-pulse{animation:var(--animate-pulse)}.cursor-not-allowed{cursor:not-allowed}.cursor-pointer{cursor:pointer}.resize{resize:both}.\[scrollbar-width\:none\]{scrollbar-width:none}.list-none{list-style-type:none}.grid-cols-\[auto_1fr\]{grid-template-columns:auto 1fr}.flex-col{flex-direction:column}.flex-wrap{flex-wrap:wrap}.place-items-center{place-items:center}.items-center{align-items:center}.items-start{align-items:flex-start}.justify-between{justify-content:space-between}.justify-end{justify-content:flex-end}.gap-0\.5{gap:calc(var(--spacing) * .5)}.gap-1{gap:var(--spacing)}.gap-1\.5{gap:calc(var(--spacing) * 1.5)}.gap-2{gap:calc(var(--spacing) * 2)}.gap-3{gap:calc(var(--spacing) * 3)}.gap-4{gap:calc(var(--spacing) * 4)}:where(.space-y-0\.5>:not(:last-child)){--tw-space-y-reverse:0;margin-block-start:calc(calc(var(--spacing) * .5) * var(--tw-space-y-reverse));margin-block-end:calc(calc(var(--spacing) * .5) * calc(1 - var(--tw-space-y-reverse)))}:where(.space-y-2>:not(:last-child)){--tw-space-y-reverse:0;margin-block-start:calc(calc(var(--spacing) * 2) * var(--tw-space-y-reverse));margin-block-end:calc(calc(var(--spacing) * 2) * calc(1 - var(--tw-space-y-reverse)))}:where(.space-y-4>:not(:last-child)){--tw-space-y-reverse:0;margin-block-start:calc(calc(var(--spacing) * 4) * var(--tw-space-y-reverse));margin-block-end:calc(calc(var(--spacing) * 4) * calc(1 - var(--tw-space-y-reverse)))}.gap-x-3{column-gap:calc(var(--spacing) * 3)}.gap-x-4{column-gap:calc(var(--spacing) * 4)}.gap-y-1{row-gap:var(--spacing)}.gap-y-1\.5{row-gap:calc(var(--spacing) * 1.5)}.gap-y-2{row-gap:calc(var(--spacing) * 2)}.gap-y-3{row-gap:calc(var(--spacing) * 3)}:where(.divide-x>:not(:last-child)){--tw-divide-x-reverse:0;border-inline-style:var(--tw-border-style);border-inline-start-width:calc(1px * var(--tw-divide-x-reverse));border-inline-end-width:calc(1px * calc(1 - var(--tw-divide-x-reverse)))}:where(.divide-y>:not(:last-child)){--tw-divide-y-reverse:0;border-bottom-style:var(--tw-border-style);border-top-style:var(--tw-border-style);border-top-width:calc(1px * var(--tw-divide-y-reverse));border-bottom-width:calc(1px * calc(1 - var(--tw-divide-y-reverse)))}:where(.divide-line>:not(:last-child)){border-color:var(--color-line)}:where(.divide-line\/70>:not(:last-child)){border-color:#22272db3}@supports (color:color-mix(in lab, red, red)){:where(.divide-line\/70>:not(:last-child)){border-color:color-mix(in oklab, var(--color-line) 70%, transparent)}}.truncate{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.overflow-auto{overflow:auto}.overflow-hidden{overflow:hidden}.overflow-x-auto{overflow-x:auto}.rounded{border-radius:.25rem}.rounded-\[1px\]{border-radius:1px}.rounded-full{border-radius:3.40282e38px}.rounded-lg{border-radius:var(--radius-lg)}.rounded-none{border-radius:0}.rounded-sm{border-radius:var(--radius-sm)}.border-t{border-top-style:var(--tw-border-style);border-top-width:1px}.border-b{border-bottom-style:var(--tw-border-style);border-bottom-width:1px}.border-b-2{border-bottom-style:var(--tw-border-style);border-bottom-width:2px}.border-l{border-left-style:var(--tw-border-style);border-left-width:1px}.border-accent\/50{border-color:#43d5dc80}@supports (color:color-mix(in lab, red, red)){.border-accent\/50{border-color:color-mix(in oklab, var(--color-accent) 50%, transparent)}}.border-line{border-color:var(--color-line)}.border-line-strong{border-color:var(--color-line-strong)}.border-line\/70{border-color:#22272db3}@supports (color:color-mix(in lab, red, red)){.border-line\/70{border-color:color-mix(in oklab, var(--color-line) 70%, transparent)}}.border-transparent{border-color:#0000}.border-warn\/40{border-color:#f0c63066}@supports (color:color-mix(in lab, red, red)){.border-warn\/40{border-color:color-mix(in oklab, var(--color-warn) 40%, transparent)}}.bg-accent{background-color:var(--color-accent)}.bg-accent\/10{background-color:#43d5dc1a}@supports (color:color-mix(in lab, red, red)){.bg-accent\/10{background-color:color-mix(in oklab, var(--color-accent) 10%, transparent)}}.bg-accent\/15{background-color:#43d5dc26}@supports (color:color-mix(in lab, red, red)){.bg-accent\/15{background-color:color-mix(in oklab, var(--color-accent) 15%, transparent)}}.bg-accent\/30{background-color:#43d5dc4d}@supports (color:color-mix(in lab, red, red)){.bg-accent\/30{background-color:color-mix(in oklab, var(--color-accent) 30%, transparent)}}.bg-bad{background-color:var(--color-bad)}.bg-bad\/10{background-color:#fb605c1a}@supports (color:color-mix(in lab, red, red)){.bg-bad\/10{background-color:color-mix(in oklab, var(--color-bad) 10%, transparent)}}.bg-canvas{background-color:var(--color-canvas)}.bg-danger{background-color:var(--color-danger)}.bg-dim{background-color:var(--color-dim)}.bg-fg{background-color:var(--color-fg)}.bg-line-strong{background-color:var(--color-line-strong)}.bg-ok{background-color:var(--color-ok)}.bg-ok\/40{background-color:#5ed47666}@supports (color:color-mix(in lab, red, red)){.bg-ok\/40{background-color:color-mix(in oklab, var(--color-ok) 40%, transparent)}}.bg-pause{background-color:var(--color-pause)}.bg-raised{background-color:var(--color-raised)}.bg-raised\/40{background-color:#13181e66}@supports (color:color-mix(in lab, red, red)){.bg-raised\/40{background-color:color-mix(in oklab, var(--color-raised) 40%, transparent)}}.bg-warn{background-color:var(--color-warn)}.bg-warn\/10{background-color:#f0c6301a}@supports (color:color-mix(in lab, red, red)){.bg-warn\/10{background-color:color-mix(in oklab, var(--color-warn) 10%, transparent)}}.bg-warn\/15{background-color:#f0c63026}@supports (color:color-mix(in lab, red, red)){.bg-warn\/15{background-color:color-mix(in oklab, var(--color-warn) 15%, transparent)}}.stroke-accent{stroke:var(--color-accent)}.p-0{padding:0}.p-1{padding:var(--spacing)}.p-2{padding:calc(var(--spacing) * 2)}.p-3{padding:calc(var(--spacing) * 3)}.p-4{padding:calc(var(--spacing) * 4)}.px-1{padding-inline:var(--spacing)}.px-1\.5{padding-inline:calc(var(--spacing) * 1.5)}.px-2{padding-inline:calc(var(--spacing) * 2)}.px-2\.5{padding-inline:calc(var(--spacing) * 2.5)}.px-3{padding-inline:calc(var(--spacing) * 3)}.px-4{padding-inline:calc(var(--spacing) * 4)}.py-0\.5{padding-block:calc(var(--spacing) * .5)}.py-1{padding-block:var(--spacing)}.py-1\.5{padding-block:calc(var(--spacing) * 1.5)}.py-2{padding-block:calc(var(--spacing) * 2)}.py-2\.5{padding-block:calc(var(--spacing) * 2.5)}.py-3{padding-block:calc(var(--spacing) * 3)}.py-4{padding-block:calc(var(--spacing) * 4)}.py-16{padding-block:calc(var(--spacing) * 16)}.pt-3{padding-top:calc(var(--spacing) * 3)}.pt-4{padding-top:calc(var(--spacing) * 4)}.pt-5{padding-top:calc(var(--spacing) * 5)}.pt-6{padding-top:calc(var(--spacing) * 6)}.pr-3{padding-right:calc(var(--spacing) * 3)}.pr-4{padding-right:calc(var(--spacing) * 4)}.pr-6{padding-right:calc(var(--spacing) * 6)}.pb-2{padding-bottom:calc(var(--spacing) * 2)}.pb-2\.5{padding-bottom:calc(var(--spacing) * 2.5)}.pb-3{padding-bottom:calc(var(--spacing) * 3)}.pb-\[calc\(2rem\+var\(--dock\,0px\)\)\]{padding-bottom:calc(2rem + var(--dock,0px))}.pl-3{padding-left:calc(var(--spacing) * 3)}.pl-4{padding-left:calc(var(--spacing) * 4)}.text-center{text-align:center}.text-left{text-align:left}.text-right{text-align:right}.align-middle{vertical-align:middle}.align-top{vertical-align:top}.font-mono{font-family:var(--font-mono)}.font-sans{font-family:var(--font-sans)}.text-2xl{font-size:var(--text-2xl);line-height:var(--tw-leading,var(--text-2xl--line-height))}.text-data{font-size:var(--text-data);line-height:var(--tw-leading,var(--text-data--line-height))}.text-group{font-size:var(--text-group);line-height:var(--tw-leading,var(--text-group--line-height))}.text-lg{font-size:var(--text-lg);line-height:var(--tw-leading,var(--text-lg--line-height))}.text-sm{font-size:var(--text-sm);line-height:var(--tw-leading,var(--text-sm--line-height))}.text-xs{font-size:var(--text-xs);line-height:var(--tw-leading,var(--text-xs--line-height))}.text-\[0px\]{font-size:0}.text-\[11px\]{font-size:11px}.leading-5{--tw-leading:calc(var(--spacing) * 5);line-height:calc(var(--spacing) * 5)}.leading-relaxed{--tw-leading:var(--leading-relaxed);line-height:var(--leading-relaxed)}.font-medium{--tw-font-weight:var(--font-weight-medium);font-weight:var(--font-weight-medium)}.font-normal{--tw-font-weight:var(--font-weight-normal);font-weight:var(--font-weight-normal)}.font-semibold{--tw-font-weight:var(--font-weight-semibold);font-weight:var(--font-weight-semibold)}.tracking-tight{--tw-tracking:var(--tracking-tight);letter-spacing:var(--tracking-tight)}.text-balance{text-wrap:balance}.\[overflow-wrap\:anywhere\]{overflow-wrap:anywhere}.whitespace-nowrap{white-space:nowrap}.whitespace-pre-wrap{white-space:pre-wrap}.text-accent-fg{color:var(--color-accent-fg)}.text-bad-fg{color:var(--color-bad-fg)}.text-bad-soft{color:var(--color-bad-soft)}.text-bad-soft\/80{color:#f7cbcacc}@supports (color:color-mix(in lab, red, red)){.text-bad-soft\/80{color:color-mix(in oklab, var(--color-bad-soft) 80%, transparent)}}.text-dim{color:var(--color-dim)}.text-fg{color:var(--color-fg)}.text-fg-soft{color:var(--color-fg-soft)}.text-fg-strong{color:var(--color-fg-strong)}.text-muted{color:var(--color-muted)}.text-ok-fg{color:var(--color-ok-fg)}.text-ok-soft{color:var(--color-ok-soft)}.text-pause-fg{color:var(--color-pause-fg)}.text-svc-1{color:var(--color-svc-1)}.text-svc-2{color:var(--color-svc-2)}.text-svc-3{color:var(--color-svc-3)}.text-svc-4{color:var(--color-svc-4)}.text-warn-fg{color:var(--color-warn-fg)}.text-warn-soft{color:var(--color-warn-soft)}.text-warn-strong{color:var(--color-warn-strong)}.text-white{color:var(--color-white)}.normal-case{text-transform:none}.uppercase{text-transform:uppercase}.tabular-nums{--tw-numeric-spacing:tabular-nums;font-variant-numeric:var(--tw-ordinal,) var(--tw-slashed-zero,) var(--tw-numeric-figure,) var(--tw-numeric-spacing,) var(--tw-numeric-fraction,)}.underline{text-decoration-line:underline}.underline-offset-4{text-underline-offset:4px}.antialiased{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}.accent-accent{accent-color:var(--color-accent)}.accent-danger{accent-color:var(--color-danger)}.accent-fg{accent-color:var(--color-fg)}.opacity-40{opacity:.4}.opacity-70{opacity:.7}.shadow-lg{--tw-shadow:0 10px 15px -3px var(--tw-shadow-color,#0000001a), 0 4px 6px -4px var(--tw-shadow-color,#0000001a);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}.ring-1{--tw-ring-shadow:var(--tw-ring-inset,) 0 0 0 calc(1px + var(--tw-ring-offset-width)) var(--tw-ring-color,currentcolor);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}.shadow-black\/30{--tw-shadow-color:#0000004d}@supports (color:color-mix(in lab, red, red)){.shadow-black\/30{--tw-shadow-color:color-mix(in oklab, color-mix(in oklab, var(--color-black) 30%, transparent) var(--tw-shadow-alpha), transparent)}}.shadow-black\/40{--tw-shadow-color:#0006}@supports (color:color-mix(in lab, red, red)){.shadow-black\/40{--tw-shadow-color:color-mix(in oklab, color-mix(in oklab, var(--color-black) 40%, transparent) var(--tw-shadow-alpha), transparent)}}.ring-accent\/40{--tw-ring-color:#43d5dc66}@supports (color:color-mix(in lab, red, red)){.ring-accent\/40{--tw-ring-color:color-mix(in oklab, var(--color-accent) 40%, transparent)}}.ring-bad\/40{--tw-ring-color:#fb605c66}@supports (color:color-mix(in lab, red, red)){.ring-bad\/40{--tw-ring-color:color-mix(in oklab, var(--color-bad) 40%, transparent)}}.ring-bad\/50{--tw-ring-color:#fb605c80}@supports (color:color-mix(in lab, red, red)){.ring-bad\/50{--tw-ring-color:color-mix(in oklab, var(--color-bad) 50%, transparent)}}.ring-bad\/60{--tw-ring-color:#fb605c99}@supports (color:color-mix(in lab, red, red)){.ring-bad\/60{--tw-ring-color:color-mix(in oklab, var(--color-bad) 60%, transparent)}}.ring-current{--tw-ring-color:currentcolor}.ring-danger{--tw-ring-color:var(--color-danger)}.ring-dim{--tw-ring-color:var(--color-dim)}.ring-line{--tw-ring-color:var(--color-line)}.ring-line-strong{--tw-ring-color:var(--color-line-strong)}.ring-line-strong\/80{--tw-ring-color:#394049cc}@supports (color:color-mix(in lab, red, red)){.ring-line-strong\/80{--tw-ring-color:color-mix(in oklab, var(--color-line-strong) 80%, transparent)}}.ring-ok\/50{--tw-ring-color:#5ed47680}@supports (color:color-mix(in lab, red, red)){.ring-ok\/50{--tw-ring-color:color-mix(in oklab, var(--color-ok) 50%, transparent)}}.ring-warn{--tw-ring-color:var(--color-warn)}.ring-warn\/30{--tw-ring-color:#f0c6304d}@supports (color:color-mix(in lab, red, red)){.ring-warn\/30{--tw-ring-color:color-mix(in oklab, var(--color-warn) 30%, transparent)}}.ring-warn\/60{--tw-ring-color:#f0c63099}@supports (color:color-mix(in lab, red, red)){.ring-warn\/60{--tw-ring-color:color-mix(in oklab, var(--color-warn) 60%, transparent)}}.filter{filter:var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,)}.transition-\[background-color\]{transition-property:background-color;transition-timing-function:var(--tw-ease,var(--default-transition-timing-function));transition-duration:var(--tw-duration,var(--default-transition-duration))}.transition-opacity{transition-property:opacity;transition-timing-function:var(--tw-ease,var(--default-transition-timing-function));transition-duration:var(--tw-duration,var(--default-transition-duration))}.\[contain\:inline-size\]{contain:inline-size}.\[direction\:rtl\]{direction:rtl}.group-has-checked\:block:is(:where(.group):has(:checked) *){display:block}.group-aria-pressed\:inline-block:is(:where(.group)[aria-pressed=true] *){display:inline-block}.selection\:bg-accent\/30 ::selection{background-color:#43d5dc4d}@supports (color:color-mix(in lab, red, red)){.selection\:bg-accent\/30 ::selection{background-color:color-mix(in oklab, var(--color-accent) 30%, transparent)}}.selection\:bg-accent\/30::selection{background-color:#43d5dc4d}@supports (color:color-mix(in lab, red, red)){.selection\:bg-accent\/30::selection{background-color:color-mix(in oklab, var(--color-accent) 30%, transparent)}}.placeholder\:font-sans::placeholder{font-family:var(--font-sans)}.placeholder\:text-muted::placeholder{color:var(--color-muted)}.backdrop\:bg-black\/40::backdrop{background-color:#0006}@supports (color:color-mix(in lab, red, red)){.backdrop\:bg-black\/40::backdrop{background-color:color-mix(in oklab, var(--color-black) 40%, transparent)}}.backdrop\:bg-black\/70::backdrop{background-color:#000000b3}@supports (color:color-mix(in lab, red, red)){.backdrop\:bg-black\/70::backdrop{background-color:color-mix(in oklab, var(--color-black) 70%, transparent)}}.before\:text-xs:before{content:var(--tw-content);font-size:var(--text-xs);line-height:var(--tw-leading,var(--text-xs--line-height))}.before\:content-\[attr\(data-mark\)\]:before{--tw-content:attr(data-mark);content:var(--tw-content)}.before\:content-\[attr\(data-t\)\]:before{--tw-content:attr(data-t);content:var(--tw-content)}.open\:flex:is([open],:popover-open,:open){display:flex}.empty\:hidden:empty{display:none}.empty\:before\:font-sans:empty:before{content:var(--tw-content);font-family:var(--font-sans)}.empty\:before\:text-muted:empty:before{content:var(--tw-content);color:var(--color-muted)}.empty\:before\:content-\[attr\(data-empty\)\]:empty:before{--tw-content:attr(data-empty);content:var(--tw-content)}@media (hover:hover){.hover\:bg-accent\/10:hover{background-color:#43d5dc1a}@supports (color:color-mix(in lab, red, red)){.hover\:bg-accent\/10:hover{background-color:color-mix(in oklab, var(--color-accent) 10%, transparent)}}.hover\:bg-accent\/20:hover{background-color:#43d5dc33}@supports (color:color-mix(in lab, red, red)){.hover\:bg-accent\/20:hover{background-color:color-mix(in oklab, var(--color-accent) 20%, transparent)}}.hover\:bg-accent\/25:hover{background-color:#43d5dc40}@supports (color:color-mix(in lab, red, red)){.hover\:bg-accent\/25:hover{background-color:color-mix(in oklab, var(--color-accent) 25%, transparent)}}.hover\:bg-bad\/10:hover{background-color:#fb605c1a}@supports (color:color-mix(in lab, red, red)){.hover\:bg-bad\/10:hover{background-color:color-mix(in oklab, var(--color-bad) 10%, transparent)}}.hover\:bg-danger-hover:hover{background-color:var(--color-danger-hover)}.hover\:bg-hover:hover{background-color:var(--color-hover)}.hover\:bg-ok\/10:hover{background-color:#5ed4761a}@supports (color:color-mix(in lab, red, red)){.hover\:bg-ok\/10:hover{background-color:color-mix(in oklab, var(--color-ok) 10%, transparent)}}.hover\:bg-raised\/70:hover{background-color:#13181eb3}@supports (color:color-mix(in lab, red, red)){.hover\:bg-raised\/70:hover{background-color:color-mix(in oklab, var(--color-raised) 70%, transparent)}}.hover\:bg-transparent:hover{background-color:#0000}.hover\:text-accent-soft:hover{color:var(--color-accent-soft)}.hover\:text-fg:hover{color:var(--color-fg)}.hover\:text-fg-strong:hover{color:var(--color-fg-strong)}.hover\:underline:hover{text-decoration-line:underline}}.focus\:not-sr-only:focus{clip-path:none;white-space:normal;width:auto;height:auto;margin:0;padding:0;position:static;overflow:visible}.focus\:fixed:focus{position:fixed}.focus\:top-3:focus{top:calc(var(--spacing) * 3)}.focus\:left-3:focus{left:calc(var(--spacing) * 3)}.focus\:z-50:focus{z-index:50}.focus\:rounded:focus{border-radius:.25rem}.focus\:bg-fg-strong:focus{background-color:var(--color-fg-strong)}.focus\:px-3:focus{padding-inline:calc(var(--spacing) * 3)}.focus\:py-2:focus{padding-block:calc(var(--spacing) * 2)}.focus\:text-sm:focus{font-size:var(--text-sm);line-height:var(--tw-leading,var(--text-sm--line-height))}.focus\:text-canvas:focus{color:var(--color-canvas)}.focus\:ring-accent:focus{--tw-ring-color:var(--color-accent)}.focus\:outline-none:focus{--tw-outline-style:none;outline-style:none}.focus-visible\:outline-2:focus-visible{outline-style:var(--tw-outline-style);outline-width:2px}.focus-visible\:-outline-offset-2:focus-visible{outline-offset:calc(2px * -1)}.focus-visible\:outline-offset-2:focus-visible{outline-offset:2px}.focus-visible\:outline-accent:focus-visible{outline-color:var(--color-accent)}.disabled\:cursor-default:disabled{cursor:default}.aria-disabled\:cursor-wait[aria-disabled=true]{cursor:wait}.aria-disabled\:opacity-40[aria-disabled=true]{opacity:.4}.aria-disabled\:opacity-60[aria-disabled=true]{opacity:.6}.aria-invalid\:ring-bad[aria-invalid=true],.aria-invalid\:focus\:ring-bad[aria-invalid=true]:focus{--tw-ring-color:var(--color-bad)}.aria-pressed\:bg-accent\/15[aria-pressed=true]{background-color:#43d5dc26}@supports (color:color-mix(in lab, red, red)){.aria-pressed\:bg-accent\/15[aria-pressed=true]{background-color:color-mix(in oklab, var(--color-accent) 15%, transparent)}}.aria-pressed\:bg-fg-strong[aria-pressed=true]{background-color:var(--color-fg-strong)}.aria-pressed\:text-accent-soft[aria-pressed=true]{color:var(--color-accent-soft)}.aria-pressed\:text-canvas[aria-pressed=true]{color:var(--color-canvas)}.aria-pressed\:ring-accent\/40[aria-pressed=true]{--tw-ring-color:#43d5dc66}@supports (color:color-mix(in lab, red, red)){.aria-pressed\:ring-accent\/40[aria-pressed=true]{--tw-ring-color:color-mix(in oklab, var(--color-accent) 40%, transparent)}}.aria-selected\:border-accent[aria-selected=true]{border-color:var(--color-accent)}.aria-selected\:text-fg-strong[aria-selected=true]{color:var(--color-fg-strong)}.data-done\:min-h-0[data-done]{min-height:0}.data-done\:cursor-default[data-done]{cursor:default}.data-done\:px-0[data-done]{padding-inline:0}.data-done\:text-muted[data-done]{color:var(--color-muted)}.data-done\:opacity-100[data-done]{opacity:1}.data-done\:ring-0[data-done]{--tw-ring-shadow:var(--tw-ring-inset,) 0 0 0 calc(0px + var(--tw-ring-offset-width)) var(--tw-ring-color,currentcolor);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}@media (prefers-reduced-motion:reduce){.motion-reduce\:animate-none{animation:none}.motion-reduce\:transition-none{transition-property:none}}@media not all and (min-width:80rem){.max-xl\:block{display:block}.max-xl\:hidden{display:none}}@media not all and (min-width:40rem){.max-sm\:order-2{order:2}.max-sm\:order-3{order:3}.max-sm\:order-last{order:9999}.max-sm\:mb-4{margin-bottom:calc(var(--spacing) * 4)}.max-sm\:block{display:block}.max-sm\:hidden{display:none}.max-sm\:h-dvh{height:100dvh}.max-sm\:max-h-none{max-height:none}.max-sm\:w-full{width:100%}.max-sm\:w-screen{width:100vw}.max-sm\:max-w-full{max-width:100%}.max-sm\:max-w-none{max-width:none}.max-sm\:min-w-24{min-width:calc(var(--spacing) * 24)}.max-sm\:basis-full{flex-basis:100%}.max-sm\:justify-start{justify-content:flex-start}:where(.max-sm\:space-y-1\.5>:not(:last-child)){--tw-space-y-reverse:0;margin-block-start:calc(calc(var(--spacing) * 1.5) * var(--tw-space-y-reverse));margin-block-end:calc(calc(var(--spacing) * 1.5) * calc(1 - var(--tw-space-y-reverse)))}.max-sm\:overflow-x-auto{overflow-x:auto}.max-sm\:rounded-none{border-radius:0}.max-sm\:p-0{padding:0}.max-sm\:px-2{padding-inline:calc(var(--spacing) * 2)}.max-sm\:px-4{padding-inline:calc(var(--spacing) * 4)}.max-sm\:py-3{padding-block:calc(var(--spacing) * 3)}.max-sm\:py-4{padding-block:calc(var(--spacing) * 4)}.max-sm\:pt-2{padding-top:calc(var(--spacing) * 2)}.max-sm\:pt-3{padding-top:calc(var(--spacing) * 3)}.max-sm\:pt-4{padding-top:calc(var(--spacing) * 4)}.max-sm\:pl-12{padding-left:calc(var(--spacing) * 12)}.max-sm\:text-xl{font-size:var(--text-xl);line-height:var(--tw-leading,var(--text-xl--line-height))}.max-sm\:ring-0{--tw-ring-shadow:var(--tw-ring-inset,) 0 0 0 calc(0px + var(--tw-ring-offset-width)) var(--tw-ring-color,currentcolor);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}.max-sm\:\[contain\:none\]{contain:none}}@media (min-width:40rem){.sm\:sr-only{clip-path:inset(50%);white-space:nowrap;border-width:0;width:1px;height:1px;margin:-1px;padding:0;position:absolute;overflow:hidden}.sm\:ml-auto{margin-left:auto}.sm\:hidden{display:none}.sm\:w-20{width:calc(var(--spacing) * 20)}.sm\:w-72{width:calc(var(--spacing) * 72)}.sm\:max-w-72{max-width:calc(var(--spacing) * 72)}.sm\:max-w-\[28ch\]{max-width:28ch}.sm\:min-w-\[20ch\]{min-width:20ch}.sm\:grid-cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}.sm\:truncate{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.sm\:text-left{text-align:left}.sm\:\[direction\:rtl\]{direction:rtl}}@media (min-width:80rem){.xl\:w-40{width:calc(var(--spacing) * 40)}.xl\:w-44{width:calc(var(--spacing) * 44)}.xl\:w-\[17\.5rem\]{width:17.5rem}.xl\:w-\[17rem\]{width:17rem}.xl\:table-fixed{table-layout:fixed}}@media (pointer:coarse){.coarse\:-m-2\.5{margin:calc(var(--spacing) * -2.5)}.coarse\:mt-0{margin-top:0}.coarse\:mt-2{margin-top:calc(var(--spacing) * 2)}.coarse\:-ml-2{margin-left:calc(var(--spacing) * -2)}.coarse\:hidden{display:none}.coarse\:size-6{width:calc(var(--spacing) * 6);height:calc(var(--spacing) * 6)}.coarse\:size-11{width:calc(var(--spacing) * 11);height:calc(var(--spacing) * 11)}.coarse\:min-h-11{min-height:calc(var(--spacing) * 11)}.coarse\:w-11{width:calc(var(--spacing) * 11)}.coarse\:gap-2{gap:calc(var(--spacing) * 2)}.coarse\:gap-x-2{column-gap:calc(var(--spacing) * 2)}.coarse\:p-2\.5{padding:calc(var(--spacing) * 2.5)}.coarse\:px-2{padding-inline:calc(var(--spacing) * 2)}.coarse\:px-4{padding-inline:calc(var(--spacing) * 4)}.coarse\:py-2{padding-block:calc(var(--spacing) * 2)}.coarse\:py-3{padding-block:calc(var(--spacing) * 3)}.coarse\:py-3\.5{padding-block:calc(var(--spacing) * 3.5)}.coarse\:text-sm{font-size:var(--text-sm);line-height:var(--tw-leading,var(--text-sm--line-height))}}@media not all and (min-width:40rem){@media (pointer:coarse){.max-sm\:coarse\:pl-14{padding-left:calc(var(--spacing) * 14)}}}.\[\&_kbd\]\:rounded kbd{border-radius:.25rem}.\[\&_kbd\]\:px-1\.5 kbd{padding-inline:calc(var(--spacing) * 1.5)}.\[\&_kbd\]\:font-mono kbd{font-family:var(--font-mono)}.\[\&_kbd\]\:text-xs kbd{font-size:var(--text-xs);line-height:var(--tw-leading,var(--text-xs--line-height))}.\[\&_kbd\]\:text-fg-strong kbd{color:var(--color-fg-strong)}.\[\&_kbd\]\:ring-1 kbd{--tw-ring-shadow:var(--tw-ring-inset,) 0 0 0 calc(1px + var(--tw-ring-offset-width)) var(--tw-ring-color,currentcolor);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}.\[\&_kbd\]\:ring-line-strong kbd{--tw-ring-color:var(--color-line-strong)}.\[\&\:\:-webkit-details-marker\]\:hidden::-webkit-details-marker{display:none}}@media (prefers-color-scheme:light){:root{--color-canvas:oklch(98.6% .003 255);--color-raised:#fff;--color-hover:oklch(96% .006 255);--color-line:oklch(91.5% .008 255);--color-line-strong:oklch(85% .012 255);--color-dim:oklch(64% .018 255);--color-muted:oklch(47% .02 255);--color-fg-soft:oklch(38% .018 255);--color-fg:oklch(28% .016 255);--color-fg-strong:oklch(17% .012 255);--color-ok:oklch(62% .17 148);--color-ok-fg:oklch(47% .13 148);--color-ok-soft:oklch(40% .11 148);--color-warn:oklch(65% .135 68);--color-warn-fg:oklch(52% .105 70);--color-warn-soft:oklch(45% .09 65);--color-warn-strong:oklch(38% .09 60);--color-bad:oklch(60% .22 25);--color-bad-fg:oklch(50% .2 27);--color-bad-soft:oklch(43% .17 27);--color-danger:oklch(50% .2 27);--color-danger-hover:oklch(44% .18 27);--color-pause:oklch(58% .22 330);--color-pause-fg:oklch(48% .2 330);--color-accent:oklch(55% .09 210);--color-accent-fg:oklch(47% .08 215);--color-accent-soft:oklch(40% .07 215);--color-svc-1:oklch(50% .13 50);--color-svc-2:oklch(50% .14 355);--color-svc-3:oklch(48% .12 250);--color-svc-4:oklch(47% .18 295)}}:root{scrollbar-color:var(--color-line-strong) transparent;caret-color:var(--color-accent)}html{scrollbar-gutter:stable}#tabs{animation:linear both tabs-more;animation-timeline:scroll(self inline)}@keyframes tabs-more{0%,95%{-webkit-mask-image:linear-gradient(90deg,#000 calc(100% - 2.5rem),#0000);mask-image:linear-gradient(90deg,#000 calc(100% - 2.5rem),#0000)}to{-webkit-mask-image:none;mask-image:none}}@property --tw-translate-x{syntax:"*";inherits:false;initial-value:0}@property --tw-translate-y{syntax:"*";inherits:false;initial-value:0}@property --tw-translate-z{syntax:"*";inherits:false;initial-value:0}@property --tw-space-y-reverse{syntax:"*";inherits:false;initial-value:0}@property --tw-divide-x-reverse{syntax:"*";inherits:false;initial-value:0}@property --tw-border-style{syntax:"*";inherits:false;initial-value:solid}@property --tw-divide-y-reverse{syntax:"*";inherits:false;initial-value:0}@property --tw-leading{syntax:"*";inherits:false}@property --tw-font-weight{syntax:"*";inherits:false}@property --tw-tracking{syntax:"*";inherits:false}@property --tw-ordinal{syntax:"*";inherits:false}@property --tw-slashed-zero{syntax:"*";inherits:false}@property --tw-numeric-figure{syntax:"*";inherits:false}@property --tw-numeric-spacing{syntax:"*";inherits:false}@property --tw-numeric-fraction{syntax:"*";inherits:false}@property --tw-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-shadow-color{syntax:"*";inherits:false}@property --tw-shadow-alpha{syntax:"<percentage>";inherits:false;initial-value:100%}@property --tw-inset-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-inset-shadow-color{syntax:"*";inherits:false}@property --tw-inset-shadow-alpha{syntax:"<percentage>";inherits:false;initial-value:100%}@property --tw-ring-color{syntax:"*";inherits:false}@property --tw-ring-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-inset-ring-color{syntax:"*";inherits:false}@property --tw-inset-ring-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-ring-inset{syntax:"*";inherits:false}@property --tw-ring-offset-width{syntax:"<length>";inherits:false;initial-value:0}@property --tw-ring-offset-color{syntax:"*";inherits:false;initial-value:#fff}@property --tw-ring-offset-shadow{syntax:"*";inherits:false;initial-value:0 0 #0000}@property --tw-blur{syntax:"*";inherits:false}@property --tw-brightness{syntax:"*";inherits:false}@property --tw-contrast{syntax:"*";inherits:false}@property --tw-grayscale{syntax:"*";inherits:false}@property --tw-hue-rotate{syntax:"*";inherits:false}@property --tw-invert{syntax:"*";inherits:false}@property --tw-opacity{syntax:"*";inherits:false}@property --tw-saturate{syntax:"*";inherits:false}@property --tw-sepia{syntax:"*";inherits:false}@property --tw-drop-shadow{syntax:"*";inherits:false}@property --tw-drop-shadow-color{syntax:"*";inherits:false}@property --tw-drop-shadow-alpha{syntax:"<percentage>";inherits:false;initial-value:100%}@property --tw-drop-shadow-size{syntax:"*";inherits:false}@property --tw-content{syntax:"*";inherits:false;initial-value:""}@property --tw-outline-style{syntax:"*";inherits:false;initial-value:solid}@keyframes pulse{50%{opacity:.5}}"""
 PAGE = r"""<!doctype html>
 <html lang="pt-BR" class="bg-canvas" data-cli="docker">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="dark light">
-<title>Docker GUI</title>
+<title>Stivo</title>
 <style>/*CSS*/</style>
 </head>
 <body class="min-h-screen bg-canvas text-fg-soft antialiased selection:bg-accent/30">
@@ -1192,7 +1362,7 @@ PAGE = r"""<!doctype html>
 <div class="border-b border-line bg-raised"><div class="max-w-7xl mx-auto px-4">
   <header class="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 pt-5 pb-3 max-sm:pt-3">
     <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
-      <h1 class="text-2xl max-sm:text-xl font-semibold text-fg-strong tracking-tight">Docker GUI</h1>
+      <h1 class="text-2xl max-sm:text-xl font-semibold text-fg-strong tracking-tight">Stivo</h1>
       <!-- onde as ações caem: o contexto do docker, em âmbar quando o daemon é remoto (app.ts preenche) -->
       <span id="where" class="empty:hidden font-mono text-xs px-2 py-0.5 rounded ring-1 ring-line-strong text-muted"></span>
       <!-- de onde a lista vem: eventos do docker (ao vivo) ou poll de 2 s (app.ts, showLive) -->
@@ -1201,7 +1371,9 @@ PAGE = r"""<!doctype html>
     <div class="flex flex-wrap items-center gap-x-4">
       <button popovertarget="hint" aria-keyshortcuts="?" class="coarse:hidden text-xs text-muted hover:text-fg rounded focus-visible:outline-2 focus-visible:outline-accent">
         <kbd class="font-mono px-1 rounded ring-1 ring-line-strong text-fg-soft">?</kbd> Atalhos</button>
-      <button id="notify" hidden onclick="askNotify()" class="coarse:py-3 text-xs text-accent-fg underline underline-offset-4 hover:text-accent-soft rounded focus-visible:outline-2 focus-visible:outline-accent">Notificar quando algo der problema</button>
+      <!-- só no app desktop (o transporte do Tauri tem preferências): CLI, contexto, idioma e notificações -->
+      <button id="prefs-open" hidden onclick="openPrefs()" class="coarse:py-3.5 text-xs text-muted hover:text-fg rounded focus-visible:outline-2 focus-visible:outline-accent">Preferências</button>
+      <button id="notify" hidden onclick="askNotify()" class="coarse:py-3.5 text-xs text-accent-fg underline underline-offset-4 hover:text-accent-soft rounded focus-visible:outline-2 focus-visible:outline-accent">Notificar quando algo der problema</button>
       <!-- popover nativo: fecha com Esc e com clique fora -->
       <div id="hint" popover class="m-auto w-[min(26rem,calc(100vw-2rem))] rounded-lg bg-raised ring-1 ring-line-strong p-4 text-sm text-fg-soft shadow-lg shadow-black/40 backdrop:bg-black/40">
         <p class="mb-3 font-semibold text-fg-strong">Atalhos do teclado</p>
@@ -1210,12 +1382,12 @@ PAGE = r"""<!doctype html>
           <dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>nas abas, troca de aba</dd>
           <dt><kbd>↑</kbd> <kbd>↓</kbd></dt><dd>anda entre os botões Logs</dd>
           <dt><kbd>Enter</kbd> <kbd>l</kbd></dt><dd>abre os logs do container da linha em foco</dd>
-          <dt><kbd>r</kbd></dt><dd>reinicia o container da linha em foco (nos logs, o dos logs)</dd>
+          <dt><kbd>r</kbd></dt><dd>reinicia o container da linha em foco (nos logs, o dos logs); parado, inicia</dd>
           <dt><kbd>b</kbd></dt><dd>reconstrói o serviço do compose da linha em foco (nos logs, o dos logs)</dd>
-          <dt><kbd>s</kbd></dt><dd>inicia, para ou retoma o container da linha em foco (a ação principal dela)</dd>
+          <dt><kbd>s</kbd></dt><dd>inicia, para ou retoma o container da linha em foco</dd>
           <dt><kbd>x</kbd></dt><dd>marca ou desmarca a linha em foco</dd>
-          <dt><kbd>a</kbd></dt><dd>marca ou desmarca todos os visíveis</dd>
-          <dt><kbd>z</kbd></dt><dd>desfaz a última ação (Iniciar de novo, Retomar)</dd>
+          <dt><kbd>a</kbd></dt><dd>com o foco na lista, marca ou desmarca todos os visíveis</dd>
+          <dt><kbd>z</kbd></dt><dd>com o foco na lista, desfaz a última ação (Iniciar de novo, Retomar)</dd>
           <dt><kbd>Esc</kbd></dt><dd>cancela uma confirmação, fecha menus e modais</dd>
           <dt><kbd>?</kbd></dt><dd>mostra esta lista</dd>
         </dl>
@@ -1247,7 +1419,7 @@ PAGE = r"""<!doctype html>
       <div class="w-full sm:w-72 sm:ml-auto max-sm:order-2">
         <label for="q" class="sr-only">Filtrar containers por nome, imagem ou projeto</label>
         <input id="q" type="search" placeholder="Filtrar por nome, imagem ou projeto…" aria-describedby="q-hint"
-          class="w-full rounded bg-raised ring-1 ring-line px-3 py-2 coarse:py-3 text-sm text-fg-strong placeholder:text-muted focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+          class="w-full rounded bg-raised ring-1 ring-dim px-3 py-2 coarse:py-3 text-sm text-fg-strong placeholder:text-muted focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
         <!-- o que o leitor de tela ouve ao focar a busca: só o atalho dela, não a lista inteira do popover -->
         <span id="q-hint" class="sr-only">Atalho: barra (/) volta para esta busca; interrogação (?) mostra todos os atalhos.</span>
       </div>
@@ -1265,7 +1437,7 @@ PAGE = r"""<!doctype html>
         <thead role="rowgroup" class="max-sm:block font-mono text-[11px] uppercase text-muted">
           <tr role="row" class="max-sm:block"><th role="columnheader" scope="col" aria-label="Nome" class="py-3 pl-4 font-medium xl:w-[17rem] max-sm:block max-sm:px-4"><div class="flex items-center gap-3">
                 <input id="all" type="checkbox" disabled onchange="selectAll(this.checked)" class="size-4 coarse:size-6 shrink-0 accent-accent cursor-pointer disabled:cursor-default focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
-                <label for="all" class="sm:sr-only font-sans normal-case text-sm cursor-pointer">Selecionar todos os visíveis</label><span class="max-sm:hidden">Nome</span></div></th>
+                <label for="all" class="sm:sr-only coarse:py-3 font-sans normal-case text-sm cursor-pointer">Selecionar todos os visíveis</label><span class="max-sm:hidden">Nome</span></div></th>
               <th role="columnheader" scope="col" class="font-medium max-xl:hidden xl:w-44">Imagem</th>
               <th role="columnheader" scope="col" class="font-medium max-sm:hidden">Status</th><th role="columnheader" scope="col" class="font-medium max-xl:hidden xl:w-40">Portas</th>
               <th role="columnheader" scope="col" class="pr-4 font-medium max-sm:hidden xl:w-[17.5rem]"><span class="sr-only">Ações</span></th></tr>
@@ -1277,6 +1449,14 @@ PAGE = r"""<!doctype html>
 
   <!-- o docker system df é caro (soma os volumes): só roda ao abrir a aba, nunca no poll -->
   <section id="panel-images" role="tabpanel" aria-labelledby="tab-images" hidden class="space-y-4">
+    <!-- docker pull: baixar uma imagem pelo nome (a mesma regra do Novo container) e, nos itens, Atualizar a tag -->
+    <form id="pull-form" onsubmit="event.preventDefault(); pullImage()" class="flex flex-wrap items-center gap-2">
+      <label for="pull-q" class="text-sm text-fg-soft">Baixar imagem</label>
+      <input id="pull-q" placeholder="postgres:17" autocomplete="off" spellcheck="false" aria-describedby="pull-hint" class="w-full sm:w-72 rounded bg-raised ring-1 ring-dim px-3 py-2 coarse:py-3 text-sm text-fg-strong placeholder:text-muted focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+      <button type="submit" title="docker pull" class="px-2.5 py-1.5 coarse:min-h-11 coarse:px-4 rounded text-sm font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Baixar</button>
+      <span id="pull-hint" class="text-xs text-muted"></span>
+    </form>
+    <div id="pulls" class="space-y-2"></div>
     <div id="df-images" class="rounded-lg ring-1 ring-line bg-raised/40 px-4 text-sm divide-y divide-line/70"></div>
     <div id="obj-images-list" class="rounded-lg ring-1 ring-line bg-raised/40 text-sm overflow-x-auto"></div>
   </section>
@@ -1299,11 +1479,16 @@ PAGE = r"""<!doctype html>
       <div class="mr-auto min-w-0 flex-1 basis-56">
         <h2 id="dlg-title" class="text-lg font-semibold text-fg-strong truncate">Logs · <span id="lt"></span></h2>
         <div id="dlg-status" class="font-mono text-data mt-0.5"></div>
+        <div id="dlg-usage" class="empty:hidden mt-1 font-mono text-xs text-muted"></div>
       </div>
       <span id="dlg-acts" class="flex items-center gap-1.5 coarse:gap-2 empty:hidden max-sm:order-last max-sm:basis-full"></span>
       <button onclick="dlg.close(); afterClose()" aria-label="Fechar logs" class="shrink-0 grid place-items-center size-8 coarse:size-11 rounded text-muted hover:text-fg-strong hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent">
         <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="size-4"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
     </div>
+    <!-- o "por quê" além do log, recolhido numa linha só: aberto, eram quatro linhas de moldura antes da primeira linha do log -->
+    <details id="extra" class="text-xs">
+      <summary class="cursor-pointer w-fit py-1 coarse:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent text-muted hover:text-fg">Detalhes: configuração, histórico, processos e mudanças</summary>
+      <div class="mt-1 pl-3 border-l border-line space-y-0.5">
     <details id="insp" ontoggle="this.open && loadInspect()" class="text-xs">
       <summary class="cursor-pointer w-fit py-1 coarse:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent text-muted hover:text-fg">Configuração: restart, redes, mounts e env</summary>
       <div id="insp-body" class="mt-1">Carregando…</div>
@@ -1318,21 +1503,37 @@ PAGE = r"""<!doctype html>
       <summary class="cursor-pointer w-fit py-1 coarse:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent text-muted hover:text-fg">Processos (docker top)</summary>
       <div id="procs-body" class="mt-1 max-h-48 overflow-auto text-fg-soft">Carregando…</div>
     </details>
+    <!-- o que mudou no filesystem do container em relação à imagem (docker diff): o "o que escreveu aqui dentro?" de quem
+         passou a falhar sem ser recriado. Só vai ao docker quando abre, e funciona com o container parado -->
+    <details id="diff" ontoggle="this.open && loadDiff()" class="text-xs">
+      <summary class="cursor-pointer w-fit py-1 coarse:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent text-muted hover:text-fg">Mudanças no filesystem (docker diff)</summary>
+      <div class="mt-1 flex flex-wrap items-center gap-2">
+        <label for="diff-q" class="sr-only">Filtrar caminhos</label>
+        <input id="diff-q" type="search" placeholder="Filtrar caminhos…" autocomplete="off" spellcheck="false"
+          class="flex-1 min-w-48 sm:max-w-72 rounded bg-canvas ring-1 ring-dim px-2.5 py-1 coarse:py-3 text-xs coarse:text-sm text-fg-strong placeholder:text-muted focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+        <button onclick="loadDiff()" class="px-2.5 py-1 coarse:min-h-11 coarse:px-4 coarse:text-sm rounded text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Atualizar</button>
+        <button onclick="copyDiff()" class="px-2.5 py-1 coarse:min-h-11 coarse:px-4 coarse:text-sm rounded text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Copiar</button>
+      </div>
+      <p class="mt-1 text-muted">Volumes e bind mounts ficam de fora: o docker diff só vê a camada do container.</p>
+      <div id="diff-body" class="mt-1 max-h-48 overflow-auto">Carregando…</div>
+    </details>
+      </div>
+    </details>
   </div>
   <!-- ferramentas dos logs, coladas na caixa: filtro (só na página; / foca o campo, como a busca da lista) e o que fazer com o texto -->
   <div class="shrink-0 px-4 pt-3 pb-2 flex flex-wrap items-center gap-2">
     <label for="lf" class="sr-only">Filtrar linhas dos logs</label>
     <input id="lf" type="search" placeholder="Filtrar linhas…" aria-keyshortcuts="/" aria-describedby="lcount" autocomplete="off" spellcheck="false"
-      class="flex-1 min-w-48 sm:max-w-72 rounded bg-canvas ring-1 ring-line-strong/80 px-2.5 py-1 coarse:py-3 text-xs coarse:text-sm text-fg-strong placeholder:text-muted focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+      class="flex-1 min-w-48 sm:max-w-72 rounded bg-canvas ring-1 ring-dim px-2.5 py-1 coarse:py-3 text-xs coarse:text-sm text-fg-strong placeholder:text-muted focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
     <!-- nível e serviço filtram na página, como o texto; a janela (--since) vai ao docker. O serviço só nos logs do projeto -->
     <label for="llevel" class="sr-only">Nível das linhas</label>
-    <select id="llevel" onchange="logPick()" class="rounded bg-canvas ring-1 ring-line-strong/80 px-1.5 py-1 coarse:py-3 text-xs coarse:text-sm text-fg-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+    <select id="llevel" onchange="logPick()" class="rounded bg-canvas ring-1 ring-dim px-1.5 py-1 coarse:py-3 text-xs coarse:text-sm text-fg-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
       <option value="">Todos os níveis</option><option value="warn">Avisos e erros</option><option value="bad">Só erros</option></select>
     <label for="lsvc" class="sr-only">Serviço</label>
-    <select id="lsvc" hidden onchange="logPick()" class="rounded bg-canvas ring-1 ring-line-strong/80 px-1.5 py-1 coarse:py-3 text-xs coarse:text-sm text-fg-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+    <select id="lsvc" hidden onchange="logPick()" class="rounded bg-canvas ring-1 ring-dim px-1.5 py-1 coarse:py-3 text-xs coarse:text-sm text-fg-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
       <option value="">Todos os serviços</option></select>
     <label for="lsince" class="sr-only">Período</label>
-    <select id="lsince" onchange="sinceChange()" class="rounded bg-canvas ring-1 ring-line-strong/80 px-1.5 py-1 coarse:py-3 text-xs coarse:text-sm text-fg-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+    <select id="lsince" onchange="sinceChange()" class="rounded bg-canvas ring-1 ring-dim px-1.5 py-1 coarse:py-3 text-xs coarse:text-sm text-fg-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
       <option value="">Desde o começo</option><option id="lsince-start" value="start">Desde que subiu</option><option value="5m">Últimos 5 min</option>
       <option value="15m">Últimos 15 min</option><option value="1h">Última hora</option><option value="24h">Últimas 24 h</option></select>
     <span id="lcount" aria-live="polite" aria-atomic="true" class="text-xs text-muted empty:hidden"></span>
@@ -1356,23 +1557,24 @@ PAGE = r"""<!doctype html>
   <div class="shrink-0 px-4 pb-2 flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-line">
     <span id="lmeta" class="text-xs text-muted">Últimas 500 linhas</span>
     <button id="more" onclick="loadMore()" class="data-done:ring-0 data-done:px-0 data-done:min-h-0 data-done:opacity-100 data-done:text-muted data-done:cursor-default px-2.5 py-1 coarse:min-h-11 coarse:px-4 coarse:text-sm rounded text-xs font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent aria-disabled:opacity-40">Carregar 2.000 linhas</button>
-    <div id="dlg-msg" role="status" aria-live="polite" class="empty:hidden basis-full"></div>
   </div>
   <!-- vazia com o ao vivo ligado (o container não escreveu nada ainda): o CSS diz isso, sem entrar no Copiar -->
-  <pre id="lb" tabindex="0" aria-label="Saída dos logs" data-empty="Nada no log ainda. As linhas novas aparecem aqui assim que o container escrever." class="empty:before:content-[attr(data-empty)] empty:before:font-sans empty:before:text-muted flex-1 min-h-40 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent overflow-auto p-4 text-xs leading-relaxed font-mono text-fg-soft whitespace-pre-wrap [overflow-wrap:anywhere]"></pre>
+  <pre id="lb" tabindex="0" role="region" aria-label="Saída dos logs" data-empty="Nada no log ainda. As linhas novas aparecem aqui assim que o container escrever." class="empty:before:content-[attr(data-empty)] empty:before:font-sans empty:before:text-muted flex-1 min-h-40 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent overflow-auto p-4 text-xs leading-relaxed font-mono text-fg-soft whitespace-pre-wrap [overflow-wrap:anywhere]"></pre>
+  <!-- os avisos com o modal aberto: flutuam sobre o pé do log, como o toast da página, sem empurrar as linhas -->
+  <div id="dlg-msg" role="status" aria-live="polite" class="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 w-max max-w-[min(28rem,calc(100%-2rem))]"></div>
 </dialog>
 
-<!-- Esc vai para o programa do terminal (vim, less...): fecha só pelo × -->
+<!-- Esc vai para o programa do terminal (vim, less...); Ctrl+] tira o foco dele, e aí o Esc fecha (app.ts, openShell) -->
 <dialog id="shell" aria-labelledby="shell-title" class="m-auto w-[min(1100px,95vw)] rounded-lg bg-raised text-fg-soft ring-1 ring-line-strong backdrop:bg-black/70 p-0">
   <div class="px-4 py-3 border-b border-line flex items-start gap-3">
     <div class="mr-auto min-w-0">
       <h2 id="shell-title" class="text-lg font-semibold text-fg-strong truncate">Terminal · <span id="shell-name"></span></h2>
       <div id="shell-status" role="status" aria-live="polite" class="text-sm mt-0.5 text-muted"></div>
     </div>
-    <button onclick="shell.close()" aria-label="Fechar terminal" class="shrink-0 grid place-items-center size-8 coarse:size-11 rounded text-muted hover:text-fg-strong hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent">
+    <button id="shell-close" onclick="shell.close()" aria-label="Fechar terminal" class="shrink-0 grid place-items-center size-8 coarse:size-11 rounded text-muted hover:text-fg-strong hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent">
       <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="size-4"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
   </div>
-  <div id="shell-box" class="h-[65vh] p-2 bg-black"></div>
+  <div id="shell-box" class="h-[65vh] p-2 bg-canvas"></div>
 </dialog>
 
 <!-- docker run -d com poucas opções, nenhuma que amplie o acesso ao host (bind mount, --privileged, --cap-add, rede/PID
@@ -1391,19 +1593,19 @@ PAGE = r"""<!doctype html>
       <div>
         <label for="run-image" class="block font-medium text-fg-strong">Imagem</label>
         <input id="run-image" required autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="ex.: nginx:1.27" aria-describedby="run-image-err"
-          class="mt-1 w-full rounded bg-canvas ring-1 ring-line px-3 py-2 coarse:py-3 font-mono text-fg-strong placeholder:font-sans placeholder:text-muted focus:ring-accent aria-invalid:ring-bad aria-invalid:focus:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+          class="mt-1 w-full rounded bg-canvas ring-1 ring-dim px-3 py-2 coarse:py-3 font-mono text-fg-strong placeholder:font-sans placeholder:text-muted focus:ring-accent aria-invalid:ring-bad aria-invalid:focus:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
         <p id="run-image-err" class="empty:hidden mt-1 text-xs text-bad-fg"></p>
       </div>
       <div>
         <label for="run-name" class="block font-medium text-fg-strong">Nome <span class="font-normal text-muted">(opcional; sem ele, o docker sorteia um)</span></label>
         <input id="run-name" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="ex.: web" aria-describedby="run-name-err"
-          class="mt-1 w-full rounded bg-canvas ring-1 ring-line px-3 py-2 coarse:py-3 font-mono text-fg-strong placeholder:font-sans placeholder:text-muted focus:ring-accent aria-invalid:ring-bad aria-invalid:focus:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+          class="mt-1 w-full rounded bg-canvas ring-1 ring-dim px-3 py-2 coarse:py-3 font-mono text-fg-strong placeholder:font-sans placeholder:text-muted focus:ring-accent aria-invalid:ring-bad aria-invalid:focus:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
         <p id="run-name-err" class="empty:hidden mt-1 text-xs text-bad-fg"></p>
       </div>
       <div class="group">
         <label for="run-ports" class="block font-medium text-fg-strong">Portas</label>
         <input id="run-ports" autocomplete="off" spellcheck="false" placeholder="ex.: 8080:80, 5353:53/udp" aria-describedby="run-ports-hint run-ports-err"
-          class="mt-1 w-full rounded bg-canvas ring-1 ring-line px-3 py-2 coarse:py-3 font-mono text-fg-strong placeholder:font-sans placeholder:text-muted focus:ring-accent aria-invalid:ring-bad aria-invalid:focus:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+          class="mt-1 w-full rounded bg-canvas ring-1 ring-dim px-3 py-2 coarse:py-3 font-mono text-fg-strong placeholder:font-sans placeholder:text-muted focus:ring-accent aria-invalid:ring-bad aria-invalid:focus:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
         <p id="run-ports-hint" class="mt-1 max-w-[70ch] text-xs text-muted">portaDoHost:portaDoContainer, separadas por vírgula ou espaço. Ficam só em <code class="font-mono">127.0.0.1</code>: só esta máquina acessa.</p>
         <p id="run-ports-err" class="empty:hidden mt-1 text-xs text-bad-fg"></p>
         <label class="mt-2 flex items-start gap-2 w-fit coarse:py-2 cursor-pointer">
@@ -1417,7 +1619,7 @@ PAGE = r"""<!doctype html>
       <div>
         <label for="run-env" class="block font-medium text-fg-strong">Variáveis de ambiente</label>
         <textarea id="run-env" rows="3" spellcheck="false" autocapitalize="off" placeholder="ex.: CHAVE=valor (uma por linha)" aria-describedby="run-env-hint run-env-err"
-          class="mt-1 w-full rounded bg-canvas ring-1 ring-line px-3 py-2 font-mono text-fg-strong placeholder:font-sans placeholder:text-muted focus:ring-accent aria-invalid:ring-bad aria-invalid:focus:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"></textarea>
+          class="mt-1 w-full rounded bg-canvas ring-1 ring-dim px-3 py-2 font-mono text-fg-strong placeholder:font-sans placeholder:text-muted focus:ring-accent aria-invalid:ring-bad aria-invalid:focus:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"></textarea>
         <p id="run-env-hint" class="mt-1 max-w-[70ch] text-xs text-muted">Linhas em branco e com <code class="font-mono">#</code> são ignoradas. Os valores ficam visíveis no <code class="font-mono">docker inspect</code>.</p>
         <p id="run-env-err" class="empty:hidden mt-1 text-xs text-bad-fg"></p>
       </div>
@@ -1425,7 +1627,7 @@ PAGE = r"""<!doctype html>
         <div>
           <label for="run-restart" class="block font-medium text-fg-strong">Restart</label>
           <select id="run-restart" aria-describedby="run-restart-err"
-            class="mt-1 w-full rounded bg-canvas ring-1 ring-line px-3 py-2 coarse:py-3 text-fg-strong focus:ring-accent aria-invalid:ring-bad aria-invalid:focus:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+            class="mt-1 w-full rounded bg-canvas ring-1 ring-dim px-3 py-2 coarse:py-3 text-fg-strong focus:ring-accent aria-invalid:ring-bad aria-invalid:focus:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
             <option value="no">no · não reinicia</option>
             <option value="on-failure">on-failure · se sair com erro</option>
             <option value="unless-stopped">unless-stopped · sempre, menos se você parar</option>
@@ -1436,7 +1638,7 @@ PAGE = r"""<!doctype html>
         <div>
           <label for="run-volume" class="block font-medium text-fg-strong">Volume <span class="font-normal text-muted">(opcional)</span></label>
           <input id="run-volume" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="ex.: dados:/var/lib/data" aria-describedby="run-volume-hint run-volume-err"
-            class="mt-1 w-full rounded bg-canvas ring-1 ring-line px-3 py-2 coarse:py-3 font-mono text-fg-strong placeholder:font-sans placeholder:text-muted focus:ring-accent aria-invalid:ring-bad aria-invalid:focus:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+            class="mt-1 w-full rounded bg-canvas ring-1 ring-dim px-3 py-2 coarse:py-3 font-mono text-fg-strong placeholder:font-sans placeholder:text-muted focus:ring-accent aria-invalid:ring-bad aria-invalid:focus:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
           <p id="run-volume-hint" class="mt-1 text-xs text-muted">Volume nomeado (criado se não existir): nome:/caminho/no/container.</p>
           <p id="run-volume-err" class="empty:hidden mt-1 text-xs text-bad-fg"></p>
         </div>
@@ -1448,6 +1650,86 @@ PAGE = r"""<!doctype html>
     <div class="px-4 py-3 border-t border-line flex justify-end gap-2">
       <button type="button" onclick="create.close()" class="px-3 py-1.5 coarse:min-h-11 coarse:px-4 rounded text-sm font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Cancelar</button>
       <button id="create-go" type="submit" class="px-3 py-1.5 coarse:min-h-11 coarse:px-4 rounded text-sm font-medium ring-1 ring-accent/40 bg-accent/15 text-accent-fg hover:bg-accent/25 aria-disabled:opacity-60 aria-disabled:cursor-wait focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Criar e iniciar</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="prefs" aria-labelledby="prefs-title" aria-describedby="prefs-desc" class="m-auto w-[min(520px,95vw)] rounded-lg bg-raised text-fg-soft ring-1 ring-line-strong backdrop:bg-black/70 p-0">
+  <form id="prefs-form" novalidate>
+    <div class="px-4 py-3 border-b border-line flex items-start gap-3">
+      <div class="mr-auto min-w-0">
+        <h2 id="prefs-title" class="text-lg font-semibold text-fg-strong">Preferências</h2>
+        <p id="prefs-desc" class="text-sm mt-0.5 text-muted">Valem na hora: a janela recarrega com o que você escolher.</p>
+      </div>
+      <button type="button" onclick="prefs.close()" aria-label="Fechar" class="shrink-0 grid place-items-center size-8 coarse:size-11 rounded text-muted hover:text-fg-strong hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent">
+        <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="size-4"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
+    </div>
+    <div class="px-4 py-4 space-y-4 text-sm">
+      <div>
+        <label for="pref-cli" class="block font-medium text-fg-strong">CLI de containers</label>
+        <select id="pref-cli" class="mt-1 w-full rounded bg-canvas ring-1 ring-dim px-3 py-2 coarse:py-3 text-fg-strong focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+          <option value="">Padrão (docker, ou o DOCKER_GUI_CLI)</option>
+          <option value="docker">docker</option>
+          <option value="podman">podman</option>
+        </select>
+      </div>
+      <div id="pref-context-row">
+        <label for="pref-context" class="block font-medium text-fg-strong">Contexto do docker</label>
+        <select id="pref-context" aria-describedby="pref-context-hint" class="mt-1 w-full rounded bg-canvas ring-1 ring-dim px-3 py-2 coarse:py-3 text-fg-strong focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+          <option value="">Padrão (o que o docker escolher)</option>
+        </select>
+        <p id="pref-context-hint" class="mt-1 max-w-[70ch] text-xs text-muted">Os de <code class="font-mono">docker context ls</code>. O padrão segue o <code class="font-mono">DOCKER_CONTEXT</code> e o <code class="font-mono">docker context use</code>.</p>
+      </div>
+      <div>
+        <label for="pref-lang" class="block font-medium text-fg-strong">Idioma</label>
+        <select id="pref-lang" class="mt-1 w-full rounded bg-canvas ring-1 ring-dim px-3 py-2 coarse:py-3 text-fg-strong focus:ring-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+          <option value="">Automático (o do sistema)</option>
+          <option value="pt">Português</option>
+          <option value="en">English</option>
+        </select>
+      </div>
+      <label class="flex items-start gap-2 w-fit coarse:py-2 cursor-pointer">
+        <input id="pref-notify" type="checkbox" class="mt-0.5 size-4 accent-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+        <span>Notificar quando um container entrar na faixa de atenção</span>
+      </label>
+      <div>
+        <label class="flex items-start gap-2 w-fit coarse:py-2 cursor-pointer">
+          <input id="pref-autostart" type="checkbox" aria-describedby="pref-autostart-hint" class="mt-0.5 size-4 accent-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+          <span>Iniciar com o sistema</span>
+        </label>
+        <p id="pref-autostart-hint" class="ml-6 max-w-[70ch] text-xs text-muted">Abre na bandeja ao entrar na sua conta. No GNOME sem a extensão AppIndicator, ele roda sem ícone visível.</p>
+      </div>
+    </div>
+    <div id="prefs-msg" role="alert" class="empty:hidden mx-4 mb-3 rounded-lg ring-1 ring-bad/40 bg-bad/10 px-3 py-2 text-sm text-bad-soft"></div>
+    <div class="px-4 py-3 border-t border-line flex justify-end gap-2">
+      <button type="button" onclick="prefs.close()" class="px-3 py-1.5 coarse:min-h-11 coarse:px-4 rounded text-sm font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Cancelar</button>
+      <button id="prefs-go" type="submit" class="px-3 py-1.5 coarse:min-h-11 coarse:px-4 rounded text-sm font-medium ring-1 ring-accent/40 bg-accent/15 text-accent-fg hover:bg-accent/25 aria-disabled:opacity-60 aria-disabled:cursor-wait focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Salvar</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="cp" aria-labelledby="cp-title" class="m-auto w-[min(520px,95vw)] rounded-lg bg-raised text-fg-soft ring-1 ring-line-strong backdrop:bg-black/70 p-0">
+  <form id="cp-form" novalidate>
+    <div class="px-4 py-3 border-b border-line flex items-start gap-3">
+      <div class="mr-auto min-w-0">
+        <h2 id="cp-title" class="text-lg font-semibold text-fg-strong">Baixar arquivo</h2>
+        <p id="cp-name" class="text-sm mt-0.5 font-mono text-muted truncate"></p>
+      </div>
+      <button type="button" onclick="cp.close()" aria-label="Fechar" class="shrink-0 grid place-items-center size-8 coarse:size-11 rounded text-muted hover:text-fg-strong hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent">
+        <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="size-4"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
+    </div>
+    <div class="px-4 py-4 text-sm">
+      <label for="cp-path" class="block font-medium text-fg-strong">Caminho no container</label>
+      <input id="cp-path" list="cp-recent" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="/var/log/nginx/error.log" aria-describedby="cp-hint cp-err"
+        class="mt-1 w-full rounded bg-canvas ring-1 ring-dim px-3 py-2 coarse:py-3 font-mono text-fg-strong placeholder:font-sans placeholder:text-muted focus:ring-accent aria-invalid:ring-bad aria-invalid:focus:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+      <datalist id="cp-recent"></datalist>
+      <p id="cp-hint" class="mt-1 max-w-[70ch] text-xs text-muted">Caminho absoluto, começando com /. Uma pasta chega como .tar. Até 100 MB.</p>
+      <p id="cp-err" class="empty:hidden mt-1 text-xs text-bad-fg"></p>
+    </div>
+    <div id="cp-msg" role="alert" class="empty:hidden mx-4 mb-3 max-h-40 overflow-auto rounded-lg ring-1 ring-bad/40 bg-bad/10 px-3 py-2 text-sm text-bad-soft [overflow-wrap:anywhere]"></div>
+    <div class="px-4 py-3 border-t border-line flex justify-end gap-2">
+      <button type="button" onclick="cp.close()" class="px-3 py-1.5 coarse:min-h-11 coarse:px-4 rounded text-sm font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Cancelar</button>
+      <button id="cp-go" type="submit" class="px-3 py-1.5 coarse:min-h-11 coarse:px-4 rounded text-sm font-medium ring-1 ring-accent/40 bg-accent/15 text-accent-fg hover:bg-accent/25 aria-disabled:opacity-60 aria-disabled:cursor-wait focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Baixar arquivo</button>
     </div>
   </form>
 </dialog>
@@ -1472,25 +1754,33 @@ PAGE = r"""<!doctype html>
     "(opcional; sem ele, o docker sorteia um)": "(optional; without it, docker picks one)",
     "(sem logs)": "(no logs)",
     "(sem saída)": "(no output)",
+    "(tag latest)": "(tag latest)",
     "+ Novo container": "+ New container",
     ", daemon remoto em {0}": ", remote daemon at {0}",
     ", de {0}": ", from {0}",
     ", rede e PID do host, devices e comando ou entrypoint próprio. Para isso, use o terminal.": ", host network and PID, devices and a custom command or entrypoint. For those, use the terminal.",
     ", {0} fora do filtro": ", {0} outside the filter",
+    ". O padrão segue o": ". The default follows",
     ". Se a imagem faltar, ela é baixada antes.": ". If the image is missing, it is pulled first.",
     "0 containers": "0 containers",
+    "1 adicionado": "1 added",
+    "1 alterado": "1 changed",
+    "1 apagado": "1 deleted",
     ": só esta máquina acessa.": ": only this machine can reach them.",
     "; e mais {0}": "; and {0} more",
     "A imagem não existe no registry, ou falta login: confira o nome, a tag e o docker login.": "The image doesn't exist in the registry, or a login is missing: check the name, the tag and docker login.",
     "A imagem tem mais de uma tag: remova as tags pelo terminal, uma a uma.": "The image has more than one tag: remove the tags one by one in the terminal.",
     "A imagem é de outra arquitetura (ex.: arm64 num host amd64).": "The image is for another architecture (e.g. arm64 on an amd64 host).",
     "A lista muda assim que o docker avisa (docker events)": "The list changes as soon as docker reports it (docker events)",
+    "A lista parou de atualizar: veja o aviso acima": "The list stopped updating: see the notice above",
     "A porta do host já está em uso: pare o que usa ela ou troque a porta.": "The host port is already in use: stop whatever uses it or change the port.",
     "A porta {0} do host aparece duas vezes.": "Host port {0} appears twice.",
     "A rede do container não existe mais: recrie o container (no compose, compose up).": "The container's network no longer exists: recreate the container (with compose, compose up).",
     "Abra o link com {0} que aparece no terminal onde você rodou {1}. O token muda a cada execução.": "Open the link with {0} shown in the terminal where you ran {1}. The token changes on every run.",
+    "Abrir logs de {0}": "Open logs of {0}",
     "Abrir no navegador": "Open in the browser",
     "Abrir os logs. Última linha:": "Open the logs. Last line:",
+    "Abrir pasta": "Open folder",
     "Abrir terminal": "Open terminal",
     "Abrir {0}:{1} em nova aba (porta {2} do container)": "Open {0}:{1} in a new tab (container port {2})",
     "Acompanhar ao vivo": "Follow live",
@@ -1505,13 +1795,23 @@ PAGE = r"""<!doctype html>
     Atalhos: "Shortcuts",
     "Atalhos do teclado": "Keyboard shortcuts",
     "Atenção: qualquer máquina que alcance a sua (Wi-Fi, VPN, rede do escritório) passa a acessar essas portas, e o Docker abre as portas por cima do firewall do sistema (ufw, firewalld). Só marque se precisar mesmo.": "Warning: any machine that can reach yours (Wi-Fi, VPN, office network) can then access these ports, and Docker opens them past the system firewall (ufw, firewalld). Only check this if you really need it.",
+    "Atualizada: {0}. A versão anterior ficou sem tag.": "Updated: {0}. The previous version is now untagged.",
     Atualizar: "Refresh",
+    "Atualizar o healthcheck": "Refresh the healthcheck",
+    "Atualizar {0}": "Update {0}",
+    "Automático (o do sistema)": "Automatic (the system's)",
     "Avisos e erros": "Warnings and errors",
     Ações: "Actions",
     "Ações em lote": "Bulk actions",
+    "Baixada: {0}.": "Pulled: {0}.",
+    "Baixando {0}…": "Pulling {0}…",
     "Baixando…": "Pulling…",
+    Baixar: "Pull",
     "Baixar .log": "Download .log",
+    "Baixar imagem": "Pull image",
     "Build cache": "Build cache",
+    "CLI de containers": "Container CLI",
+    "Caminho copiado: {0}": "Path copied: {0}",
     "Cancela sozinho em 8 s.": "Cancels by itself in 8 s.",
     "Cancela sozinho em 8 segundos.": "Cancels by itself in 8 seconds.",
     Cancelar: "Cancel",
@@ -1524,7 +1824,7 @@ PAGE = r"""<!doctype html>
     "Clique em Derrubar {0} para derrubar o projeto.": "Click Take down {0} to take the project down.",
     "Clique em Limpar para apagar {0}.": "Click Clean up to delete {0}.",
     "Clique em Remover para apagar {0} de vez.": "Click Remove to delete {0} for good.",
-    "Conectado. Esc vai para o terminal; feche pelo ×.": "Connected. Esc goes to the terminal; close with ×.",
+    "Conectado. Esc vai para o terminal; Ctrl+] sai dele, e aí o Esc fecha.": "Connected. Esc goes to the terminal; Ctrl+] leaves it, then Esc closes.",
     "Conectando…": "Connecting…",
     "Conferindo quais volumes saem…": "Checking which volumes go…",
     "Configuração: restart, redes, mounts e env": "Configuration: restart, networks, mounts and env",
@@ -1535,9 +1835,25 @@ PAGE = r"""<!doctype html>
     "Confirmação cancelada: passaram 8 s sem o segundo clique. Nada foi apagado.": "Confirmation canceled: 8 s went by without the second click. Nothing was deleted.",
     Containers: "Containers",
     "Containers parados": "Stopped containers",
+    "Contexto do docker": "Docker context",
     "Copiado: {0}": "Copied: {0}",
     Copiar: "Copy",
+    "Copiar a saída do probe das {0}": "Copy the output of the {0} probe",
+    "Copiar caminho da pasta": "Copy folder path",
     "Copiar docker exec": "Copy docker exec",
+    "Baixar arquivo…": "Download file…",
+    "Baixar arquivo": "Download file",
+    "Caminho no container": "Path in the container",
+    "/var/log/nginx/error.log": "/var/log/nginx/error.log",
+    "Caminho absoluto, começando com /. Uma pasta chega como .tar. Até 100 MB.": "Absolute path, starting with /. A folder arrives as a .tar. Up to 100 MB.",
+    "Detalhes: configuração, histórico, processos e mudanças": "Details: configuration, history, processes and changes",
+    "Nada a reiniciar em {0}: {1}.": "Nothing to restart in {0}: {1}.",
+    "Use o caminho absoluto, começando com /.": "Use the absolute path, starting with /.",
+    "Sem resposta do servidor.": "No response from the server.",
+    "Pelo terminal:": "From the terminal:",
+    "Baixado: {0}": "Downloaded: {0}",
+    "Baixando arquivo…": "Downloading file…",
+    "<caminho>": "<path>",
     "Copiar {0}:{1}": "Copy {0}:{1}",
     "Copiar {0}:{1} (porta {2}/{3} do container)": "Copy {0}:{1} (container port {2}/{3})",
     "Cria e inicia com": "Creates and starts with",
@@ -1561,32 +1877,38 @@ PAGE = r"""<!doctype html>
     "Detalhes técnicos": "Technical details",
     "Disco cheio: libere espaço (aba Imagens, Limpar…).": "Disk full: free some space (Images tab, Clean up…).",
     "Disco: {0} lidos · {1} gravados": "Disk: {0} read · {1} written",
-    "Docker GUI": "Docker GUI",
     "Docker fora do ar": "Docker is down",
     "Dá para baixar de novo.": "It can be pulled again.",
     "Em uso por": "Used by",
     "Em uso por {0}: pare o container antes": "In use by {0}: stop the container first",
     "Em uso por {0}: remova o container antes": "In use by {0}: remove the container first",
     "Em uso: remova o container que usa (ou tire ele da rede) antes.": "In use: remove the container using it (or take it off the network) first.",
+    English: "English",
     "Erro sem mensagem.": "Error without a message.",
     "Esc cancela.": "Esc cancels.",
     "Escolha uma das opções da lista.": "Pick one of the options in the list.",
     Escopo: "Scope",
-    "Esta aba não tem o token do Docker GUI.": "This tab doesn't have the Docker GUI token.",
+    "Esta aba não tem o token do Stivo.": "This tab doesn't have the Stivo token.",
     "Este container não existe mais.": "This container no longer exists.",
     "Este projeto não tem mais containers.": "This project has no containers left.",
     "Faixa de portas: {0} do host → {1} do container": "Port range: {0} on the host → {1} in the container",
     "Falhou ao {0} · ver erro": "Failed to {0} · see error",
     Fechar: "Close",
+    "Fechar a saída do docker pull {0}": "Close the docker pull {0} output",
+    "Fechar a saída do {0} do projeto {1}": "Close the {0} output for project {1}",
     "Fechar logs": "Close logs",
     "Fechar terminal": "Close terminal",
     "Ficam de fora, para a GUI não ampliar o acesso ao host: pasta do host (bind mount),": "Left out, so the GUI never widens access to the host: host folders (bind mounts),",
+    "Filtrar caminhos": "Filter paths",
+    "Filtrar caminhos…": "Filter paths…",
     "Filtrar containers por nome, imagem ou projeto": "Filter containers by name, image or project",
     "Filtrar linhas dos logs": "Filter log lines",
     "Filtrar linhas…": "Filter lines…",
     "Filtrar por estado": "Filter by state",
     "Filtrar por nome, imagem ou projeto…": "Filter by name, image or project…",
+    Healthcheck: "Healthcheck",
     "Histórico: quando subiu, caiu ou mudou de saúde": "History: when it started, crashed or changed health",
+    Idioma: "Language",
     Imagem: "Image",
     "Imagem inválida: use repo[:tag] ou repo@sha256:…, com o caminho em minúsculas.": "Invalid image: use repo[:tag] or repo@sha256:…, with the path in lowercase.",
     "Imagem:": "Image:",
@@ -1616,8 +1938,13 @@ PAGE = r"""<!doctype html>
     "Marcar a queda de {0} como vista: sai da faixa de atenção": "Mark the crash of {0} as seen: it leaves the attention band",
     "Marcar como visto": "Mark as seen",
     Memória: "Memory",
+    "Memória em {0}% do limite ({1} de {2})": "Memory at {0}% of the limit ({1} of {2})",
     "Memória: {0} ({1})": "Memory: {0} ({1})",
     "Morto · só dá para remover": "Dead · can only be removed",
+    "Mostrando {0} de {1}; use o filtro para achar o resto.": "Showing {0} of {1}; use the filter to find the rest.",
+    "Mudanças copiadas.": "Changes copied.",
+    "Mudanças no filesystem (docker diff)": "Filesystem changes (docker diff)",
+    "Nada mudou em relação à imagem.": "Nothing changed from the image.",
     "Nada nas últimas 24 h. O docker guarda só os eventos mais recentes.": "Nothing in the last 24 h. Docker only keeps the most recent events.",
     "Nada no log ainda. As linhas novas aparecem aqui assim que o container escrever.": "Nothing in the log yet. New lines show up here as soon as the container writes.",
     "Nada no log nesse período.": "Nothing in the log for this period.",
@@ -1641,26 +1968,33 @@ PAGE = r"""<!doctype html>
     Nome: "Name",
     "Nome inválido: 2 a 128 caracteres entre letras, números, _ . e -, começando por letra ou número.": "Invalid name: 2 to 128 characters among letters, digits, _ . and -, starting with a letter or digit.",
     "Notificar quando algo der problema": "Notify me when something breaks",
+    "Notificar quando um container entrar na faixa de atenção": "Notify me when a container needs attention",
+    "Iniciar com o sistema": "Start with the system",
+    "Abre na bandeja ao entrar na sua conta. No GNOME sem a extensão AppIndicator, ele roda sem ícone visível.": "Opens in the tray when you log in. On GNOME without the AppIndicator extension, it runs with no visible icon.",
     "Novo container": "New container",
-    "Não consegui carregar os logs. O servidor do Docker GUI está rodando?": "Could not load the logs. Is the Docker GUI server running?",
-    "Não consegui conectar ao servidor do Docker GUI.": "Could not connect to the Docker GUI server.",
+    "Não consegui carregar os logs. O servidor do Stivo está rodando?": "Could not load the logs. Is the Stivo server running?",
+    "Não consegui conectar ao servidor do Stivo.": "Could not connect to the Stivo server.",
     "Não consegui copiar.": "Could not copy.",
+    "Não consegui copiar. O caminho é: {0}": "Could not copy. The path is: {0}",
     "Não consegui copiar. O comando é: {0}": "Could not copy. The command is: {0}",
     "Não consegui falar com o Docker.": "Could not talk to Docker.",
     "Não consegui ler a lista de volumes; o prune leva os sem uso.": "Could not read the volume list; the prune takes the unused ones.",
-    "Não consegui ler a lista. O servidor do Docker GUI está rodando?": "Could not read the list. Is the Docker GUI server running?",
+    "Não consegui ler a lista. O servidor do Stivo está rodando?": "Could not read the list. Is the Stivo server running?",
     "Não consegui ler a lista: {0}": "Could not read the list: {0}",
+    "Não consegui ler as mudanças.": "Could not read the changes.",
+    "Não consegui ler as mudanças: {0}": "Could not read the changes: {0}",
     "Não consegui ler o healthcheck.": "Could not read the healthcheck.",
     "Não consegui ler o healthcheck: {0}": "Could not read the healthcheck: {0}",
     "Não consegui ler o inspect.": "Could not read the inspect.",
     "Não consegui ler o inspect: {0}": "Could not read the inspect: {0}",
-    "Não consegui ler o uso de disco. O servidor do Docker GUI está rodando?": "Could not read the disk usage. Is the Docker GUI server running?",
+    "Não consegui ler o uso de disco. O servidor do Stivo está rodando?": "Could not read the disk usage. Is the Stivo server running?",
     "Não consegui ler o uso de disco: {0}": "Could not read the disk usage: {0}",
     "Não consegui ler os eventos.": "Couldn't read the events.",
     "Não consegui ler os eventos: {0}": "Couldn't read the events: {0}",
     "Não consegui ler os logs: {0}": "Could not read the logs: {0}",
     "Não consegui ler os processos.": "Couldn't read the processes.",
     "Não consegui ler os processos: {0}": "Couldn't read the processes: {0}",
+    "Não deu para baixar {0}. {1}": "Could not pull {0}. {1}",
     "Não deu para criar {0}.": "Could not create {0}.",
     "Não deu para criar {0}. {1}": "Could not create {0}. {1}",
     "Não deu para limpar {0}: {1}": "Could not clean up {0}: {1}",
@@ -1673,15 +2007,18 @@ PAGE = r"""<!doctype html>
     "O erro ficou na linha.": "The error is on its row.",
     "O erro ficou na lista.": "The error is shown in the list.",
     "O próximo build fica mais lento.": "The next build will be slower.",
-    "O servidor do Docker GUI parou de responder.": "The Docker GUI server stopped responding.",
+    "O servidor do Stivo parou de responder.": "The Stivo server stopped responding.",
     "O valor de {0} tem o caractere NUL ou passa de {1} caracteres.": "The value of {0} has the NUL character or is longer than {1} characters.",
     "Ocultar valores": "Hide values",
     "Os dados dele se perdem.": "Its data is lost.",
     "Os dados deles se perdem.": "Their data is lost.",
+    "Os de": "The ones from",
     "Os logs deles se perdem; os volumes ficam.": "Their logs are lost; volumes stay.",
     "Os volumes não são afetados.": "Volumes are not affected.",
     "Os {0} containers estão de pé.": "All {0} containers are up.",
     "Outras imagens foram construídas sobre esta.": "Other images were built on top of this one.",
+    "Padrão (docker, ou o DOCKER_GUI_CLI)": "Default (docker, or DOCKER_GUI_CLI)",
+    "Padrão (o que o docker escolher)": "Default (whatever docker picks)",
     "Parado há {0}": "Stopped {0} ago",
     "Parando…": "Stopping…",
     Parar: "Stop",
@@ -1692,7 +2029,10 @@ PAGE = r"""<!doctype html>
     Pausar: "Pause",
     Período: "Period",
     Portas: "Ports",
+    Português: "Português",
     "Precisa de atenção · {0}": "Needs attention · {0}",
+    Preferências: "Preferences",
+    Processos: "Processes",
     "Processos (docker top)": "Processes (docker top)",
     "Projeto compose · {0} de {1} rodando · todos os serviços": "Compose project · {0} of {1} running · all services",
     "Pronto: aviso quando um container entrar na faixa de atenção, mesmo com a aba em segundo plano.": "Done: you'll be notified when a container enters the attention band, even with the tab in the background.",
@@ -1728,7 +2068,12 @@ PAGE = r"""<!doctype html>
     "Rodando há {0}{1}": "Up for {0}{1}",
     "Rode {0} de novo; a página volta sozinha.": "Run {0} again; the page comes back by itself.",
     "Rode {0} e entre de novo na sessão.": "Run {0} and log in again.",
+    "Saia do Stivo pelo menu da bandeja e abra de novo.": "Quit Stivo from the tray menu and open it again.",
     "Saiu com código {0} há {1}": "Exited with code {0} {1} ago",
+    Salvar: "Save",
+    "Saída do docker pull {0}": "docker pull {0} output",
+    "Saída do probe copiada.": "Probe output copied.",
+    "Saída do {0}": "{0} output",
     "Saída dos logs": "Log output",
     "Selecionar todos os visíveis": "Select all visible",
     "Selecionar {0}": "Select {0}",
@@ -1736,12 +2081,15 @@ PAGE = r"""<!doctype html>
     "Sem o docker events: a lista é relida a cada 2 s": "Without docker events: the list is re-read every 2 s",
     "Sem permissão para notificar. Dá para liberar nas configurações do site, no navegador.": "No permission to notify. You can allow it in the browser's site settings.",
     "Sem projeto compose": "No compose project",
-    "Sem resposta do servidor do Docker GUI.": "No response from the Docker GUI server.",
+    "Sem resposta do servidor do Stivo.": "No response from the Stivo server.",
     Serviço: "Service",
     "Sessão encerrada.": "Session ended.",
     "Seu usuário não tem acesso ao Docker.": "Your user has no access to Docker.",
     Seções: "Sections",
     Status: "Status",
+    Stivo: "Stivo",
+    "Stivo · sem dados atualizados do Docker": "Stivo · no fresh data from Docker",
+    "Stivo · {0} na faixa de atenção": "Stivo · {0} need attention",
     "Subindo…": "Bringing up…",
     "Só erros": "Errors only",
     "Só no loopback do daemon remoto {0}: não abre daqui": "Only on the loopback of the remote daemon {0}: can't be opened from here",
@@ -1754,26 +2102,36 @@ PAGE = r"""<!doctype html>
     "Use nome:/caminho/no/container, ex.: dados:/var/lib/postgresql/data. Pasta do host (bind mount) não é aceita.": "Use name:/path/in/container, e.g. data:/var/lib/postgresql/data. Host folders (bind mounts) are not accepted.",
     "Vai apagar {0}: {1}{2}. Os dados deles se perdem.": "Will delete {0}: {1}{2}. Their data is lost.",
     "Vai remover {0}. {1}": "Will remove {0}. {1}",
+    "Valem na hora: a janela recarrega com o que você escolher.": "They apply right away: the window reloads with your choices.",
     "Variáveis de ambiente": "Environment variables",
     "Ver logs": "View logs",
+    "Ver os processos de {0}": "See the processes of {0}",
     "Ver último healthcheck": "See last healthcheck",
     Volume: "Volume",
     "Volume nomeado (criado se não existir): nome:/caminho/no/container.": "Named volume (created if missing): name:/path/in/container.",
     Volumes: "Volumes",
+    "Volumes e bind mounts ficam de fora: o docker diff só vê a camada do container.": "Volumes and bind mounts are left out: docker diff only sees the container layer.",
     "a cada 2 s": "every 2 s",
     "a imagem": "the image",
     "a rede": "the network",
     "abre os logs do container da linha em foco": "opens the logs of the container in the focused row",
+    adicionado: "added",
+    alterado: "changed",
     "always · sempre": "always · always",
     "anda entre os botões Logs": "moves between the Logs buttons",
     ano: "yr",
     anos: "yr",
     anônimo: "anonymous",
     "ao vivo": "live",
+    apagado: "deleted",
     "as imagens que nenhum container usa": "the images no container uses",
+    "as {0} passaram": "all {0} passed",
+    "baixando…": "pulling…",
     "busca na lista de containers (nos logs, filtra as linhas)": "searches the container list (in the logs, filters the lines)",
     "caiu {0}×": "crashed {0}×",
     "cancela uma confirmação, fecha menus e modais": "cancels a confirmation, closes menus and dialogs",
+    "com o foco na lista, desfaz a última ação (Iniciar de novo, Retomar)": "with focus on the list, undoes the last action (Start again, Resume)",
+    "com o foco na lista, marca ou desmarca todos os visíveis": "with focus on the list, selects or unselects all visible rows",
     "com problema": "with problems",
     "comando não encontrado": "command not found",
     "comando sem permissão de execução": "command not executable",
@@ -1785,10 +2143,17 @@ PAGE = r"""<!doctype html>
     "código {0} · {1}": "code {0} · {1}",
     "da última hora": "from the last hour",
     "das últimas 24 h": "from the last 24 h",
+    "depende de {0}, que está com healthcheck falhando": "depends on {0}, whose healthcheck is failing",
+    "depende de {0}, que está parado": "depends on {0}, which is stopped",
+    "depende de {0}, que não tem container": "depends on {0}, which has no container",
+    "depende de {0}, que saiu com erro": "depends on {0}, which exited with an error",
+    desatualizado: "out of date",
     "desde que o container subiu": "since the container started",
-    "desfaz a última ação (Iniciar de novo, Retomar)": "undoes the last action (Start again, Resume)",
+    docker: "docker",
+    "docker pull": "docker pull",
     "dos últimos 15 min": "from the last 15 min",
     "dos últimos 5 min": "from the last 5 min",
+    "e o": "and",
     "encerrado por SIGTERM": "terminated by SIGTERM",
     "erro da aplicação (veja o log)": "application error (see the log)",
     "erro sem mensagem": "error without a message",
@@ -1801,13 +2166,14 @@ PAGE = r"""<!doctype html>
     "falha do próprio docker run": "docker run itself failed",
     falharam: "failed",
     falhou: "failed",
+    "falhou (código {0})": "failed (exit code {0})",
     "ficou sem memória (OOM)": "ran out of memory (OOM)",
     "healthcheck começou a falhar": "healthcheck started failing",
-    "healthcheck falhando, loop de reinício ou saída com erro": "failing healthcheck, restart loop or exit with an error",
+    "healthcheck falhando, loop de reinício, saída com erro, dependência quebrada ou memória perto do limite": "failing healthcheck, restart loop, exit with an error, broken dependency or memory near the limit",
     "healthcheck voltou a passar": "healthcheck passing again",
     "healthcheck: {0}": "healthcheck: {0}",
     "há {0}": "{0} ago",
-    "inicia, para ou retoma o container da linha em foco (a ação principal dela)": "starts, stops or resumes the container of the focused row (its main action)",
+    "inicia, para ou retoma o container da linha em foco": "starts, stops or resumes the container of the focused row",
     iniciado: "started",
     item: "item",
     "item sem uso": "unused item",
@@ -1817,8 +2183,9 @@ PAGE = r"""<!doctype html>
     "limpeza feita": "cleanup done",
     linha: "line",
     linhas: "lines",
+    "mais 1 linha": "1 more line",
+    "mais {0} linhas": "{0} more lines",
     "marca ou desmarca a linha em foco": "selects or unselects the focused row",
-    "marca ou desmarca todos os visíveis": "selects or unselects all visible rows",
     meses: "mo",
     "morto à força (SIGKILL), não por falta de memória": "killed (SIGKILL), not for lack of memory",
     "morto à força ou sem memória (OOM)": "killed or out of memory (OOM)",
@@ -1831,6 +2198,7 @@ PAGE = r"""<!doctype html>
     "nenhuma tag aponta para ela": "no tag points to it",
     "no · não reinicia": "no · never restarts",
     "não reinicia": "never restarts",
+    "não rodou como esperado": "didn't run as expected",
     "o cache de build": "the build cache",
     "o container parou": "the container stopped",
     "o volume": "the volume",
@@ -1844,13 +2212,16 @@ PAGE = r"""<!doctype html>
     parado: "stopped",
     parados: "stopped",
     parou: "stopped",
+    passou: "passed",
     pausado: "paused",
     pausados: "paused",
+    podman: "podman",
     "portaDoHost:portaDoContainer, separadas por vírgula ou espaço. Ficam em {0} do daemon remoto {1}: só aquela máquina acessa, não esta.": "hostPort:containerPort, separated by commas or spaces. Bound to {0} of the remote daemon {1}: only that machine can reach them, not this one.",
     "portaDoHost:portaDoContainer, separadas por vírgula ou espaço. Ficam só em": "hostPort:containerPort, separated by commas or spaces. Bound only to",
+    "postgres:17": "postgres:17",
     reconstruído: "rebuilt",
     "reconstrói o serviço do compose da linha em foco (nos logs, o dos logs)": "rebuilds the compose service of the focused row (in the logs, the one shown)",
-    "reinicia o container da linha em foco (nos logs, o dos logs)": "restarts the focused row's container (in the logs, the one shown)",
+    "reinicia o container da linha em foco (nos logs, o dos logs); parado, inicia": "restarts the focused row's container (in the logs, the one shown); stopped, starts it",
     reiniciado: "restarted",
     reiniciando: "restarting",
     "reiniciou 1 vez": "restarted once",
@@ -1861,8 +2232,10 @@ PAGE = r"""<!doctype html>
     "remoção em lote": "bulk removal",
     retomado: "resumed",
     "rodando bem": "running fine",
+    "rodando…": "running…",
     "saiu com código {0}": "exited with code {0}",
     "se sair com erro": "if it exits with an error",
+    "segurando {0}": "holding {0}",
     selecionado: "selected",
     selecionados: "selected",
     sem: "wk",
@@ -1870,6 +2243,8 @@ PAGE = r"""<!doctype html>
     "sem conexão": "no connection",
     "sem container: {0}": "no container: {0}",
     "sem memória (OOM)": "out of memory (OOM)",
+    "sem resposta do servidor": "no response from the server",
+    "sem resposta do servidor do Stivo.": "no response from the Stivo server.",
     "sem tag": "untagged",
     "sem tag {0}": "untagged {0}",
     "sem token": "no token",
@@ -1886,21 +2261,28 @@ PAGE = r"""<!doctype html>
     "volumes anônimos sem uso": "unused anonymous volumes",
     "volumes sem uso": "unused volumes",
     "{0} OOM": "{0} OOM",
+    "{0} adicionados": "{0} added",
+    "{0} alterados": "{0} changed",
+    "{0} apagados": "{0} deleted",
     "{0} aparece duas vezes.": "{0} appears twice.",
     "{0} com problema": "{0} with problems",
     "{0} containers precisam de atenção": "{0} containers need attention",
     "{0} containers subiram mas não ficaram bem. Veja a faixa de atenção.": "{0} containers started but aren't healthy. See the attention band.",
+    "{0} continuam com a versão anterior até serem recriados.": "{0} keep the previous version until they are recreated.",
     "{0} criado, conferindo se ficou de pé…": "{0} created, checking it stays up…",
     "{0} criado.": "{0} created.",
     "{0} de {1} containers": "{0} of {1} containers",
+    "{0} de {1} falharam": "{0} of {1} failed",
     "{0} de {1} rodando": "{0} of {1} running",
     "{0} do projeto {1}": "{0} of project {1}",
     "{0} do projeto {1} ({2})": "{0} of project {1} ({2})",
     "{0} e mais {1}": "{0} and {1} more",
     "{0} está de pé.": "{0} is up.",
     "{0} fora do filtro": "{0} outside the filter",
+    "{0} já estava em dia.": "{0} was already up to date.",
     "{0} liberados": "{0} freed",
     "{0} na faixa de atenção, acima": "{0} in the attention band above",
+    "{0} no filtro": "{0} in the filter",
     "{0} no total · {1} liberável · {2} {3}, {4} em uso": "{0} total · {1} reclaimable · {2} {3}, {4} in use",
     "{0} nos últimos {1}: mín {2}, máx {3}, agora {4}": "{0} over the last {1}: min {2}, max {3}, now {4}",
     "{0} precisa de atenção": "{0} needs attention",
@@ -1915,7 +2297,7 @@ PAGE = r"""<!doctype html>
     "{0} às {1}": "{0} at {1}",
     "{0}, conferindo se ficaram de pé…": "{0}, checking they stay up…",
     "{0}: 1 de {1} falhou. O erro ficou na linha.": "{0}: 1 of {1} failed. The error is on its row.",
-    "{0}: sem resposta do servidor do Docker GUI.": "{0}: no response from the Docker GUI server.",
+    "{0}: sem resposta do servidor do Stivo.": "{0}: no response from the Stivo server.",
     "{0}: {1} concluído, conferindo se ficou de pé…": "{0}: {1} done, checking it stays up…",
     "{0}: {1} concluído.": "{0}: {1} done.",
     "{0}: {1} de {2} falharam. Os erros ficaram nas linhas.": "{0}: {1} of {2} failed. The errors are on their rows.",
@@ -1926,9 +2308,9 @@ PAGE = r"""<!doctype html>
     "Última hora": "Last hour",
     "Últimas 24 h": "Last 24 h",
     "Últimas 500 linhas": "Last 500 lines",
-    "Último healthcheck:": "Last healthcheck:",
     "Últimos 15 min": "Last 15 min",
     "Últimos 5 min": "Last 5 min",
+    "Últimos probes do healthcheck, do mais novo para o mais velho": "Latest healthcheck probes, newest first",
     "últimas {0} linhas": "last {0} lines",
     "últimas {0} linhas de cada container": "last {0} lines of each container",
     "“{0}” não é CHAVE=valor: a chave tem letras, números e _, e não começa com número.": "“{0}” is not KEY=value: the key has letters, digits and _, and doesn't start with a digit.",
@@ -1992,10 +2374,44 @@ PAGE = r"""<!doctype html>
   var BUCKET_OF_STATE = { running: "rodando", paused: "pausado", restarting: "reiniciando" };
   var bucket = (c) => ["bad", "warn"].includes(tone(c)) ? "problema" : BUCKET_OF_STATE[c.State] || "parado";
   var isProblem = (c) => bucket(c) === "problema";
-  var newProblems = (before, cs2) => before ? cs2.filter((c) => isProblem(c) && !before.has(c.ID)) : [];
+  var newProblems = (before, cs2, is2 = isProblem, key = (c) => c.ID) => before ? cs2.filter((c) => is2(c) && !before.has(key(c))) : [];
   var project = (c) => (c.Labels || "").match(/(?:^|,)com\.docker\.compose\.project=([^,]*)/)?.[1] || "";
   var workingDir = (c) => (c.Labels || "").match(/(?:^|,)com\.docker\.compose\.project\.working_dir=([^,]*)/)?.[1] || "";
   var service = (c) => (c.Labels || "").match(/(?:^|,)com\.docker\.compose\.service=([^,]*)/)?.[1] || "";
+  var DEP = "[^,=:]+:[^,=:]+(?::(?:true|false))?";
+  var DEPS_RE = new RegExp(`(?:^|,)com\\.docker\\.compose\\.depends_on=(${DEP}(?:,${DEP})*)`);
+  var CONDS = ["service_started", "service_healthy", "service_completed_successfully"];
+  function dependsOn(c) {
+    const v2 = (c.Labels || "").match(DEPS_RE)?.[1];
+    return !v2 ? [] : v2.split(",").map((d) => {
+      const [service2, cond] = d.split(":");
+      return { service: service2, cond: CONDS.includes(cond) ? cond : "service_started" };
+    });
+  }
+  function oneState(c, cond) {
+    if (c.State === "running") return cond === "service_healthy" && /\(unhealthy\)/.test(c.Status) ? "unhealthy" : null;
+    if (cond === "service_completed_successfully" && /^Exited \(0\)/.test(c.Status)) return null;
+    if (c.State === "restarting" && !restartCode(c)) return null;
+    return tone(c) === "bad" ? "exited" : "stopped";
+  }
+  function depState(d, p, cs2) {
+    const st2 = cs2.filter((c) => project(c) === p && service(c) === d.service).map((c) => oneState(c, d.cond));
+    if (!st2.length) return "missing";
+    return st2.includes(null) ? null : st2.find((s15) => s15 === "unhealthy" || s15 === "exited") ?? st2[0];
+  }
+  function blockers(c, cs2) {
+    const p = project(c);
+    if (!p || c.State === "running" && !isProblem(c)) return [];
+    return dependsOn(c).flatMap((d) => {
+      const state = depState(d, p, cs2);
+      return state ? [{ service: d.service, state, c: cs2.find((x) => project(x) === p && service(x) === d.service) }] : [];
+    });
+  }
+  var held = (c, cs2) => c.State === "created" && blockers(c, cs2).length > 0;
+  function holds(c, cs2) {
+    const p = project(c), s15 = service(c);
+    return !p ? [] : cs2.filter((d) => d.ID !== c.ID && project(d) === p && blockers(d, cs2).some((b2) => b2.service === s15));
+  }
   function logServices(p, cs2) {
     const m = /* @__PURE__ */ new Map();
     for (const c of cs2) {
@@ -2068,6 +2484,34 @@ PAGE = r"""<!doctype html>
     for (; n >= 1024 && i < u.length - 1; i++) n /= 1024;
     return `${i && n < 100 ? n.toFixed(1) : Math.round(n)} ${u[i]}`;
   }
+  function memLimit(s15) {
+    const [u, l] = s15.MemUsage.split(" / ").map((x) => bytes(x ?? ""));
+    return u !== null && l ? { used: u, limit: l } : null;
+  }
+  var memPct = (s15) => {
+    const m = memLimit(s15);
+    return percent(s15.MemPerc) ?? (m && m.used / m.limit * 100);
+  };
+  var MEM_IN = 90;
+  var MEM_OUT = 85;
+  var MEM_READS = 2;
+  var NO_LIMIT = 0.95;
+  function memWatch(prev, stats2, memTotal2, first = false) {
+    const next = /* @__PURE__ */ new Map();
+    if (!memTotal2) return next;
+    for (const [id, s15] of Object.entries(stats2)) {
+      const m = memLimit(s15), pct = memPct(s15), was = prev.get(id) ?? { n: 0, on: false };
+      if (!m || pct === null || m.limit >= NO_LIMIT * memTotal2) continue;
+      if (pct >= MEM_IN) next.set(id, { n: was.n + 1, on: was.on || first || was.n + 1 >= MEM_READS });
+      else if (pct >= MEM_OUT && was.on) next.set(id, { n: 0, on: true });
+    }
+    return next;
+  }
+  var memHot = (st2, id) => !!st2.get(id)?.on;
+  var memText = (s15) => {
+    const m = memLimit(s15);
+    return t`Memória em ${Math.round(memPct(s15))}% do limite (${fmtBytes(m.used)} de ${fmtBytes(m.limit)})`;
+  };
   function pair(s15) {
     const m = s15?.match(/^\s*(\S+)\s*\/\s*(\S+)\s*$/);
     return m && bytes(m[1]) !== null && bytes(m[2]) !== null ? [m[1], m[2]] : null;
@@ -2135,6 +2579,25 @@ PAGE = r"""<!doctype html>
     if (!head) return [];
     return [head, ...lines.map((c) => [...c.slice(0, head.length - 1), c.slice(head.length - 1).join("  ")])];
   }
+  var probeResult = (p) => p.ExitCode === 0 ? "ok" : p.ExitCode === 1 ? "fail" : "error";
+  var probeTime = (s15) => Date.parse(s15.replace(/(\.\d{3})\d+/, "$1"));
+  function probeDuration(p) {
+    const d = probeTime(p.End) - probeTime(p.Start);
+    return Number.isFinite(d) && d >= 0 ? d : null;
+  }
+  function healthSummary(log) {
+    const bad = log.filter((p) => probeResult(p) !== "ok").length;
+    return !log.length ? "" : bad ? t`${bad} de ${log.length} falharam` : t`as ${log.length} passaram`;
+  }
+  var DIFF_MAX = 500;
+  function diffSummary(items) {
+    const n = (k) => items.filter((d2) => d2.k === k).length, a = n("A"), c = n("C"), d = n("D");
+    return [
+      a && (a === 1 ? t`1 adicionado` : t`${a} adicionados`),
+      c && (c === 1 ? t`1 alterado` : t`${c} alterados`),
+      d && (d === 1 ? t`1 apagado` : t`${d} apagados`)
+    ].filter(Boolean).join(" · ");
+  }
   var RESTART = ["no", "on-failure", "unless-stopped", "always"];
   var HOST = "[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?";
   var PATH = "[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*";
@@ -2145,13 +2608,17 @@ PAGE = r"""<!doctype html>
   var VOLUME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{1,127}:((?:\/[A-Za-z0-9._@+-]+)+)$/;
   var MAX_ENV_VALUE = 4096;
   var MAX_ITEMS = 64;
+  var imageOk = (image) => image.length <= 512 && IMAGE_RE.test(image);
+  var withTag = (ref) => /@sha256:|:[^/]*$/.test(ref) ? ref : `${ref}:latest`;
+  var sameRef = (tag, ref) => [ref, `docker.io/${ref}`, `docker.io/library/${ref}`].includes(tag);
+  var pullOutcome = (before, after) => !after ? "missing" : !before ? "new" : before === after ? "same" : "updated";
   var splitPorts = (s15) => s15.split(/[\s,]+/).filter(Boolean);
   var splitEnv = (s15) => s15.split(/\r?\n/).filter((l) => l.trim() && !l.trimStart().startsWith("#"));
   function runSpec(f) {
     const errors2 = {}, image = f.image.trim(), name = f.name.trim(), volume = f.volume.trim();
     const ports2 = splitPorts(f.ports), env = splitEnv(f.env);
     if (!image) errors2.image = t`Informe a imagem, ex.: nginx:1.27 ou ghcr.io/acme/api:1.4.`;
-    else if (image.length > 512 || !IMAGE_RE.test(image)) errors2.image = t`Imagem inválida: use repo[:tag] ou repo@sha256:…, com o caminho em minúsculas.`;
+    else if (!imageOk(image)) errors2.image = t`Imagem inválida: use repo[:tag] ou repo@sha256:…, com o caminho em minúsculas.`;
     if (name && !NAME_RE.test(name)) errors2.name = t`Nome inválido: 2 a 128 caracteres entre letras, números, _ . e -, começando por letra ou número.`;
     const seen2 = /* @__PURE__ */ new Set();
     for (const p of ports2) {
@@ -2212,6 +2679,11 @@ PAGE = r"""<!doctype html>
   ];
   var logLevel = (line) => LEVEL.find(([, word, mark2]) => word.test(line) || mark2.test(line))?.[0] ?? "";
   var continues = (body) => /^(\s+\S|Caused by:|\.\.\. \d+ more)/.test(body);
+  function tailLine(text) {
+    const ts2 = /^\d{4}-\d\d-\d\dT\S+\s/;
+    const lines = text.split("\n").filter((l) => l.trim()).map((l) => [l.match(ts2)?.[0] ?? "", l.replace(ts2, "")]).sort(([a], [b2]) => a < b2 ? -1 : a > b2 ? 1 : 0).map(([, l]) => l);
+    return lines.reverse().find((l) => logLevel(l) === "bad" && !continues(l) && !l.startsWith("Traceback (")) ?? lines[0] ?? "";
+  }
   function reclaimShare(d) {
     const pct = d.Reclaimable.match(/\((\d+(?:\.\d+)?)%\)/), r = bytes(d.Reclaimable.split(" ")[0]), t2 = bytes(d.Size);
     const v2 = pct ? +pct[1] / 100 : r !== null && t2 ? r / t2 : null;
@@ -2219,6 +2691,103 @@ PAGE = r"""<!doctype html>
   }
   var anonVolume = (name) => /^[0-9a-f]{64}$/.test(name);
   var prunedVolumes = (vs2, podman) => vs2.filter((v2) => !v2.Containers.length && (podman || anonVolume(v2.Name)));
+
+  // src/transport-web.ts
+  var TOKEN = (() => {
+    const t2 = new URLSearchParams(location.hash.slice(1)).get("t");
+    try {
+      if (t2) localStorage.setItem("docker-gui-token", t2);
+      return t2 || localStorage.getItem("docker-gui-token") || "";
+    } catch {
+      return t2 || "";
+    }
+  })();
+  var request = (method, path, body) => fetch(path, {
+    method,
+    headers: { "X-Docker-GUI-Token": TOKEN, ...body === void 0 ? {} : { "Content-Type": "application/json" } },
+    body: body === void 0 ? void 0 : JSON.stringify(body)
+  });
+  function stream(path, query, on2) {
+    const es2 = new EventSource(`${path}?${new URLSearchParams({ ...query, t: TOKEN })}`);
+    es2.onopen = () => on2.open?.();
+    es2.onmessage = (e) => on2.data(e.data);
+    es2.addEventListener("end", () => on2.end());
+    es2.onerror = () => on2.error(es2.readyState === EventSource.CLOSED);
+    return es2;
+  }
+  async function ndjson(path, body, onLine) {
+    const r = await request("POST", path, body);
+    if (!r.ok) return { status: r.status, code: -1, error: await r.json() };
+    const reader = r.body.pipeThrough(new TextDecoderStream()).getReader();
+    let rest = "", code2 = -1;
+    for (; ; ) {
+      const { value, done } = await reader.read();
+      if (done) return { status: r.status, code: code2 };
+      const lines = (rest + value).split("\n");
+      rest = lines.pop();
+      for (const l of lines) {
+        const v2 = JSON.parse(l);
+        if (typeof v2 === "string") onLine(v2);
+        else code2 = v2.code;
+      }
+    }
+  }
+  function terminal(id, on2) {
+    const ws2 = new WebSocket(`ws://${location.host}/api/exec/${id}?t=${encodeURIComponent(TOKEN)}`), enc = new TextEncoder();
+    ws2.binaryType = "arraybuffer";
+    ws2.onopen = () => on2.open();
+    ws2.onmessage = (e) => typeof e.data === "string" ? on2.notice(e.data) : on2.data(new Uint8Array(e.data));
+    ws2.onclose = () => on2.close();
+    const open = () => ws2.readyState === WebSocket.OPEN;
+    return {
+      send: (d) => {
+        if (open()) ws2.send(enc.encode(d));
+      },
+      resize: (cols, rows) => {
+        if (open()) ws2.send(JSON.stringify({ cols, rows }));
+      },
+      close: () => {
+        ws2.onclose = ws2.onmessage = null;
+        ws2.close();
+      }
+      // a sessão já foi: nada de escrever num terminal descartado
+    };
+  }
+  function saveBlob(name, blob) {
+    const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: name });
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href));
+  }
+  async function cpOut(id, path, signal) {
+    const r = await fetch(`/api/cp/${id}?${new URLSearchParams({ path })}`, { headers: { "X-Docker-GUI-Token": TOKEN }, signal });
+    if (!r.ok) return { ok: false, status: r.status, error: String(await r.json()) };
+    const name = decodeURIComponent(/filename\*=UTF-8''([^;]+)/.exec(r.headers.get("Content-Disposition") ?? "")?.[1] ?? "arquivo");
+    saveBlob(name, await r.blob());
+    return { ok: true, saved: true, name };
+  }
+  var icon = document.head.appendChild(Object.assign(document.createElement("link"), { rel: "icon" }));
+  var T = {
+    desktop: false,
+    request,
+    stream,
+    ndjson,
+    terminal,
+    cpOut,
+    attention(_badge, svg) {
+      const href = "data:image/svg+xml," + encodeURIComponent(svg);
+      if (icon.getAttribute("href") !== href) icon.href = href;
+    },
+    notify(title, body, onClick) {
+      try {
+        const n = new Notification(title, { body });
+        n.onclick = () => {
+          onClick();
+          n.close();
+        };
+      } catch {
+      }
+    }
+  };
 
   // node_modules/@xterm/xterm/lib/xterm.mjs
   var zs = Object.defineProperty;
@@ -3350,38 +3919,38 @@ ${h2.join(`
     Qe.None = () => D.None;
     function t2(y) {
       if ($l) {
-        let { onDidAddListener: T } = y, g = gi.create(), w = 0;
+        let { onDidAddListener: T2 } = y, g = gi.create(), w = 0;
         y.onDidAddListener = () => {
-          ++w === 2 && (console.warn("snapshotted emitter LIKELY used public and SHOULD HAVE BEEN created with DisposableStore. snapshotted here"), g.print()), T?.();
+          ++w === 2 && (console.warn("snapshotted emitter LIKELY used public and SHOULD HAVE BEEN created with DisposableStore. snapshotted here"), g.print()), T2?.();
         };
       }
     }
-    function e(y, T) {
+    function e(y, T2) {
       return d(y, () => {
-      }, 0, void 0, true, void 0, T);
+      }, 0, void 0, true, void 0, T2);
     }
     Qe.defer = e;
     function i(y) {
-      return (T, g = null, w) => {
+      return (T2, g = null, w) => {
         let E = false, x;
         return x = y((N) => {
-          if (!E) return x ? x.dispose() : E = true, T.call(g, N);
+          if (!E) return x ? x.dispose() : E = true, T2.call(g, N);
         }, null, w), E && x.dispose(), x;
       };
     }
     Qe.once = i;
-    function r(y, T, g) {
-      return h2((w, E = null, x) => y((N) => w.call(E, T(N)), null, x), g);
+    function r(y, T2, g) {
+      return h2((w, E = null, x) => y((N) => w.call(E, T2(N)), null, x), g);
     }
     Qe.map = r;
-    function n(y, T, g) {
+    function n(y, T2, g) {
       return h2((w, E = null, x) => y((N) => {
-        T(N), w.call(E, N);
+        T2(N), w.call(E, N);
       }, null, x), g);
     }
     Qe.forEach = n;
-    function o2(y, T, g) {
-      return h2((w, E = null, x) => y((N) => T(N) && w.call(E, N), null, x), g);
+    function o2(y, T2, g) {
+      return h2((w, E = null, x) => y((N) => T2(N) && w.call(E, N), null, x), g);
     }
     Qe.filter = o2;
     function l(y) {
@@ -3389,34 +3958,34 @@ ${h2.join(`
     }
     Qe.signal = l;
     function a(...y) {
-      return (T, g = null, w) => {
-        let E = ho(...y.map((x) => x((N) => T.call(g, N))));
+      return (T2, g = null, w) => {
+        let E = ho(...y.map((x) => x((N) => T2.call(g, N))));
         return c(E, w);
       };
     }
     Qe.any = a;
-    function u(y, T, g, w) {
+    function u(y, T2, g, w) {
       let E = g;
-      return r(y, (x) => (E = T(E, x), E), w);
+      return r(y, (x) => (E = T2(E, x), E), w);
     }
     Qe.reduce = u;
-    function h2(y, T) {
+    function h2(y, T2) {
       let g, w = { onWillAddFirstListener() {
         g = y(E.fire, E);
       }, onDidRemoveLastListener() {
         g?.dispose();
       } };
-      T || t2(w);
+      T2 || t2(w);
       let E = new v(w);
-      return T?.add(E), E.event;
+      return T2?.add(E), E.event;
     }
-    function c(y, T) {
-      return T instanceof Array ? T.push(y) : T && T.add(y), y;
+    function c(y, T2) {
+      return T2 instanceof Array ? T2.push(y) : T2 && T2.add(y), y;
     }
-    function d(y, T, g = 100, w = false, E = false, x, N) {
+    function d(y, T2, g = 100, w = false, E = false, x, N) {
       let Z, te, Oe, ze = 0, le, et = { leakWarningThreshold: x, onWillAddFirstListener() {
         Z = y((ht) => {
-          ze++, te = T(te, ht), w && !Oe && (me.fire(te), te = void 0), le = () => {
+          ze++, te = T2(te, ht), w && !Oe && (me.fire(te), te = void 0), le = () => {
             let fi = te;
             te = void 0, Oe = void 0, (!w || ze > 1) && me.fire(fi), ze = 0;
           }, typeof g == "number" ? (clearTimeout(Oe), Oe = setTimeout(le, g)) : Oe === void 0 && (Oe = 0, queueMicrotask(le));
@@ -3431,23 +4000,23 @@ ${h2.join(`
       return N?.add(me), me.event;
     }
     Qe.debounce = d;
-    function _2(y, T = 0, g) {
-      return Qe.debounce(y, (w, E) => w ? (w.push(E), w) : [E], T, void 0, true, void 0, g);
+    function _2(y, T2 = 0, g) {
+      return Qe.debounce(y, (w, E) => w ? (w.push(E), w) : [E], T2, void 0, true, void 0, g);
     }
     Qe.accumulate = _2;
-    function p(y, T = (w, E) => w === E, g) {
+    function p(y, T2 = (w, E) => w === E, g) {
       let w = true, E;
       return o2(y, (x) => {
-        let N = w || !T(x, E);
+        let N = w || !T2(x, E);
         return w = false, E = x, N;
       }, g);
     }
     Qe.latch = p;
-    function m(y, T, g) {
-      return [Qe.filter(y, T, g), Qe.filter(y, (w) => !T(w), g)];
+    function m(y, T2, g) {
+      return [Qe.filter(y, T2, g), Qe.filter(y, (w) => !T2(w), g)];
     }
     Qe.split = m;
-    function f(y, T = false, g = [], w) {
+    function f(y, T2 = false, g = [], w) {
       let E = g.slice(), x = y((te) => {
         E ? E.push(te) : Z.fire(te);
       });
@@ -3457,16 +4026,16 @@ ${h2.join(`
       }, Z = new v({ onWillAddFirstListener() {
         x || (x = y((te) => Z.fire(te)), w && w.add(x));
       }, onDidAddFirstListener() {
-        E && (T ? setTimeout(N) : N());
+        E && (T2 ? setTimeout(N) : N());
       }, onDidRemoveLastListener() {
         x && x.dispose(), x = null;
       } });
       return w && w.add(Z), Z.event;
     }
     Qe.buffer = f;
-    function A(y, T) {
+    function A(y, T2) {
       return (w, E, x) => {
-        let N = T(new O());
+        let N = T2(new O());
         return y(function(Z) {
           let te = N.evaluate(Z);
           te !== R && w.call(E, te);
@@ -3479,98 +4048,98 @@ ${h2.join(`
       constructor() {
         this.steps = [];
       }
-      map(T) {
-        return this.steps.push(T), this;
+      map(T2) {
+        return this.steps.push(T2), this;
       }
-      forEach(T) {
-        return this.steps.push((g) => (T(g), g)), this;
+      forEach(T2) {
+        return this.steps.push((g) => (T2(g), g)), this;
       }
-      filter(T) {
-        return this.steps.push((g) => T(g) ? g : R), this;
+      filter(T2) {
+        return this.steps.push((g) => T2(g) ? g : R), this;
       }
-      reduce(T, g) {
+      reduce(T2, g) {
         let w = g;
-        return this.steps.push((E) => (w = T(w, E), w)), this;
+        return this.steps.push((E) => (w = T2(w, E), w)), this;
       }
-      latch(T = (g, w) => g === w) {
+      latch(T2 = (g, w) => g === w) {
         let g = true, w;
         return this.steps.push((E) => {
-          let x = g || !T(E, w);
+          let x = g || !T2(E, w);
           return g = false, w = E, x ? E : R;
         }), this;
       }
-      evaluate(T) {
-        for (let g of this.steps) if (T = g(T), T === R) break;
-        return T;
+      evaluate(T2) {
+        for (let g of this.steps) if (T2 = g(T2), T2 === R) break;
+        return T2;
       }
     }
-    function I(y, T, g = (w) => w) {
-      let w = (...Z) => N.fire(g(...Z)), E = () => y.on(T, w), x = () => y.removeListener(T, w), N = new v({ onWillAddFirstListener: E, onDidRemoveLastListener: x });
+    function I(y, T2, g = (w) => w) {
+      let w = (...Z) => N.fire(g(...Z)), E = () => y.on(T2, w), x = () => y.removeListener(T2, w), N = new v({ onWillAddFirstListener: E, onDidRemoveLastListener: x });
       return N.event;
     }
     Qe.fromNodeEventEmitter = I;
-    function k(y, T, g = (w) => w) {
-      let w = (...Z) => N.fire(g(...Z)), E = () => y.addEventListener(T, w), x = () => y.removeEventListener(T, w), N = new v({ onWillAddFirstListener: E, onDidRemoveLastListener: x });
+    function k(y, T2, g = (w) => w) {
+      let w = (...Z) => N.fire(g(...Z)), E = () => y.addEventListener(T2, w), x = () => y.removeEventListener(T2, w), N = new v({ onWillAddFirstListener: E, onDidRemoveLastListener: x });
       return N.event;
     }
     Qe.fromDOMEventEmitter = k;
     function P(y) {
-      return new Promise((T) => i(y)(T));
+      return new Promise((T2) => i(y)(T2));
     }
     Qe.toPromise = P;
     function oe(y) {
-      let T = new v();
+      let T2 = new v();
       return y.then((g) => {
-        T.fire(g);
+        T2.fire(g);
       }, () => {
-        T.fire(void 0);
+        T2.fire(void 0);
       }).finally(() => {
-        T.dispose();
-      }), T.event;
+        T2.dispose();
+      }), T2.event;
     }
     Qe.fromPromise = oe;
-    function Me(y, T) {
-      return y((g) => T.fire(g));
+    function Me(y, T2) {
+      return y((g) => T2.fire(g));
     }
     Qe.forward = Me;
-    function Pe(y, T, g) {
-      return T(g), y((w) => T(w));
+    function Pe(y, T2, g) {
+      return T2(g), y((w) => T2(w));
     }
     Qe.runAndSubscribe = Pe;
     class Ke {
-      constructor(T, g) {
-        this._observable = T;
+      constructor(T2, g) {
+        this._observable = T2;
         this._counter = 0;
         this._hasChanged = false;
         let w = { onWillAddFirstListener: () => {
-          T.addObserver(this);
+          T2.addObserver(this);
         }, onDidRemoveLastListener: () => {
-          T.removeObserver(this);
+          T2.removeObserver(this);
         } };
         g || t2(w), this.emitter = new v(w), g && g.add(this.emitter);
       }
-      beginUpdate(T) {
+      beginUpdate(T2) {
         this._counter++;
       }
-      handlePossibleChange(T) {
+      handlePossibleChange(T2) {
       }
-      handleChange(T, g) {
+      handleChange(T2, g) {
         this._hasChanged = true;
       }
-      endUpdate(T) {
+      endUpdate(T2) {
         this._counter--, this._counter === 0 && (this._observable.reportChanges(), this._hasChanged && (this._hasChanged = false, this.emitter.fire(this._observable.get())));
       }
     }
-    function di(y, T) {
-      return new Ke(y, T).emitter.event;
+    function di(y, T2) {
+      return new Ke(y, T2).emitter.event;
     }
     Qe.fromObservable = di;
     function V(y) {
-      return (T, g, w) => {
+      return (T2, g, w) => {
         let E = 0, x = false, N = { beginUpdate() {
           E++;
         }, endUpdate() {
-          E--, E === 0 && (y.reportChanges(), x && (x = false, T.call(g)));
+          E--, E === 0 && (y.reportChanges(), x && (x = false, T2.call(g)));
         }, handlePossibleChange() {
         }, handleChange() {
           x = true;
@@ -6205,20 +6774,20 @@ ${h2.join(`
       let f, A = 0, R = "", O = 0, I = 0, k = 0, P = 0, oe = false, Me = 0, Pe = false, Ke = 0, di = 0, V = [], Qe = h2 !== -1 && c !== -1;
       for (let y = 0; y < m; y++) {
         t2.loadCell(y, this._workCell);
-        let T = this._workCell.getWidth();
-        if (T === 0) continue;
+        let T2 = this._workCell.getWidth();
+        if (T2 === 0) continue;
         let g = false, w = y >= di, E = y, x = this._workCell;
         if (_2.length > 0 && y === _2[0][0] && w) {
           let W = _2.shift(), An = this._isCellInSelection(W[0], e);
           for (O = W[0] + 1; O < W[1]; O++) w &&= An === this._isCellInSelection(O, e);
-          w &&= !i || o2 < W[0] || o2 >= W[1], w ? (g = true, x = new Vr(this._workCell, t2.translateToString(true, W[0], W[1]), W[1] - W[0]), E = W[1] - 1, T = x.getWidth()) : di = W[1];
+          w &&= !i || o2 < W[0] || o2 >= W[1], w ? (g = true, x = new Vr(this._workCell, t2.translateToString(true, W[0], W[1]), W[1] - W[0]), E = W[1] - 1, T2 = x.getWidth()) : di = W[1];
         }
         let N = this._isCellInSelection(y, e), Z = i && y === o2, te = Qe && y >= h2 && y <= c, Oe = false;
         this._decorationService.forEachDecorationAtCell(y, e, void 0, (W) => {
           Oe = true;
         });
         let ze = x.getChars() || we;
-        if (ze === " " && (x.isUnderline() || x.isOverline()) && (ze = " "), Ke = T * a - u.get(ze, x.isBold(), x.isItalic()), !f) f = this._document.createElement("span");
+        if (ze === " " && (x.isUnderline() || x.isOverline()) && (ze = " "), Ke = T2 * a - u.get(ze, x.isBold(), x.isItalic()), !f) f = this._document.createElement("span");
         else if (A && (N && Pe || !N && !Pe && x.bg === I) && (N && Pe && p.selectionForeground || x.fg === k) && x.extended.ext === P && te === oe && Ke === Me && !Z && !g && !Oe && w) {
           x.isInvisible() ? R += we : R += ze, A++;
           continue;
@@ -11648,16 +12217,10 @@ ${h2.join(`
 
   // src/app.ts
   var $2 = (s15) => document.querySelector(s15);
-  var TOKEN = (() => {
-    const t2 = new URLSearchParams(location.hash.slice(1)).get("t");
-    try {
-      if (t2) localStorage.setItem("docker-gui-token", t2);
-      return t2 || localStorage.getItem("docker-gui-token") || "";
-    } catch {
-      return t2 || "";
-    }
-  })();
-  var api = (path, opts = {}) => fetch(path, { ...opts, headers: { ...opts.headers, "X-Docker-GUI-Token": TOKEN } });
+  var setHtml = (el2, html) => {
+    if (el2._html !== html) el2.innerHTML = el2._html = html;
+  };
+  var api = (path) => T.request("GET", path);
   translatePage();
   var LABEL = { start: t`Iniciar`, stop: t`Parar`, restart: t`Reiniciar`, pause: t`Pausar`, unpause: t`Retomar`, logs: t`Logs`, remove: t`Remover` };
   var VERB = { start: t`Iniciando…`, stop: t`Parando…`, restart: t`Reiniciando…`, pause: t`Pausando…`, unpause: t`Retomando…`, remove: t`Removendo…` };
@@ -11680,8 +12243,9 @@ ${h2.join(`
     build: "compose up --build --no-deps",
     svcup: "compose up"
   };
-  var PRIMARY = { running: "stop", restarting: "stop", paused: "unpause", exited: "start", created: "start" };
-  var SECONDARY = { running: "restart", paused: "stop" };
+  var PRIMARY = { running: "stop", restarting: "restart", paused: "unpause", exited: "start", created: "start" };
+  var SECONDARY = { running: "restart", paused: "stop", restarting: "stop" };
+  var R_KEY = { running: "restart", restarting: "restart", exited: "start", created: "start" };
   var STOPPABLE = ["running", "paused", "restarting"];
   var removable = (c) => !STOPPABLE.includes(c.State);
   var TONE = {
@@ -11740,7 +12304,7 @@ ${h2.join(`
   var only = "";
   var toastTimer;
   var logId = null;
-  var stream = null;
+  var stream2 = null;
   var pending = [];
   var arming = null;
   var lastSay = "";
@@ -11777,6 +12341,7 @@ ${h2.join(`
     if ((p?.[0] || "") === problem) return;
     problem = p?.[0] || "";
     problemKind = p?.[3] || "";
+    showLive();
     $2("#banner").classList.toggle("hidden", !p);
     $2("#table").classList.toggle("opacity-40", !!p);
     $2("#table").inert = $2("#bulk").inert = !!p;
@@ -11793,7 +12358,7 @@ ${h2.join(`
     try {
       const r = await api("/api/containers"), j2 = await r.json();
       if (r.status === 401) return showProblem([
-        t`Esta aba não tem o token do Docker GUI.`,
+        t`Esta aba não tem o token do Stivo.`,
         t`Abra o link com ${code("#t=…")} que aparece no terminal onde você rodou ${code("python3 docker_gui.py")}. O token muda a cada execução.`,
         j2,
         "auth"
@@ -11811,13 +12376,12 @@ ${h2.join(`
         if (selectingRows()) dirty = true;
         else render();
       }
-      notify(newProblems(seen, data));
-      seen = new Set(data.filter(isProblem).map((c) => c.ID));
+      checkAttention();
       showProblem(null);
     } catch (e) {
       showProblem([
-        lastOk ? t`O servidor do Docker GUI parou de responder.` : t`Não consegui conectar ao servidor do Docker GUI.`,
-        t`Rode ${code("python3 docker_gui.py")} de novo; a página volta sozinha.`,
+        lastOk ? t`O servidor do Stivo parou de responder.` : t`Não consegui conectar ao servidor do Stivo.`,
+        T.desktop ? t`Saia do Stivo pelo menu da bandeja e abra de novo.` : t`Rode ${code("python3 docker_gui.py")} de novo; a página volta sozinha.`,
         e.message,
         "server"
       ]);
@@ -11851,28 +12415,32 @@ ${h2.join(`
     clearTimeout(evRetry);
     evRetry = void 0;
     if (events || !watching()) return;
-    const es2 = events = new EventSource(`/api/events/stream?t=${encodeURIComponent(TOKEN)}`);
-    es2.onopen = () => {
-      live = true;
-      showLive();
-      refresh();
-    };
-    es2.onmessage = () => {
-      if (watching() && evTimer === void 0) evTimer = setTimeout(() => {
-        evTimer = void 0;
-        refresh();
-      }, COALESCE);
-    };
     const drop = () => {
       closeEvents();
       evRetry = setTimeout(connectEvents, POLL_LIVE);
     };
-    es2.addEventListener("end", drop);
-    es2.onerror = () => {
-      live = false;
-      showLive();
-      if (es2.readyState === EventSource.CLOSED) drop();
-    };
+    events = T.stream("/api/events/stream", {}, {
+      open: () => {
+        live = true;
+        showLive();
+        refresh();
+      },
+      // o que mudou antes de o docker events começar a ouvir
+      // uma rajada (compose up: create, start... de cada serviço) vira uma consulta só, no máximo COALESCE ms depois
+      data: () => {
+        if (watching() && evTimer === void 0) evTimer = setTimeout(() => {
+          evTimer = void 0;
+          refresh();
+        }, COALESCE);
+      },
+      end: drop,
+      // queda: reconecta sozinho, com o poll de 2 s enquanto isso; closed é recusa (token, limite, erro)
+      error: (closed) => {
+        live = false;
+        showLive();
+        if (closed) drop();
+      }
+    });
   }
   function closeEvents() {
     events?.close();
@@ -11881,11 +12449,12 @@ ${h2.join(`
     showLive();
   }
   function showLive() {
-    $2("#live").innerHTML = live ? `<span aria-hidden="true" class="inline-block size-1.5 mr-1.5 align-middle rounded-full bg-ok"></span>${t`ao vivo`}` : `<span aria-hidden="true" class="inline-block size-1.5 mr-1.5 align-middle rounded-full ring-1 ring-dim"></span>${t`a cada 2 s`}`;
-    $2("#live").title = live ? t`A lista muda assim que o docker avisa (docker events)` : t`Sem o docker events: a lista é relida a cada 2 s`;
+    const dot = (cls) => `<span aria-hidden="true" class="inline-block size-1.5 mr-1.5 align-middle rounded-full ${cls}"></span>`;
+    $2("#live").innerHTML = problem ? `<span class="text-warn-fg">${dot("ring-1 ring-warn")}${t`desatualizado`}</span>` : live ? dot("bg-ok") + t`ao vivo` : dot("ring-1 ring-dim") + t`a cada 2 s`;
+    $2("#live").title = problem ? t`A lista parou de atualizar: veja o aviso acima` : live ? t`A lista muda assim que o docker avisa (docker events)` : t`Sem o docker events: a lista é relida a cada 2 s`;
   }
-  var canAsk = () => isSecureContext && "Notification" in window && Notification.permission === "default";
-  var notifying = () => "Notification" in window && Notification.permission === "granted";
+  var canAsk = () => !T.desktop && isSecureContext && "Notification" in window && Notification.permission === "default";
+  var notifying = () => T.desktop || "Notification" in window && Notification.permission === "granted";
   async function askNotify() {
     const ok = await Notification.requestPermission() === "granted";
     $2("#notify").hidden = !canAsk();
@@ -11893,26 +12462,34 @@ ${h2.join(`
   }
   function notify(cs2) {
     if (!cs2.length || !notifying() || !document.hidden && document.hasFocus()) return;
-    try {
-      const n = new Notification(
-        cs2.length === 1 ? t`${cs2[0].Names} precisa de atenção` : t`${cs2.length} containers precisam de atenção`,
-        { body: cs2.length === 1 ? status(cs2[0])[0] : cs2.map((c) => c.Names).join(", ") }
-      );
-      n.onclick = () => {
+    cs2 = attnSort([...cs2]);
+    T.notify(
+      cs2.length === 1 ? t`${cs2[0].Names} precisa de atenção` : t`${cs2.length} containers precisam de atenção`,
+      // o clique traz a página e põe o foco no Logs de quem caiu (a linha dele na faixa de atenção, que vem primeiro)
+      cs2.length === 1 ? severe(cs2[0]) ? status(cs2[0])[0] : memLine(cs2[0]) : cs2.map((c) => c.Names).join(", "),
+      () => {
         focus();
-        n.close();
-      };
-    } catch {
-    }
+        document.querySelector(`[data-id="${cs2[0].ID}"][data-a="logs"]`)?.focus();
+      }
+    );
   }
-  var icon = document.head.appendChild(Object.assign(document.createElement("link"), { rel: "icon" }));
+  var ICON = '<rect x="1" y="1" width="22" height="22" rx="5" fill="#141a22"/><rect x="5" y="5.4" width="14" height="3.6" rx="1" fill="#3fd0dc"/><rect x="5" y="10.2" width="14" height="3.6" rx="1" fill="#566273"/><rect x="5" y="15" width="8.6" height="3.6" rx="1" fill="#566273"/><rect x="15.2" y="15" width="2.6" height="3.6" rx="0.6" fill="#3fd0dc"/>';
   function setIcon(badge) {
-    const href = "data:image/svg+xml," + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"><rect x="1" y="2.5" width="22" height="19" rx="3" fill="#141a22"/><path d="M5.5 8.5 9.5 12l-4 3.5M11.5 16h6" stroke="#3fd0dc" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>${badge ? `<circle cx="16.5" cy="16.5" r="7.5" fill="#dc2626" stroke="none"/><text x="16.5" y="20" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="700" fill="#fff" stroke="none">${badge}</text>` : ""}</svg>`);
-    if (icon.getAttribute("href") !== href) icon.href = href;
+    T.attention(badge, `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none">${ICON}${badge ? `<circle cx="16.5" cy="16.5" r="7.5" fill="#c2181d" stroke="none"/><text x="16.5" y="20" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="700" fill="#fff" stroke="none">${badge}</text>` : ""}</svg>`);
   }
   var stats = {};
   var series = /* @__PURE__ */ new Map();
   var sid = (id) => id.slice(0, 12);
+  var memTotal = null;
+  var memSt = /* @__PURE__ */ new Map();
+  var memBase = true;
+  async function loadMemTotal() {
+    try {
+      const r = await api("/api/info");
+      if (r.ok) memTotal = (await r.json()).MemTotal;
+    } catch {
+    }
+  }
   async function loadStats() {
     let next = {};
     try {
@@ -11926,12 +12503,20 @@ ${h2.join(`
       const cpu = percent(s15.CPUPerc), mem = bytes(s15.MemUsage.split(" / ")[0]);
       if (cpu !== null && mem !== null) series.set(k, pushSample(series.get(k) ?? [], { t: t2, cpu, mem }));
     }
+    if (memTotal === null) await loadMemTotal();
+    const first = memBase && memTotal !== null;
+    memSt = memWatch(memSt, next, memTotal, first);
     stats = next;
+    if (first) {
+      memBase = false;
+      for (const c of data) if (memOn(c)) seen?.add(alertKey(c));
+    }
+    checkAttention();
     if (selectingRows()) dirty = true;
     else render();
   }
   async function statsLoop() {
-    if (!document.hidden) await loadStats();
+    if (watching()) await loadStats();
     setTimeout(statsLoop, 5e3);
   }
   var CPU_FMT = (n) => `${n.toFixed(2)}%`;
@@ -11951,7 +12536,7 @@ ${h2.join(`
     $2("#where").classList.replace("text-muted", "text-warn-fg");
     $2("#where").classList.replace("ring-line-strong", "ring-warn/60");
   }
-  var TITLE = CTX && CTX !== "default" ? `Docker GUI · ${CTX}` : "Docker GUI";
+  var TITLE = CTX && CTX !== "default" ? `Stivo · ${CTX}` : "Stivo";
   var PORT_HOST = (() => {
     try {
       return REMOTE && new URL(WHERE.host).hostname || "localhost";
@@ -11965,7 +12550,7 @@ ${h2.join(`
     $2("#run-ports-hint").innerHTML = t`portaDoHost:portaDoContainer, separadas por vírgula ou espaço. Ficam em ${code("127.0.0.1")} do daemon remoto ${esc(CTX)}: só aquela máquina acessa, não esta.`;
   }
   function renderCount() {
-    const n = (k) => data.filter((c) => bucket(c) === k).length;
+    const n = (k) => data.filter((c) => bucketOf(c) === k).length;
     const problemTxt = problemKind ? PROBLEM_TXT[problemKind] : "";
     const band = data.filter(inBand).length;
     setIcon(problem ? "!" : band > 9 ? "9+" : String(band || ""));
@@ -11973,13 +12558,13 @@ ${h2.join(`
     $2("#obj-containers-n").textContent = lastOk ? ` · ${data.length}` : "";
     if (problem) {
       const at2 = lastOk?.toLocaleTimeString(LOCALE, { hour: "2-digit", minute: "2-digit" });
-      $2("#count").textContent = lastOk ? t`Desatualizado · dados de ${at2}` : problemTxt[0].toUpperCase() + problemTxt.slice(1);
+      setHtml($2("#count"), esc(lastOk ? t`Desatualizado · dados de ${at2}` : problemTxt[0].toUpperCase() + problemTxt.slice(1)));
       return;
     }
     const pill = "shrink-0 whitespace-nowrap rounded px-2 py-0.5 coarse:py-3 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent";
     const segs = BUCKETS.filter(([k]) => n(k) || only === k).map(([k, one, many, color]) => `<button data-id="count-${k}" data-a="filter" aria-pressed="${only === k}" onclick="filterBy('${k}')"
       class="${pill} rounded-none font-mono text-data hover:bg-hover aria-pressed:bg-fg-strong aria-pressed:text-canvas ${color}"><span class="font-semibold tabular-nums">${n(k)}</span> ${n(k) === 1 ? one : many}</button>`).join("");
-    $2("#count").innerHTML = (segs ? `<span class="flex max-sm:max-w-full max-sm:overflow-x-auto [scrollbar-width:none] rounded ring-1 ring-line divide-x divide-line">${segs}</span>` : `<span>${t`0 containers`}</span>`) + (only || $2("#q").value.trim() ? `<button data-id="count-clear" data-a="filter" onclick="clearFilters()" class="${pill} text-accent-fg underline underline-offset-4 hover:text-accent-soft">${t`Limpar filtros`}</button>` : "");
+    setHtml($2("#count"), (segs ? `<span class="flex max-sm:max-w-full max-sm:overflow-x-auto [scrollbar-width:none] rounded ring-1 ring-line divide-x divide-line">${segs}</span>` : `<span>${t`0 containers`}</span>`) + (only || $2("#q").value.trim() ? `<button data-id="count-clear" data-a="filter" onclick="clearFilters()" class="${pill} text-accent-fg underline underline-offset-4 hover:text-accent-soft">${t`Limpar filtros`}</button>` : ""));
   }
   function filterBy(k) {
     only = only === k ? "" : k;
@@ -12069,16 +12654,24 @@ ${h2.join(`
   async function loadHealth(id) {
     const c = data.find((c2) => c2.ID === id);
     if (!c || health[id + c.Status]) return;
-    let txt;
+    let v2;
     try {
-      const r = await api("/api/health/" + id), h2 = await r.json(), last = r.ok ? h2?.Log?.at(-1) : void 0;
-      txt = !r.ok ? t`Não consegui ler o healthcheck: ${h2}` : last ? t`código ${last.ExitCode} · ${last.Output.trim() || t`(sem saída)`}` : t`Nenhum probe rodou ainda.`;
+      const r = await api("/api/health/" + id), h2 = await r.json();
+      v2 = r.ok ? [...h2?.Log ?? []].reverse() : t`Não consegui ler o healthcheck: ${h2}`;
     } catch {
-      txt = t`Não consegui ler o healthcheck.`;
+      v2 = t`Não consegui ler o healthcheck.`;
     }
-    health[id + c.Status] = txt;
+    health[id + c.Status] = v2;
     render();
   }
+  function reloadHealth(id) {
+    const c = data.find((c2) => c2.ID === id);
+    if (c) {
+      delete health[id + c.Status];
+      loadHealth(id);
+    }
+  }
+  var lastProbe = (v2) => typeof v2 === "string" ? v2 : v2[0] ? t`código ${v2[0].ExitCode} · ${v2[0].Output.trim() || t`(sem saída)`}` : t`Nenhum probe rodou ainda.`;
   var tails = {};
   var tailKey = (c) => c.ID + c.State + (c.Status.match(/\((\d+)\)/)?.[1] ?? "");
   var fell = (c) => isProblem(c) && c.State !== "running";
@@ -12088,35 +12681,38 @@ ${h2.join(`
     if (k in tails) return;
     tails[k] = "";
     const get = (path) => api(path).then((r) => r.ok ? r.json() : null).catch(() => null);
-    const [txt, info] = await Promise.all([get(`/api/logs/${c.ID}?tail=5`), get(`/api/inspect/${c.ID}`)]);
-    tails[k] = txt?.split("\n").filter((l) => l.trim()).sort().at(-1)?.replace(/^\d{4}-\d\d-\d\dT\S+\s/, "") ?? "";
+    const [txt, info] = await Promise.all([get(`/api/logs/${c.ID}?tail=20`), get(`/api/inspect/${c.ID}`)]);
+    tails[k] = tailLine(txt ?? "");
     if (info) facts[k] = { OOMKilled: info.OOMKilled, RestartCount: info.RestartCount, FinishedAt: info.FinishedAt };
     if (tails[k] || info) render();
   }
   var rowCache = /* @__PURE__ */ new Map();
   function row(c, withProject = false) {
     if (fell(c)) loadTail(c);
+    const bl2 = blockers(c, data), hd = holds(c, data);
     const sig = JSON.stringify([
       c,
       withProject,
+      bl2.map((b2) => [b2.service, b2.state, b2.c?.ID]),
+      hd.map((x) => x.ID),
       tails[tailKey(c)],
       facts[tailKey(c)],
       busy.get(c.ID),
       arming?.id === c.ID,
       errors.get(c.ID),
       health[c.ID + c.Status],
-      stats[sid(c.ID)],
-      series.get(sid(c.ID))?.at(-1)?.t,
+      !!stats[sid(c.ID)],
       composing.has(project(c)),
       TOUCH,
       WIDE.matches,
       sel.has(c.ID),
       quiet(c),
-      fallKey(c)
+      fallKey(c),
+      memOn(c)
     ]);
     const hit = rowCache.get(c.ID);
     if (hit?.sig === sig) return hit.html;
-    const html = rowHtml(c, withProject);
+    const html = rowHtml(c, withProject, bl2, hd);
     rowCache.set(c.ID, { sig, html });
     return html;
   }
@@ -12139,7 +12735,20 @@ ${h2.join(`
     return f?.FinishedAt ? `${c.ID}@${f.FinishedAt}` : "";
   };
   var quiet = (c) => (c.State === "exited" || c.State === "dead") && seenFails.has(fallKey(c));
-  var inBand = (c) => isProblem(c) && !quiet(c);
+  var memOn = (c) => c.State === "running" && memHot(memSt, sid(c.ID));
+  var severe = (c) => isProblem(c) || held(c, data);
+  var attention = (c) => severe(c) || memOn(c);
+  var inBand = (c) => isProblem(c) && !quiet(c) || held(c, data) || memOn(c);
+  var alertKey = (c) => severe(c) ? c.ID : `${c.ID}:mem`;
+  var bucketOf = (c) => held(c, data) || memOn(c) ? "problema" : bucket(c);
+  var rank = (c) => holds(c, data).length ? 0 : severe(c) ? 1 : 2;
+  var attnSort = (cs2) => cs2.sort((a, b2) => rank(a) - rank(b2));
+  var toneOf = (c) => tone(c) === "ok" && memOn(c) ? "warn" : tone(c);
+  var memLine = (c) => memOn(c) && stats[sid(c.ID)] ? memText(stats[sid(c.ID)]) : "";
+  function checkAttention() {
+    notify(newProblems(seen, data, attention, alertKey));
+    seen = new Set(data.filter(attention).map(alertKey));
+  }
   function saveSeen() {
     try {
       localStorage.setItem(SEEN_KEY, JSON.stringify([...seenFails].slice(-200)));
@@ -12158,10 +12767,30 @@ ${h2.join(`
     }]);
     document.querySelector(`[data-id="${id}"][data-a="logs"]`)?.focus();
   }
-  function rowHtml(c, withProject) {
-    const b2 = busy.get(c.ID), tn2 = TONE[b2 ? "busy" : tone(c)], st2 = status(c, facts[tailKey(c)]), pp = ports(c.Ports), p = project(c), bt2 = b2 && busyText(c, b2);
+  var DEP_TXT = {
+    unhealthy: (s15) => t`depende de ${s15}, que está com healthcheck falhando`,
+    exited: (s15) => t`depende de ${s15}, que saiu com erro`,
+    stopped: (s15) => t`depende de ${s15}, que está parado`,
+    missing: (s15) => t`depende de ${s15}, que não tem container`
+  };
+  function depHtml(bl2, hd, link = true) {
+    return bl2.map((b2) => `<span class="block text-xs text-fg-soft">${DEP_TXT[b2.state](b2.c && link ? `<button data-id="${b2.c.ID}" data-a="dep" onclick="act('logs','${b2.c.ID}')" aria-label="${t`Abrir logs de ${esc(b2.service)}`}"
+        class="font-mono underline underline-offset-4 rounded hover:text-fg-strong focus-visible:outline-2 focus-visible:outline-accent">${esc(b2.service)}</button>` : mono(esc(b2.service)))}</span>`).join("") + (hd.length ? `<span class="block text-xs text-fg-soft">${t`segurando ${mono(esc(names(hd)))}`}</span>` : "");
+  }
+  function memHtml(c, procs) {
+    const m = memLine(c);
+    return !m ? "" : `<span class="block text-xs text-warn-fg">${esc(m)}${procs ? ` <button data-id="${c.ID}" data-a="procs" onclick="openProcs('${c.ID}')"
+    aria-label="${t`Ver os processos de ${esc(c.Names)}`}" class="font-sans underline underline-offset-4 rounded hover:text-fg-strong focus-visible:outline-2 focus-visible:outline-accent">${t`Processos`}</button>` : ""}</span>`;
+  }
+  function openProcs(id) {
+    logs(id);
+    const d = $2("#procs");
+    if (!d.hidden) $2("#extra").open = d.open = true;
+  }
+  function rowHtml(c, withProject, bl2, hd) {
+    const b2 = busy.get(c.ID), tn2 = TONE[b2 ? "busy" : toneOf(c)], st2 = status(c, facts[tailKey(c)]), pp = ports(c.Ports), p = project(c), bt2 = b2 && busyText(c, b2);
     const armed = arming?.id === c.ID, prim = PRIMARY[c.State], sec = SECONDARY[c.State];
-    const u = c.State === "running" && !b2 && stats[sid(c.ID)] ? usage(stats[sid(c.ID)]) : null, h2 = series.get(sid(c.ID)) ?? [];
+    const uh = c.State === "running" && !b2 ? usageHtml(c) : null;
     const slot = (w = "w-20") => `<span aria-hidden="true" class="${w} shrink-0 max-sm:hidden"></span>`;
     const btn = (a, cls = "text-fg hover:bg-hover", text = LABEL[a], aria = `${LABEL[a]} ${esc(c.Names)}`, base = BTN) => `<button data-id="${c.ID}" data-a="${a}" ${(b2 || armed) && a !== "logs" ? 'aria-disabled="true"' : ""}
       aria-label="${aria}" aria-describedby="st-${c.ID}" onclick="act('${a}','${c.ID}')" class="sm:w-20 max-sm:min-w-24 shrink-0 ${base} ${cls}">${text}</button>`;
@@ -12176,6 +12805,7 @@ ${h2.join(`
       c.State === "running" && ["pause", t`Pausar`],
       c.State === "running" && ["shell", t`Abrir terminal`],
       c.State === "running" && ["exec", t`Copiar docker exec`],
+      ["cp", t`Baixar arquivo…`],
       removable(c) ? ["remove", t`Remover…`] : ["noremove", t`Pare antes de remover`]
     ].filter((x) => !!x);
     const menu = !more.length ? slot("w-9") : menuBox(
@@ -12183,16 +12813,16 @@ ${h2.join(`
       t`Mais ações para ${esc(c.Names)}`,
       !!b2 || armed,
       more.map(([a, text]) => a === "noremove" ? `<button data-id="${c.ID}" data-a="m-noremove" aria-disabled="true" aria-label="${t`Remover (indisponível: pare o container antes)`}" title="${t`O docker só remove container parado (sem -f)`}"
-      class="${MENU_ITEM} text-muted cursor-not-allowed hover:bg-transparent">${text}</button>` : `<button data-id="${c.ID}" data-a="m-${a}" ${b2 || (a === "srestart" || a === "sbuild") && composing.has(p) ? 'aria-disabled="true"' : ""} onclick="menuPick(this); ${a === "exec" ? `copyExec('${c.ID}')` : a === "shell" ? `openShell('${c.ID}')` : a === "srestart" || a === "sbuild" ? `serviceAct('${a.slice(1)}','${c.ID}')` : `act('${a}','${c.ID}')`}"
-      ${a === "srestart" ? `title="${t`Reinicia todas as réplicas do serviço ${esc(svc)}`}"` : a === "sbuild" ? `title="${t`Reconstrói a imagem e recria o serviço ${esc(svc)} (b)`}"` : ""}
+      class="${MENU_ITEM} text-muted cursor-not-allowed hover:bg-transparent">${text}</button>` : `<button data-id="${c.ID}" data-a="m-${a}" ${b2 || (a === "srestart" || a === "sbuild") && composing.has(p) ? 'aria-disabled="true"' : ""} onclick="menuPick(this); ${a === "exec" ? `copyExec('${c.ID}')` : a === "shell" ? `openShell('${c.ID}')` : a === "cp" ? `openCp('${c.ID}')` : a === "srestart" || a === "sbuild" ? `serviceAct('${a.slice(1)}','${c.ID}')` : `act('${a}','${c.ID}')`}"
+      ${a === "srestart" ? `title="${t`Reinicia todas as réplicas do serviço ${esc(svc)}`}"` : a === "cp" ? `title="${esc(cpCmd(c.Names))}"` : a === "sbuild" ? `title="${t`Reconstrói a imagem e recria o serviço ${esc(svc)} (b)`}"` : ""}
       class="${MENU_ITEM} ${a === "remove" ? "text-bad-fg" : a === "srestart" || a === "sbuild" ? "font-mono text-xs text-fg" : "text-fg"}">${text}</button>`).join("")
     );
     const healthBox = hasHealth(c) && !b2 ? `<details data-keep="health" class="mt-1 text-xs [contain:inline-size]" ontoggle="this.open && loadHealth('${c.ID}')">
       <summary class="cursor-pointer w-fit py-1 coarse:py-3.5 rounded focus-visible:outline-2 focus-visible:outline-accent text-muted hover:text-fg">${t`Ver último healthcheck`}</summary>
-      <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-fg-soft">${esc(health[c.ID + c.Status] || t`Carregando…`)}</pre></details>` : "";
+      <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-fg-soft">${esc(health[c.ID + c.Status] ? lastProbe(health[c.ID + c.Status]) : t`Carregando…`)}</pre></details>` : "";
     const tail = fell(c) && !b2 ? tails[tailKey(c)] : "";
     const tailBtn = tail ? `<button data-id="${c.ID}" data-a="tail" onclick="act('logs','${c.ID}')" title="${esc(tail)}"
-      class="block w-full [contain:inline-size] mt-1 text-left font-mono text-xs text-fg-soft sm:truncate [overflow-wrap:anywhere] rounded cursor-pointer hover:text-fg-strong hover:underline underline-offset-4 focus-visible:outline-2 focus-visible:outline-accent"><span aria-hidden="true" class="text-dim">› </span><span class="sr-only">${t`Abrir os logs. Última linha:`} </span>${esc(tail)}</button>` : "";
+      class="block w-full [contain:inline-size] mt-1 coarse:py-3.5 text-left font-mono text-xs text-fg-soft sm:truncate [overflow-wrap:anywhere] rounded cursor-pointer hover:text-fg-strong hover:underline underline-offset-4 focus-visible:outline-2 focus-visible:outline-accent"><span aria-hidden="true" class="text-dim">› </span><span class="sr-only">${t`Abrir os logs. Última linha:`} </span>${esc(tail)}</button>` : "";
     const seenBtn = withProject && !b2 && (c.State === "exited" || c.State === "dead") && fallKey(c) ? `<button data-id="${c.ID}" data-a="seen" onclick="ackFail('${c.ID}')"
       aria-label="${t`Marcar a queda de ${esc(c.Names)} como vista: sai da faixa de atenção`}" class="mt-1 py-0.5 coarse:py-3 font-sans text-xs text-muted underline underline-offset-4 rounded hover:text-fg focus-visible:outline-2 focus-visible:outline-accent">${t`Marcar como visto`}</button>` : "";
     const image = `<bdi dir="ltr">${esc(shortImage(c.Image))}</bdi>`, chips = pp.map((x) => portChip(c, x)).join("");
@@ -12200,19 +12830,32 @@ ${h2.join(`
     const logsBtn = withProject ? btn("logs", "text-accent-fg hover:bg-accent/10", void 0, void 0, BTN.replace("ring-line-strong/80", "ring-accent/40")) : btn("logs", "text-fg-soft hover:text-fg-strong hover:bg-hover", void 0, void 0, ghost());
     return `<tr data-row data-key="c:${c.ID}" role="row" class="border-t border-line/70 ${armed ? "bg-bad/10" : on2 ? "bg-accent/10" : "hover:bg-raised/70"} transition-[background-color] motion-reduce:transition-none max-sm:block max-sm:px-4 max-sm:py-4 max-sm:space-y-1.5">
     <th role="rowheader" scope="row" class="${cell} pl-4 pr-6 max-sm:block max-sm:p-0 text-left font-normal"><div class="flex items-start gap-3">
-      <input type="checkbox" data-id="${c.ID}" data-a="sel" ${on2 ? "checked" : ""} aria-label="${t`Selecionar ${esc(c.Names)}`}" onchange="toggleSel('${c.ID}')" class="${CHECK} mt-0.5 coarse:mt-0">
+      <label class="flex shrink-0 cursor-pointer coarse:-m-2.5 coarse:p-2.5"><input type="checkbox" data-id="${c.ID}" data-a="sel" ${on2 ? "checked" : ""} aria-label="${t`Selecionar ${esc(c.Names)}`}" onchange="toggleSel('${c.ID}')" class="${CHECK} mt-0.5 coarse:mt-0"></label>
       <span aria-hidden="true" class="size-2 mt-1.5 coarse:mt-2 shrink-0 rounded-full ${tn2[0]}"></span>
       <div class="min-w-0"><div class="font-mono text-data font-semibold text-fg-strong sm:truncate sm:max-w-[28ch]" title="${esc(c.Names)} · ${c.ID.slice(0, 12)}">${esc(c.Names)}</div>${withProject && p ? `<div class="font-mono text-xs text-muted">${esc(p)}</div>` : ""}
 ${WIDE.matches ? "" : `
         <div class="font-mono text-xs text-muted sm:truncate sm:max-w-[28ch] sm:[direction:rtl] sm:text-left [overflow-wrap:anywhere]" title="${esc(c.Image)}"><span class="sr-only">${t`Imagem:`} </span>${image}</div>${chips ? `<div class="mt-0.5 flex flex-wrap gap-1 -ml-1 coarse:gap-x-2 coarse:-ml-2">${chips}</div>` : ""}`}</div></div></th>
     <td role="cell" class="${cell} font-mono text-xs text-muted pr-4 max-xl:hidden">${WIDE.matches ? `<div class="truncate [direction:rtl] text-left" title="${esc(c.Image)}">${image}</div>` : ""}</td>
     <td role="cell" class="${cell} font-mono text-data pr-4 sm:min-w-[20ch] max-sm:block max-sm:p-0 max-sm:pl-12 max-sm:coarse:pl-14" title="${esc(c.Status)}">
-      <span id="st-${c.ID}" class="${tn2[1]}">${bt2 || esc(st2[0])}${st2[1] && !b2 ? `<span class="block text-xs text-muted">${st2[1]}</span>` : ""}</span>${tailBtn}${u ? `<span id="us-${c.ID}" class="block text-xs font-mono text-muted" title="${esc(u[2])}"><span class="whitespace-nowrap">${esc(u[0])} ${spark(h2, "cpu")}</span> <span class="whitespace-nowrap max-xl:block"><span class="max-xl:hidden">· </span>${esc(u[1])} ${spark(h2, "mem")}</span></span>` : ""}${b2 ? "" : errHtml(c) + healthBox}${seenBtn}</td>
+      <span id="st-${c.ID}" class="${tn2[1]}">${bt2 || esc(st2[0])}${st2[1] && !b2 ? `<span class="block text-xs text-muted">${st2[1]}</span>` : ""}</span>${tailBtn}${b2 ? "" : depHtml(bl2, hd) + memHtml(c, true)}${uh ? `<span id="us-${c.ID}" class="block text-xs font-mono text-muted" title="${esc(uh[0])}">${uh[1]}</span>` : ""}${b2 ? "" : errHtml(c) + healthBox}${seenBtn}</td>
     <td role="cell" class="${cell} pr-4 max-xl:hidden">${WIDE.matches && chips ? `<div class="flex flex-wrap gap-1">${chips}</div>` : ""}</td>
     <td role="cell" class="py-2.5 align-top pr-4 max-sm:block max-sm:p-0 max-sm:pt-2"><div class="flex justify-end max-sm:justify-start items-center gap-1.5 coarse:gap-2">
       ${prim ? btn(prim, prim === "start" ? "text-ok-fg hover:bg-ok/10" : void 0) : slot()}${restart}${logsBtn}
       ${menu}
     </div></td></tr>`;
+  }
+  function usageHtml(c) {
+    const s15 = stats[sid(c.ID)], u = s15 && usage(s15), h2 = series.get(sid(c.ID)) ?? [];
+    return u ? [u[2], `<span class="whitespace-nowrap">${esc(u[0])} ${spark(h2, "cpu")}</span> <span class="whitespace-nowrap max-xl:block"><span class="max-xl:hidden">· </span>${esc(u[1])} ${spark(h2, "mem")}</span>`] : null;
+  }
+  function renderUsage() {
+    for (const el2 of document.querySelectorAll('#rows [id^="us-"]')) {
+      const c = data.find((c2) => c2.ID === el2.id.slice(3)), uh = c && usageHtml(c);
+      if (uh) {
+        el2.title = uh[0];
+        setHtml(el2, uh[1]);
+      }
+    }
   }
   var MENU_ITEM = "block w-full text-left px-3 py-2 coarse:py-3 rounded text-sm hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent";
   var menuBox = (id, label, off, items) => `<details data-keep="menu" class="shrink-0" ontoggle="placeMenu(this)">
@@ -12242,9 +12885,11 @@ ${WIDE.matches ? "" : `
   function closeMenus(except) {
     document.querySelectorAll('details[data-keep="menu"][open]').forEach((d) => d !== except && d.removeAttribute("open"));
   }
-  document.addEventListener("click", (e) => closeMenus(e.target instanceof Element ? e.target.closest('details[data-keep="menu"]') : null));
+  var menuOf = (e) => e.target instanceof Element ? e.target.closest('details[data-keep="menu"]') : null;
+  document.addEventListener("click", (e) => closeMenus(menuOf(e)));
+  document.addEventListener("focusin", (e) => closeMenus(menuOf(e)));
   var bandHead = (text, cls) => `<tr data-key="h:attn" role="row" class="max-sm:block"><th role="columnheader" colspan="5" scope="colgroup"
-  class="max-sm:block px-4 pt-4 pb-2 text-left font-mono text-xs font-semibold uppercase border-t border-line ${cls}">${text}<span class="ml-3 font-sans font-normal normal-case text-bad-soft/80">${t`healthcheck falhando, loop de reinício ou saída com erro`}</span></th></tr>`;
+  class="max-sm:block px-4 pt-4 pb-2 text-left font-mono text-xs font-semibold uppercase border-t border-line ${cls}">${text}<span class="sr-only">: </span><span class="ml-3 font-sans font-normal normal-case text-bad-soft/80">${t`healthcheck falhando, loop de reinício, saída com erro, dependência quebrada ou memória perto do limite`}</span></th></tr>`;
   function groupHead(k, label) {
     const all = data.filter((c) => project(c) === k), on2 = all.filter((c) => c.State === "running").length;
     const anyBusy = composing.has(k) || all.some((c) => busy.has(c.ID)), dir = k && workingDir(all[0]), armed = arming?.id === `stack-${k}`;
@@ -12263,14 +12908,17 @@ ${WIDE.matches ? "" : `
     const upSvc = missing.map((s15) => `<button data-id="stack-${ek}" data-a="m-svcup-${esc(s15)}" data-p="${ek}" data-s="${esc(s15)}" ${off}
       aria-label="${t`compose up ${esc(s15)} do projeto ${ek}`}" onclick="menuPick(this); composeAct('svcup', this.dataset.p, this.dataset.s)"
       class="${MENU_ITEM} text-fg">compose up ${esc(s15)}</button>`).join("");
+    const dirItem = dir && !REMOTE ? `<button data-id="stack-${ek}" data-a="m-dir" data-p="${ek}" title="${esc(dir)}"
+      onclick="menuPick(this); projectDir(this.dataset.p)" class="${MENU_ITEM} text-fg">${T.openDir ? t`Abrir pasta` : t`Copiar caminho da pasta`}</button>` : "";
     const groups = [
       STACK.filter(([a]) => a !== prim).map(([a, text]) => sbtn(a, text, MENU_ITEM + " text-fg")).join(""),
       dir ? cbtn("up", "compose up") + cbtn("rebuild", "compose up --build") + cbtn("pull", "compose pull") : "",
       upSvc,
+      dirItem,
       dir ? cbtn("down", "compose down…", MENU_ITEM + " text-bad-fg") : ""
     ].filter(Boolean);
     const verb = composing.get(k);
-    const strip = k ? `<span aria-hidden="true" data-strip class="flex items-center gap-0.5">${[...all].sort((a, b2) => a.Names.localeCompare(b2.Names)).map((c) => `<span title="${esc(c.Names)}: ${esc(status(c)[0])}" class="h-3 w-1.5 rounded-[1px] ${TONE[busy.has(c.ID) ? "busy" : tone(c)][0]}"></span>`).join("")}</span>` : "";
+    const strip = k ? `<span aria-hidden="true" data-strip class="flex items-center gap-0.5">${[...all].sort((a, b2) => a.Names.localeCompare(b2.Names)).map((c) => `<span title="${esc(c.Names)}: ${esc(status(c)[0])}" class="h-3 w-1.5 rounded-[1px] ${TONE[busy.has(c.ID) ? "busy" : toneOf(c)][0]}"></span>`).join("")}</span>` : "";
     return `<tr data-key="g:${ek}" role="row" class="max-sm:block"><th role="columnheader" colspan="5" scope="colgroup" class="max-sm:block px-4 pt-3 pb-2.5 text-left font-normal border-t border-line-strong bg-raised">
     <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
       <span class="font-mono text-group font-semibold ${k ? "text-fg-strong" : "text-fg-soft"}">${label}</span>${strip}
@@ -12318,9 +12966,9 @@ ${WIDE.matches ? "" : `
   }
   function render() {
     const q2 = $2("#q").value.trim().toLowerCase();
-    const rows = data.filter((c) => (!only || bucket(c) === only) && [c.Names, c.Image, project(c)].join(" ").toLowerCase().includes(q2)).sort((a, b2) => a.Names.localeCompare(b2.Names));
+    const rows = data.filter((c) => (!only || bucketOf(c) === only) && [c.Names, c.Image, project(c)].join(" ").toLowerCase().includes(q2)).sort((a, b2) => a.Names.localeCompare(b2.Names));
     visible = rows.map((c) => c.ID);
-    const attn = rows.filter(inBand), groups = /* @__PURE__ */ new Map();
+    const attn = attnSort(rows.filter(inBand)), groups = /* @__PURE__ */ new Map();
     for (const c of rows) if (!inBand(c)) groups.set(project(c), [...groups.get(project(c)) || [], c]);
     for (const c of attn) if (project(c) && !groups.has(project(c))) groups.set(project(c), []);
     const keys = [...groups.keys()].sort((a, b2) => Number(a === "") - Number(b2 === "") || a.localeCompare(b2));
@@ -12331,10 +12979,19 @@ ${WIDE.matches ? "" : `
       ...attn.length ? [bandHead(t`Precisa de atenção · ${attn.length}`, "text-bad-fg bg-bad/10"), ...attn.map((c) => row(c, true))] : [],
       ...keys.flatMap((k) => [
         ...heads ? [groupHead(k, k ? esc(k) : keys.length > 1 ? t`Sem projeto compose` : t`Demais containers`)] : [],
+        ...outs.has(k) ? [outRow(k)] : [],
         ...groups.get(k).map((c) => row(c))
       ])
     ] : [`<tr data-key="empty" role="row" class="max-sm:block"><td role="cell" colspan="5" class="max-sm:block py-16 px-4 text-center text-muted">${!lastOk ? problem ? t`Sem dados ainda.` : t`Carregando…` : !data.length ? t`Nenhum container ainda. Crie um em “Novo container” ou com ${code("docker run")}.` : q2 ? t`Nenhum container ${label}corresponde a “${esc(q2)}”.` : t`Nenhum container ${label}agora.`}</td></tr>`]);
     dirty = false;
+    renderUsage();
+    outs.forEach((o2, k) => {
+      const pre = outPre(k);
+      if (pre && pre.textContent.length !== o2.text.length) {
+        pre.textContent = o2.text;
+        pre.scrollTop = pre.scrollHeight;
+      }
+    });
     const dock = armHtml();
     if (dock !== dockHtml) $2("#armdock").innerHTML = dockHtml = dock;
     $2("#armdock").classList.toggle("hidden", !dock);
@@ -12395,12 +13052,12 @@ ${WIDE.matches ? "" : `
     busy.set(c.ID, a);
     render();
     try {
-      const r = await api(`/api/${a}/${c.ID}`, { method: "POST" });
+      const r = await T.request("POST", `/api/${a}/${c.ID}`);
       const msg = await r.json();
       if (!r.ok) errors.set(c.ID, { msg: msg || t`erro sem mensagem`, state: c.State, what: LABEL[a] });
       return r.ok;
     } catch {
-      errors.set(c.ID, { msg: t`Sem resposta do servidor do Docker GUI.`, state: c.State, what: LABEL[a] });
+      errors.set(c.ID, { msg: t`Sem resposta do servidor do Stivo.`, state: c.State, what: LABEL[a] });
       return false;
     } finally {
       busy.delete(c.ID);
@@ -12445,7 +13102,7 @@ ${WIDE.matches ? "" : `
     else toast(t`${fell2.length} containers subiram mas não ficaram bem. Veja a faixa de atenção.`);
   }
   var STACK = [["start", t`Iniciar tudo`], ["restart", t`Reiniciar tudo`], ["stop", t`Parar tudo`]];
-  var fits = (a, c) => a === "start" ? PRIMARY[c.State] === "start" : a === "restart" ? c.State === "running" : a === "remove" ? removable(c) : STOPPABLE.includes(c.State);
+  var fits = (a, c) => a === "start" ? PRIMARY[c.State] === "start" : a === "restart" ? R_KEY[c.State] === "restart" : a === "remove" ? removable(c) : STOPPABLE.includes(c.State);
   var stackList = (a, p, ids) => data.filter((c) => project(c) === p && (ids ? ids.includes(c.ID) : fits(a, c)));
   function copyExec(id) {
     const cmd = `${document.documentElement.dataset.cli} exec -it ${data.find((c) => c.ID === id).Names} sh`;
@@ -12552,6 +13209,36 @@ ${WIDE.matches ? "" : `
     disarm(false);
     run2();
   }
+  var OUT_MAX = 2e5;
+  var outs = /* @__PURE__ */ new Map();
+  var outPre = (k) => document.querySelector(`pre[data-out="${CSS.escape(k)}"]`);
+  function addOut(p, o2, s15) {
+    o2.text += s15;
+    const pre = outPre(p), cut = o2.text.length > 2 * OUT_MAX;
+    if (cut) o2.text = o2.text.slice(-OUT_MAX);
+    if (!pre) return;
+    const end = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 8;
+    if (cut) pre.textContent = o2.text;
+    else pre.append(s15);
+    if (end) pre.scrollTop = pre.scrollHeight;
+  }
+  function closeOut(p) {
+    outs.delete(p);
+    render();
+    document.querySelector(`[data-id="stack-${CSS.escape(p)}"][data-a="menu"]`)?.focus();
+  }
+  function outRow(k) {
+    const o2 = outs.get(k), ek = esc(k), what = esc(o2.what), running = o2.code === null;
+    const state = running ? t`rodando…` : o2.code === -1 ? t`sem resposta do servidor` : t`falhou (código ${o2.code})`;
+    return `<tr data-key="o:${ek}" role="row" class="max-sm:block"><td role="cell" colspan="5" class="max-sm:block px-4 pb-3 bg-raised">
+    <div class="flex items-center gap-2 font-mono text-xs ${running ? "text-fg-soft" : "text-bad-fg"}">
+      <span>${what} · ${state}</span>${running ? "" : `<button data-id="out-${ek}" data-a="close" data-p="${ek}" onclick="closeOut(this.dataset.p)"
+        aria-label="${t`Fechar a saída do ${what} do projeto ${ek}`}" title="${t`Fechar`}" class="ml-auto grid place-items-center shrink-0 w-9 coarse:w-11 ${BTN} text-fg hover:bg-hover">${X_ICON}</button>`}
+    </div>
+    <pre data-out="${ek}" tabindex="0" aria-label="${t`Saída do ${what}`}"
+      class="mt-1.5 max-h-64 overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] rounded bg-canvas p-2 font-mono text-xs text-fg-soft ring-1 ring-line focus-visible:outline-2 focus-visible:outline-accent"></pre>
+  </td></tr>`;
+  }
   async function composeAct(a, p, svc = "", sure = false) {
     const c = data.find((c2) => project(c2) === p);
     if (!c || composing.has(p) || data.some((c2) => project(c2) === p && busy.has(c2.ID))) return;
@@ -12560,22 +13247,23 @@ ${WIDE.matches ? "" : `
     const since2 = (/* @__PURE__ */ new Date()).toISOString();
     const what = `${COMPOSE_CMD[a]}${svc ? ` ${svc}` : ""}`;
     let ok = false;
+    const o2 = { what, text: "", code: null };
     composing.set(p, a);
+    outs.set(p, o2);
     ids.forEach((id) => busy.set(id, "restart"));
     render();
     $2("#shown").textContent = `${COMPOSE_VERB[a]} ${svc || p}`;
     try {
-      const r = await api(`/api/compose/${a}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ project: p, dir: workingDir(c), ...svc ? { service: svc } : {} })
-      });
-      const msg = await r.json();
-      ok = r.ok;
-      toast(r.ok ? ids.length ? t`${p}: ${what} concluído, conferindo se ficou de pé…` : t`${p}: ${what} concluído.` : t`${p}: ${what} falhou. ${errHint(msg) || msg.trim().split("\n").at(-1) || t`Erro sem mensagem.`}`, r.ok);
+      const r = await T.ndjson(`/api/compose/${a}`, { project: p, dir: workingDir(c), ...svc ? { service: svc } : {} }, (l) => addOut(p, o2, l + "\n"));
+      const okStatus = r.status < 400;
+      const msg = okStatus ? (o2.code = r.code, o2.text) : (outs.delete(p), String(r.error));
+      ok = okStatus && o2.code === 0;
+      toast(ok ? ids.length ? t`${p}: ${what} concluído, conferindo se ficou de pé…` : t`${p}: ${what} concluído.` : t`${p}: ${what} falhou. ${errHint(msg) || msg.trim().split("\n").at(-1) || t`Erro sem mensagem.`}`, ok);
     } catch {
-      toast(t`${p}: sem resposta do servidor do Docker GUI.`);
+      o2.code = -1;
+      toast(t`${p}: sem resposta do servidor do Stivo.`);
     }
+    if (ok || !o2.text) outs.delete(p);
     composing.delete(p);
     ids.forEach((id) => busy.delete(id));
     svcs.delete(p);
@@ -12589,6 +13277,15 @@ ${WIDE.matches ? "" : `
     }
     if (ok && now.length) return confirmUp(now);
     if (a === "down") $2("#q").focus();
+  }
+  async function projectDir(p) {
+    const c = data.find((c2) => project(c2) === p), dir = c && workingDir(c);
+    if (!dir) return;
+    if (!T.openDir) {
+      return navigator.clipboard.writeText(dir).then(() => toast(t`Caminho copiado: ${dir}`, true), () => toast(t`Não consegui copiar. O caminho é: ${dir}`));
+    }
+    const err = await T.openDir(p, dir);
+    if (err) toast(err);
   }
   var svcs = /* @__PURE__ */ new Map();
   async function loadSvcs(p, dir, key) {
@@ -12635,6 +13332,11 @@ ${WIDE.matches ? "" : `
     arming = null;
     if (redraw) render();
   }
+  function rKey(id) {
+    const c = data.find((c2) => c2.ID === id), a = c && R_KEY[c.State];
+    if (a) return act(a, id);
+    if (c) toast(t`Nada a reiniciar em ${c.Names}: ${status(c)[0].toLowerCase()}.`);
+  }
   document.addEventListener("keydown", (e) => {
     const open = e.key === "Escape" && document.querySelector('details[data-keep="menu"][open]');
     if (open) {
@@ -12644,6 +13346,12 @@ ${WIDE.matches ? "" : `
       return;
     }
     if (e.key === "Escape" && arming) return disarm();
+    const menu = document.activeElement?.closest?.('details[data-keep="menu"][open]');
+    if (menu && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+      e.preventDefault();
+      const items = [...menu.querySelectorAll("div button")], i = items.indexOf(document.activeElement), down = e.key === "ArrowDown";
+      return items[i < 0 ? down ? 0 : items.length - 1 : (i + (down ? 1 : items.length - 1)) % items.length]?.focus();
+    }
     if ([...document.querySelectorAll("dialog")].some((d) => d.open && d.id !== "dlg") || e.ctrlKey || e.metaKey || e.altKey) return;
     const el2 = document.activeElement, typing = /^(INPUT|TEXTAREA|SELECT)$/.test(el2.tagName) && el2.type !== "checkbox";
     if ($2("#dlg").open) {
@@ -12651,7 +13359,7 @@ ${WIDE.matches ? "" : `
         e.preventDefault();
         $2("#lf").focus();
       }
-      if ((e.key === "r" || e.key === "R") && !typing && logId && data.find((c) => c.ID === logId)?.State === "running") act("restart", logId);
+      if ((e.key === "r" || e.key === "R") && !typing && logId) rKey(logId);
       if ((e.key === "b" || e.key === "B") && !typing && logId) serviceAct("build", logId);
       return;
     }
@@ -12661,19 +13369,20 @@ ${WIDE.matches ? "" : `
       return $2("#q").focus();
     }
     if (e.key === "?" && !typing) return $2("#hint").togglePopover();
-    if ((e.key === "z" || e.key === "Z") && !typing && toastFn) return runToastAction();
+    const inList = !!el2.closest?.("#table, #bulk, #toast");
+    if ((e.key === "z" || e.key === "Z") && !typing && inList && toastFn) return runToastAction();
     if (tab !== "containers") return;
     const curId = el2.closest?.("tr[data-row]")?.dataset.key?.slice(2);
     if ((e.key === "x" || e.key === "X") && !typing && curId) return toggleSel(curId);
-    const prim = curId && PRIMARY[data.find((c) => c.ID === curId)?.State];
+    const st2 = data.find((c) => c.ID === curId)?.State, prim = curId && (st2 === "restarting" ? "stop" : PRIMARY[st2]);
     if ((e.key === "s" || e.key === "S") && !typing && curId && prim) return act(prim, curId);
-    if ((e.key === "r" || e.key === "R") && !typing && curId && data.find((c) => c.ID === curId)?.State === "running") return act("restart", curId);
+    if ((e.key === "r" || e.key === "R") && !typing && curId) return rKey(curId);
     if ((e.key === "l" || e.key === "L") && !typing && curId) {
       e.preventDefault();
       return logs(curId);
     }
     if ((e.key === "b" || e.key === "B") && !typing && curId) return serviceAct("build", curId);
-    if ((e.key === "a" || e.key === "A") && !typing && visible.length) return selectAll(!visible.every((id) => sel.has(id)));
+    if ((e.key === "a" || e.key === "A") && !typing && inList && visible.length) return selectAll(!visible.every((id) => sel.has(id)));
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
     if (typing && !(el2 === $2("#q") && e.key === "ArrowDown")) return;
     const trs = [...document.querySelectorAll("#rows tr[data-row]")], cur = el2.closest?.("tr[data-row]");
@@ -12695,29 +13404,36 @@ ${WIDE.matches ? "" : `
     if (!$2("#dlg").open) return;
     if (logProject) {
       const p = logProject.project, all = data.filter((c2) => project(c2) === p), on2 = all.filter((c2) => c2.State === "running").length;
-      $2("#dlg-status").innerHTML = `<span class="text-muted">${all.length ? t`Projeto compose · ${on2} de ${all.length} rodando · todos os serviços` : t`Este projeto não tem mais containers.`}</span>`;
-      $2("#dlg-acts").innerHTML = "";
+      setHtml($2("#dlg-status"), `<span class="text-muted">${all.length ? t`Projeto compose · ${on2} de ${all.length} rodando · todos os serviços` : t`Este projeto não tem mais containers.`}</span>`);
+      setHtml($2("#dlg-usage"), "");
+      setHtml($2("#dlg-acts"), "");
       return;
     }
     const c = data.find((c2) => c2.ID === logId);
     if (!c) {
-      $2("#dlg-status").innerHTML = `<span class="text-muted">${t`Este container não existe mais.`}</span>`;
-      $2("#dlg-acts").innerHTML = "";
+      setHtml($2("#dlg-status"), `<span class="text-muted">${t`Este container não existe mais.`}</span>`);
+      setHtml($2("#dlg-usage"), "");
+      setHtml($2("#dlg-acts"), "");
       return;
     }
-    const b2 = busy.get(c.ID), tn2 = TONE[b2 ? "busy" : tone(c)], st2 = status(c, facts[tailKey(c)]);
+    const b2 = busy.get(c.ID), tn2 = TONE[b2 ? "busy" : toneOf(c)], st2 = status(c, facts[tailKey(c)]);
     $2("#procs").hidden = c.State !== "running";
     const h2 = hasHealth(c) && health[c.ID + c.Status];
     if (hasHealth(c) && !h2) loadHealth(c.ID);
     const s15 = c.State === "running" && !b2 ? stats[sid(c.ID)] : void 0, u = s15 && usage(s15), hs2 = series.get(sid(c.ID)) ?? [];
     const again2 = mark && c.State === "running" && !b2 ? `<span class="text-muted"> · ${esc(mark.label)}</span>` : "";
-    $2("#dlg-status").innerHTML = `<span class="${tn2[1]}">${b2 ? busyText(c, b2) : esc(st2[0])}</span>${st2[1] && !b2 ? `<span class="text-muted"> · ${st2[1]}</span>` : ""}${again2}${b2 ? "" : errHtml(c)}${h2 ? `<div class="mt-1 text-xs text-muted sm:truncate" title="${esc(h2)}"><span class="font-sans">${t`Último healthcheck:`}</span> <span class="text-fg-soft">${esc(h2)}</span></div>` : ""}${s15 && u ? `<div id="dlg-usage" class="mt-1 text-xs text-muted">${usageLine(s15, u, hs2)}</div>` : ""}`;
+    setHtml($2("#dlg-status"), `<span class="${tn2[1]}">${b2 ? busyText(c, b2) : esc(st2[0])}</span>${st2[1] && !b2 ? `<span class="text-muted"> · ${st2[1]}</span>` : ""}${again2}${b2 ? "" : errHtml(c) + depHtml(blockers(c, data), holds(c, data), false) + memHtml(c, false)}${h2 ? `<div id="dlg-health" class="mt-2 text-xs">${healthHtml(c.ID, h2)}</div>` : ""}`);
+    setHtml($2("#dlg-usage"), s15 && u ? usageLine(s15, u, hs2) : "");
     const prim = PRIMARY[c.State], sec = SECONDARY[c.State];
-    const more = [sec && sec !== "restart" && [sec, LABEL[sec]], c.State === "running" && ["exec", t`Copiar docker exec`]].filter((x) => !!x);
-    $2("#dlg-acts").innerHTML = (sec === "restart" ? `<button data-id="dlg" data-a="restart" ${b2 ? 'aria-disabled="true"' : ""} aria-label="${t`Reiniciar ${esc(c.Names)}`}" title="${t`Reiniciar (r)`}"
+    const more = [
+      sec && sec !== "restart" && [sec, LABEL[sec]],
+      c.State === "running" && ["exec", t`Copiar docker exec`],
+      ["cp", t`Baixar arquivo…`]
+    ].filter((x) => !!x);
+    setHtml($2("#dlg-acts"), (sec === "restart" ? `<button data-id="dlg" data-a="restart" ${b2 ? 'aria-disabled="true"' : ""} aria-label="${t`Reiniciar ${esc(c.Names)}`}" title="${t`Reiniciar (r)`}"
       onclick="act('restart', '${c.ID}')" class="inline-flex items-center gap-1.5 ${BTN} text-fg hover:bg-hover">${RESTART_ICON}${t`Reiniciar`}</button>` : "") + (prim ? `<button data-id="dlg" data-a="${prim}" ${b2 ? 'aria-disabled="true"' : ""} aria-label="${LABEL[prim]} ${esc(c.Names)}" onclick="act('${prim}', '${c.ID}')"
-      class="${BTN} ${prim === "start" ? "text-ok-fg hover:bg-ok/10" : "text-fg hover:bg-hover"}">${LABEL[prim]}</button>` : "") + (more.length ? menuBox("dlg", t`Mais ações para ${esc(c.Names)} nos logs`, !!b2, more.map(([a, text]) => `<button data-id="dlg" data-a="m-${a}" ${b2 ? 'aria-disabled="true"' : ""} onclick="menuPick(this); ${a === "exec" ? `copyExec('${c.ID}')` : `act('${a}', '${c.ID}')`}"
-        class="${MENU_ITEM} text-fg">${text}</button>`).join("")) : "");
+      class="${BTN} ${prim === "start" ? "text-ok-fg hover:bg-ok/10" : "text-fg hover:bg-hover"}">${LABEL[prim]}</button>` : "") + (more.length ? menuBox("dlg", t`Mais ações para ${esc(c.Names)} nos logs`, !!b2, more.map(([a, text]) => `<button data-id="dlg" data-a="m-${a}" ${b2 ? 'aria-disabled="true"' : ""} onclick="menuPick(this); ${a === "exec" ? `copyExec('${c.ID}')` : a === "cp" ? `openCp('${c.ID}')` : `act('${a}', '${c.ID}')`}"
+        ${a === "cp" ? `title="${esc(cpCmd(c.Names))}"` : ""} class="${MENU_ITEM} text-fg">${text}</button>`).join("")) : ""));
   }
   var TAILS = ["500", "2000", "10000", "all"];
   var LIVE_TAILS = 3;
@@ -12779,7 +13495,7 @@ ${WIDE.matches ? "" : `
   function sinceChange() {
     since = $2("#lsince").value;
     complete = false;
-    if (stream) toggleFollow(true);
+    if (stream2) toggleFollow(true);
     else fetchLogs();
   }
   function markInto(el2, text, re2) {
@@ -12827,6 +13543,7 @@ ${WIDE.matches ? "" : `
       const el2 = part(ts2.trimEnd(), "text-[0px] text-muted before:content-[attr(data-t)] before:text-xs");
       el2.dataset.t = at2.toLocaleTimeString(LOCALE);
       el2.title = ts2.trim();
+      el2.ariaHidden = "true";
       part(ts2.slice(ts2.trimEnd().length), "");
     } else part(ts2, "text-muted");
     const lv = LEVEL_TONE[level2];
@@ -12863,7 +13580,7 @@ ${WIDE.matches ? "" : `
     marked = false;
     prevLv = /* @__PURE__ */ new Map();
     shown = buf.map(() => true);
-    if (buf.length && (re2 || narrowed() || stream || colored())) {
+    if (buf.length && (re2 || narrowed() || stream2 || colored())) {
       const frag = document.createDocumentFragment();
       buf.forEach((l, i) => {
         const m = markNode(l), n = re2 || narrowed() || colored() ? hitNode(l, re2) : l;
@@ -12880,7 +13597,7 @@ ${WIDE.matches ? "" : `
     const next = TAILS[tailAt + 1], b2 = $2("#more");
     b2.textContent = !next || complete ? t`Tudo carregado` : next === "all" ? t`Carregar tudo` : t`Carregar ${fmt(+next)} linhas`;
     b2.toggleAttribute("data-done", !next || complete);
-    b2.setAttribute("aria-disabled", String(!next || complete || !!stream && tailAt + 1 >= LIVE_TAILS));
+    b2.setAttribute("aria-disabled", String(!next || complete || !!stream2 && tailAt + 1 >= LIVE_TAILS));
   }
   async function fetchLogs(more = false) {
     const lb = $2("#lb"), atEnd = lb.scrollHeight - lb.scrollTop - lb.clientHeight < 40;
@@ -12902,7 +13619,7 @@ ${WIDE.matches ? "" : `
       $2("#lmeta").textContent = t`${hist().replace(/^./, (c) => c.toUpperCase())} · atualizado às ${(/* @__PURE__ */ new Date()).toLocaleTimeString(LOCALE)}`;
     } catch {
       buf = [];
-      lb.textContent = t`Não consegui carregar os logs. O servidor do Docker GUI está rodando?`;
+      lb.textContent = t`Não consegui carregar os logs. O servidor do Stivo está rodando?`;
     }
     renderMore();
     if (more) lb.scrollTop = lb.scrollHeight - fromEnd;
@@ -12920,11 +13637,13 @@ ${WIDE.matches ? "" : `
     svcSet.clear();
     renderSvcs();
     $2("#lb").textContent = t`Carregando…`;
-    $2("#lmeta").textContent = hist().replace(/^./, (c) => c.toUpperCase());
+    $2("#lmeta").textContent = hist().replace(/^./, (c2) => c2.toUpperCase());
     $2("#dlg-msg").innerHTML = "";
-    $2("#insp").hidden = $2("#hist").hidden = $2("#procs").hidden = !!logProject;
+    $2("#extra").hidden = !!logProject;
     renderHits();
     renderMore();
+    const c = !logProject && data.find((c2) => c2.ID === logId);
+    if (c) delete health[c.ID + c.Status];
     $2("#dlg").showModal();
     renderDlg();
     fetchLogs();
@@ -12946,11 +13665,11 @@ ${WIDE.matches ? "" : `
   }
   function loadMore() {
     if ($2("#more").getAttribute("aria-disabled") === "true") {
-      if (stream && TAILS[tailAt + 1]) toast(t`Ao vivo, o histórico vai até ${fmt(+TAILS[LIVE_TAILS - 1])} linhas. Para carregar tudo, desligue o ao vivo.`);
+      if (stream2 && TAILS[tailAt + 1]) toast(t`Ao vivo, o histórico vai até ${fmt(+TAILS[LIVE_TAILS - 1])} linhas. Para carregar tudo, desligue o ao vivo.`);
       return;
     }
     tailAt++;
-    if (stream) toggleFollow(true);
+    if (stream2) toggleFollow(true);
     else fetchLogs(true);
     renderMore();
   }
@@ -12974,37 +13693,40 @@ ${WIDE.matches ? "" : `
     if (re2 || narrowed()) renderHits();
     if (atEnd) lb.scrollTop = lb.scrollHeight;
   }
-  function toggleFollow(on2 = !stream, why = "") {
-    const was = !!stream;
-    stream?.close();
-    stream = null;
+  function toggleFollow(on2 = !stream2, why = "") {
+    const was = !!stream2;
+    stream2?.close();
+    stream2 = null;
     streamOpen = false;
     if (was) flushLogs();
     if (on2) {
       tailAt = Math.min(tailAt, LIVE_TAILS - 1);
       complete = false;
-      const q2 = new URLSearchParams({ ...logProject, t: TOKEN, tail: TAILS[tailAt], ...since ? { since } : {} });
-      const es2 = stream = new EventSource(logProject ? `/api/compose/logs/stream?${q2}` : `/api/logs/${logId}/stream?${q2}`);
-      es2.onopen = () => {
-        streamOpen = true;
-        pending = [];
-        buf = [];
-        shown = [];
-        prevLv = /* @__PURE__ */ new Map();
-        hits = hitLines = 0;
-        marked = false;
-        $2("#lb").textContent = "";
-        renderHits();
-        $2("#lmeta").textContent = t`Ao vivo · ${hist()} e as novas`;
-      };
-      es2.onmessage = (e) => {
-        if (pending.push(JSON.parse(e.data)) === 1) setTimeout(flushLogs, 50);
-      };
-      es2.addEventListener("end", () => toggleFollow(false, logProject ? t`os containers pararam` : t`o container parou`));
-      es2.onerror = () => {
-        if (es2.readyState === EventSource.CLOSED) toggleFollow(false, t`falhou`);
-        else $2("#lmeta").textContent = t`Ao vivo · reconectando…`;
-      };
+      const q2 = { ...logProject, tail: TAILS[tailAt], ...since ? { since } : {} };
+      stream2 = T.stream(logProject ? "/api/compose/logs/stream" : `/api/logs/${logId}/stream`, q2, {
+        // cada conexão (inclusive a reconexão automática) recomeça do histórico pedido: limpa para não duplicar
+        open: () => {
+          streamOpen = true;
+          pending = [];
+          buf = [];
+          shown = [];
+          prevLv = /* @__PURE__ */ new Map();
+          hits = hitLines = 0;
+          marked = false;
+          $2("#lb").textContent = "";
+          renderHits();
+          $2("#lmeta").textContent = t`Ao vivo · ${hist()} e as novas`;
+        },
+        data: (line) => {
+          if (pending.push(JSON.parse(line)) === 1) setTimeout(flushLogs, 50);
+        },
+        end: () => toggleFollow(false, logProject ? t`os containers pararam` : t`o container parou`),
+        // queda de rede: reconecta sozinho; closed é recusa do servidor (token, erro)
+        error: (closed) => {
+          if (closed) toggleFollow(false, t`falhou`);
+          else $2("#lmeta").textContent = t`Ao vivo · reconectando…`;
+        }
+      });
     } else if (was) $2("#lmeta").textContent = t`Ao vivo parado às ${(/* @__PURE__ */ new Date()).toLocaleTimeString(LOCALE)}${why ? ` · ${why}` : ""}`;
     $2("#follow").setAttribute("aria-pressed", String(on2));
     $2("#refresh").setAttribute("aria-disabled", String(on2));
@@ -13013,7 +13735,7 @@ ${WIDE.matches ? "" : `
   function followClick() {
     toggleFollow();
     try {
-      localStorage.setItem("docker-gui-follow", stream ? "1" : "");
+      localStorage.setItem("docker-gui-follow", stream2 ? "1" : "");
     } catch {
     }
   }
@@ -13025,10 +13747,36 @@ ${WIDE.matches ? "" : `
     }
   };
   function refreshLogs() {
-    if (!stream) fetchLogs();
+    if (!stream2) fetchLogs();
   }
   function copyLogs() {
     navigator.clipboard.writeText($2("#lb").textContent ?? "").then(() => toast(t`Logs copiados.`, true), () => toast(t`Não consegui copiar.`));
+  }
+  function copyProbe(id, i) {
+    const c = data.find((c2) => c2.ID === id), v2 = c && health[id + c.Status];
+    if (!Array.isArray(v2) || !v2[i]) return;
+    navigator.clipboard.writeText(v2[i].Output).then(() => toast(t`Saída do probe copiada.`, true), () => toast(t`Não consegui copiar.`));
+  }
+  var PROBE = { ok: [t`passou`, "ok"], fail: [t`falhou`, "bad"], error: [t`não rodou como esperado`, "warn"] };
+  var SMALL_BTN = "px-2 py-0.5 coarse:min-h-11 coarse:px-4 rounded font-sans font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent";
+  function healthHtml(id, v2) {
+    const head = (sum) => `<div class="flex items-center gap-2"><span class="font-sans text-muted">${t`Healthcheck`}</span>${sum ? `<span class="text-fg-soft">${esc(sum)}</span>` : ""}<button onclick="reloadHealth('${id}')" aria-label="${t`Atualizar o healthcheck`}" class="${SMALL_BTN}">↻</button></div>`;
+    if (typeof v2 === "string") return head("") + `<p class="mt-1 text-bad-fg">${esc(v2)}</p>`;
+    if (!v2.length) return head("") + `<p class="mt-1 text-muted">${t`Nenhum probe rodou ainda.`}</p>`;
+    const time = (s15) => {
+      const d = new Date(probeTime(s15));
+      return isNaN(+d) ? "" : d.toLocaleTimeString(LOCALE, { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+    };
+    const dur2 = (d) => d === null ? "" : d < 1e3 ? `${d} ms` : `${(d / 1e3).toLocaleString(LOCALE, { maximumFractionDigits: 1 })} s`;
+    const rows = v2.map((p, i) => {
+      const [txt, tn2] = PROBE[probeResult(p)], lines = p.Output.trimEnd().split("\n"), shown2 = esc(lines.slice(0, 3).join("\n"));
+      const rest = lines.length > 3 ? `<details><summary class="w-fit cursor-pointer font-sans text-muted hover:text-fg rounded focus-visible:outline-2 focus-visible:outline-accent">${lines.length === 4 ? t`mais 1 linha` : t`mais ${lines.length - 3} linhas`}</summary><pre class="whitespace-pre-wrap [overflow-wrap:anywhere]">${esc(lines.slice(3).join("\n"))}</pre></details>` : "";
+      return `<tr class="align-top"><td class="pr-3 py-0.5 text-muted whitespace-nowrap">${time(p.Start)}</td><td class="pr-3 py-0.5 text-muted whitespace-nowrap text-right">${dur2(probeDuration(p))}</td>
+      <td class="pr-3 py-0.5 whitespace-nowrap ${TONE[tn2][1]}">${txt} · ${p.ExitCode}</td>
+      <td class="pr-3 py-0.5 w-full [overflow-wrap:anywhere]"><pre class="whitespace-pre-wrap text-fg-soft">${shown2 || `<span class="font-sans text-muted">${t`(sem saída)`}</span>`}</pre>${rest}</td>
+      <td class="py-0.5">${p.Output ? `<button onclick="copyProbe('${id}', ${i})" aria-label="${t`Copiar a saída do probe das ${time(p.Start)}`}" class="${SMALL_BTN}">${t`Copiar`}</button>` : ""}</td></tr>`;
+    }).join("");
+    return head(healthSummary(v2)) + `<div class="-mx-1 p-1 max-h-48 overflow-auto"><table class="w-full font-mono"><caption class="sr-only">${t`Últimos probes do healthcheck, do mais novo para o mais velho`}</caption><tbody>${rows}</tbody></table></div>`;
   }
   var RESTART_TXT = { no: t`não reinicia`, "on-failure": t`se sair com erro`, "unless-stopped": t`sempre, menos se você parar`, always: t`sempre` };
   function inspectHtml(d, reveal) {
@@ -13101,6 +13849,52 @@ ${WIDE.matches ? "" : `
     if (id !== logId || !$2("#procs").open) return;
     $2("#procs-body").innerHTML = html;
   }
+  var diffItems = null;
+  var DIFF_KIND = { A: [t`adicionado`, "text-ok-fg"], C: [t`alterado`, "text-warn-fg"], D: [t`apagado`, "text-bad-fg"] };
+  async function loadDiff() {
+    const id = logId;
+    let err = null, items = null;
+    try {
+      const r = await api(`/api/diff/${id}`), j2 = await r.json();
+      if (r.ok) items = j2;
+      else err = t`Não consegui ler as mudanças: ${j2}`;
+    } catch {
+      err = t`Não consegui ler as mudanças.`;
+    }
+    if (id !== logId || !$2("#diff").open) return;
+    diffItems = items;
+    if (err) $2("#diff-body").textContent = err;
+    else paintDiff();
+  }
+  var diffHits = () => {
+    const re2 = logFilter($2("#diff-q").value.trim());
+    return { re: re2, hits: re2 ? diffItems.filter((d) => re2.test(d.p)) : diffItems };
+  };
+  function paintDiff() {
+    if (!diffItems) return;
+    const body = $2("#diff-body");
+    if (!diffItems.length) {
+      body.innerHTML = `<p class="text-muted">${t`Nada mudou em relação à imagem.`}</p>`;
+      return;
+    }
+    const { re: re2, hits: hits2 } = diffHits(), el2 = (tag, cls, text = "") => Object.assign(document.createElement(tag), { className: cls, textContent: text });
+    const ol2 = el2("ol", "font-mono space-y-0.5");
+    for (const d of hits2.slice(0, DIFF_MAX)) {
+      const [txt, cls] = DIFF_KIND[d.k], li2 = el2("li", "");
+      li2.append(el2("span", `inline-block w-24 font-sans ${cls}`, txt));
+      markInto(li2, d.p, re2);
+      ol2.append(li2);
+    }
+    body.replaceChildren(
+      el2("p", "mb-1 text-fg-soft", diffSummary(diffItems) + (re2 ? ` · ${t`${hits2.length} no filtro`}` : "")),
+      ol2,
+      ...hits2.length > DIFF_MAX ? [el2("p", "mt-1 text-muted", t`Mostrando ${DIFF_MAX} de ${hits2.length}; use o filtro para achar o resto.`)] : []
+    );
+  }
+  function copyDiff() {
+    if (!diffItems) return;
+    navigator.clipboard.writeText(diffHits().hits.map((d) => `${d.k} ${d.p}`).join("\n")).then(() => toast(t`Mudanças copiadas.`, true), () => toast(t`Não consegui copiar.`));
+  }
   function downloadLogs() {
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([$2("#lb").textContent ?? ""], { type: "text/plain" }));
@@ -13108,59 +13902,177 @@ ${WIDE.matches ? "" : `
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href));
   }
+  var CP_KEY = "docker-gui-cp";
+  var cpAll = () => {
+    try {
+      return JSON.parse(localStorage.getItem(CP_KEY) || "{}");
+    } catch {
+      return {};
+    }
+  };
+  var cpFor = null;
+  var cpAbort = null;
+  function cpCmd(name, path) {
+    const p = path === void 0 ? t`<caminho>` : /^[\w./@%+=:,-]+$/.test(path) ? path : `'${path.replace(/'/g, `'\\''`)}'`;
+    return `${document.documentElement.dataset.cli} cp ${name}:${p} .`;
+  }
+  function openCp(id) {
+    cpFor = data.find((c) => c.ID === id) ?? null;
+    if (!cpFor) return;
+    const recent = cpAll()[cpFor.Names] ?? [], input = $2("#cp-path");
+    $2("#cp-name").textContent = cpFor.Names;
+    $2("#cp-recent").replaceChildren(...recent.map((p) => Object.assign(document.createElement("option"), { value: p })));
+    input.value = recent[0] ?? "";
+    input.removeAttribute("aria-invalid");
+    $2("#cp-err").textContent = $2("#cp-msg").textContent = "";
+    $2("#cp").showModal();
+    input.select();
+  }
+  async function cpGo(e) {
+    e.preventDefault();
+    const input = $2("#cp-path"), path = input.value.trim(), c = cpFor, go2 = $2("#cp-go");
+    if (!c || cpAbort) return;
+    if (!path.startsWith("/")) {
+      input.setAttribute("aria-invalid", "true");
+      $2("#cp-err").textContent = t`Use o caminho absoluto, começando com /.`;
+      return input.focus();
+    }
+    input.removeAttribute("aria-invalid");
+    $2("#cp-err").textContent = $2("#cp-msg").textContent = "";
+    const abort = cpAbort = new AbortController();
+    go2.setAttribute("aria-disabled", "true");
+    go2.textContent = t`Baixando arquivo…`;
+    const r = await T.cpOut(c.ID, path, abort.signal).catch(() => ({ ok: false, status: 0, error: t`Sem resposta do servidor.` }));
+    cpAbort = null;
+    go2.removeAttribute("aria-disabled");
+    go2.textContent = t`Baixar arquivo`;
+    if (abort.signal.aborted) return;
+    if (!r.ok) {
+      $2("#cp-msg").innerHTML = esc(r.error) + (r.status === 413 ? `<span class="block mt-1">${t`Pelo terminal:`}
+      <button type="button" onclick="copyCp()" class="ml-1 font-medium underline underline-offset-4 rounded hover:text-fg-strong focus-visible:outline-2 focus-visible:outline-accent">${t`Copiar`}</button></span>
+      <code class="block mt-0.5 font-mono text-xs [overflow-wrap:anywhere]">${esc(cpCmd(c.Names, path))}</code>` : "");
+      return;
+    }
+    try {
+      const all = cpAll();
+      all[c.Names] = [path, ...(all[c.Names] ?? []).filter((p) => p !== path)].slice(0, 5);
+      localStorage.setItem(CP_KEY, JSON.stringify(all));
+    } catch {
+    }
+    $2("#cp").close();
+    if (r.saved) toast(t`Baixado: ${r.name}`, true);
+  }
+  function cpClosed() {
+    cpAbort?.abort();
+    cpAbort = null;
+  }
+  function copyCp() {
+    const cmd = cpCmd(cpFor.Names, $2("#cp-path").value.trim());
+    navigator.clipboard.writeText(cmd).then(() => toast(t`Copiado: ${cmd}`, true), () => toast(t`Não consegui copiar. O comando é: ${cmd}`));
+  }
   function afterClose() {
     toggleFollow(false);
-    for (const k of ["insp", "hist", "procs"]) {
+    for (const k of ["insp", "hist", "procs", "diff"]) {
       $2("#" + k).removeAttribute("open");
       $2(`#${k}-body`).textContent = t`Carregando…`;
     }
+    $2("#extra").removeAttribute("open");
+    diffItems = null;
+    $2("#diff-q").value = "";
     document.querySelector(logProject ? `[data-id="${CSS.escape(`stack-${logProject.project}`)}"][data-a="plogs"]` : `[data-id="${logId}"][data-a="logs"]`)?.focus();
   }
   var xtermCss = document.createElement("style");
   xtermCss.textContent = xterm_default;
   document.head.append(xtermCss);
   var sess = null;
+  function termTheme() {
+    const ctx = document.createElement("canvas").getContext("2d", { willReadFrequently: true }), css = getComputedStyle(document.documentElement);
+    const rgb = (k, a = "") => {
+      ctx.clearRect(0, 0, 1, 1);
+      ctx.fillStyle = css.getPropertyValue("--color-" + k);
+      ctx.fillRect(0, 0, 1, 1);
+      const [r, g, b2] = ctx.getImageData(0, 0, 1, 1).data;
+      return a ? `rgba(${r}, ${g}, ${b2}, ${a})` : `rgb(${r}, ${g}, ${b2})`;
+    };
+    return {
+      background: rgb("canvas"),
+      foreground: rgb("fg-soft"),
+      cursor: rgb("accent"),
+      cursorAccent: rgb("canvas"),
+      selectionBackground: rgb("accent", "0.3"),
+      black: rgb("line-strong"),
+      red: rgb("bad"),
+      green: rgb("ok"),
+      yellow: rgb("warn"),
+      blue: rgb("svc-3"),
+      magenta: rgb("pause"),
+      cyan: rgb("accent"),
+      white: rgb("fg-soft"),
+      brightBlack: rgb("dim"),
+      brightRed: rgb("bad-fg"),
+      brightGreen: rgb("ok-fg"),
+      brightYellow: rgb("warn-fg"),
+      brightBlue: rgb("svc-3"),
+      brightMagenta: rgb("pause-fg"),
+      brightCyan: rgb("accent-fg"),
+      brightWhite: rgb("fg-strong")
+    };
+  }
   function openShell(id) {
     const c = data.find((c2) => c2.ID === id);
     if (!c) return;
     $2("#shell-name").textContent = c.Names;
     $2("#shell-status").textContent = t`Conectando…`;
     $2("#shell").showModal();
-    const term = new Dl({ cursorBlink: true, fontSize: 13, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" });
-    const fit = new o(), enc = new TextEncoder();
+    const term = new Dl({
+      cursorBlink: !matchMedia("(prefers-reduced-motion: reduce)").matches,
+      fontSize: 13,
+      screenReaderMode: true,
+      fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+      theme: termTheme()
+    });
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type === "keydown" && e.ctrlKey && e.key === "]") {
+        $2("#shell-close").focus();
+        return false;
+      }
+      return true;
+    });
+    const fit = new o();
     term.loadAddon(fit);
     term.open($2("#shell-box"));
     fit.fit();
-    const ws2 = new WebSocket(`ws://${location.host}/api/exec/${id}?t=${encodeURIComponent(TOKEN)}`);
-    ws2.binaryType = "arraybuffer";
-    const size = () => {
-      if (ws2.readyState === WebSocket.OPEN) ws2.send(JSON.stringify({ cols: term.cols, rows: term.rows }));
-    };
-    ws2.onopen = () => {
-      size();
-      $2("#shell-status").textContent = t`Conectado. Esc vai para o terminal; feche pelo ×.`;
-      term.focus();
-    };
-    ws2.onmessage = (e) => {
-      if (typeof e.data === "string") $2("#shell-status").textContent = e.data;
-      else term.write(new Uint8Array(e.data));
-    };
-    ws2.onclose = () => {
-      $2("#shell-status").textContent = t`Sessão encerrada.`;
-    };
-    term.onData((d) => {
-      if (ws2.readyState === WebSocket.OPEN) ws2.send(enc.encode(d));
+    const size = () => ws2.resize(term.cols, term.rows);
+    const ws2 = T.terminal(id, {
+      open: () => {
+        if (sess?.ws === ws2) sess.live = true;
+        size();
+        $2("#shell-status").textContent = t`Conectado. Esc vai para o terminal; Ctrl+] sai dele, e aí o Esc fecha.`;
+        term.focus();
+      },
+      data: (b2) => term.write(b2),
+      // aviso do servidor (no Windows, imagem sem TTY), que vai para o status
+      notice: (text) => {
+        $2("#shell-status").textContent = text;
+      },
+      // acabou (exit): o foco sai do terminal, que não responde mais, e o Esc fecha
+      close: () => {
+        if (sess?.ws !== ws2) return;
+        sess.live = false;
+        $2("#shell-status").textContent = t`Sessão encerrada.`;
+        $2("#shell-close").focus();
+      }
     });
+    term.onData((d) => ws2.send(d));
     term.onResize(size);
     const ro2 = new ResizeObserver(() => fit.fit());
     ro2.observe($2("#shell-box"));
-    sess = { id, term, ws: ws2, ro: ro2 };
+    sess = { id, term, ws: ws2, ro: ro2, live: false };
   }
   function closeShell() {
     if (!sess) return;
     const { id, term, ws: ws2, ro: ro2 } = sess;
     sess = null;
-    ws2.onclose = ws2.onmessage = null;
     ws2.close();
     ro2.disconnect();
     term.dispose();
@@ -13210,11 +14122,11 @@ ${WIDE.matches ? "" : `
     $2("#shown").textContent = t`Criando ${label}…`;
     let ok = false, msg;
     try {
-      const r = await api("/api/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(spec) });
+      const r = await T.request("POST", "/api/run", spec);
       msg = await r.json();
       ok = r.ok;
     } catch {
-      msg = t`Sem resposta do servidor do Docker GUI.`;
+      msg = t`Sem resposta do servidor do Stivo.`;
     }
     creating = false;
     go2.removeAttribute("aria-disabled");
@@ -13274,7 +14186,7 @@ ${WIDE.matches ? "" : `
       const r = await api("/api/df"), j2 = await r.json();
       disk = r.ok ? j2 : t`Não consegui ler o uso de disco: ${j2}`;
     } catch {
-      disk = t`Não consegui ler o uso de disco. O servidor do Docker GUI está rodando?`;
+      disk = t`Não consegui ler o uso de disco. O servidor do Stivo está rodando?`;
     }
     render();
   }
@@ -13305,12 +14217,12 @@ ${WIDE.matches ? "" : `
     render();
     $2("#shown").textContent = t`Limpando ${label.toLowerCase()}…`;
     try {
-      const r = await api("/api/prune/" + k, { method: "POST" }), msg = await r.json();
+      const r = await T.request("POST", "/api/prune/" + k), msg = await r.json();
       const freed = msg.match(/Total(?: reclaimed space)?:\s*(\S+)/)?.[1];
       if (r.ok) toast(`${label}: ${freed ? t`${freed} liberados` : t`limpeza feita`}.`, true);
       else toast(t`Não deu para limpar ${label.toLowerCase()}: ${msg || t`erro sem mensagem`}`);
     } catch {
-      toast(t`Sem resposta do servidor do Docker GUI.`);
+      toast(t`Sem resposta do servidor do Stivo.`);
     }
     diskBusy = "";
     await Promise.all([loadTab(), k === "containers" && load()]);
@@ -13333,7 +14245,7 @@ ${WIDE.matches ? "" : `
       const r = await api("/api/" + k), j2 = await r.json();
       objs[k] = r.ok ? j2 : t`Não consegui ler a lista: ${j2}`;
     } catch {
-      objs[k] = t`Não consegui ler a lista. O servidor do Docker GUI está rodando?`;
+      objs[k] = t`Não consegui ler a lista. O servidor do Stivo está rodando?`;
     }
     render();
   }
@@ -13361,18 +14273,25 @@ ${WIDE.matches ? "" : `
     }
     cells.push(o2.Containers.length ? `<span class="text-fg-soft">${esc(o2.Containers.join(", "))}</span>` : t`nenhum container`);
     const canRm = k !== "networks" || !o2.Builtin && !!o2.ID;
-    const holds = k === "networks" ? o2.Containers.filter((n) => data.some((c) => c.Names === n && c.State === "running")) : o2.Containers;
-    const held = holds.length ? esc(holds.join(", ")) : "";
+    const holds2 = k === "networks" ? o2.Containers.filter((n) => data.some((c) => c.Names === n && c.State === "running")) : o2.Containers;
+    const held2 = holds2.length ? esc(holds2.join(", ")) : "";
     const cls = armed ? "ring-bad/60 text-bad-fg hover:bg-bad/10" : "text-fg hover:bg-hover";
     const cols = OBJ_COLS[k].slice(1);
-    return `<tr class="border-t border-line/70 ${armed ? "bg-bad/10" : ""} max-sm:block max-sm:py-3">
+    const tags = k === "images" ? o2.Tags : [];
+    const pullBtns = tags.map((tg) => {
+      const run2 = pulls.get(tg)?.code === null, et = esc(tg);
+      return `<button data-id="pull-${et}" data-a="pull" data-r="${et}" ${run2 ? 'aria-disabled="true"' : ""} onclick="pullImage(this.dataset.r)"
+      title="docker pull ${et}" aria-label="${t`Atualizar ${et}`}" class="${BTN} text-fg hover:bg-hover">${run2 ? t`Baixando…` : tags.length > 1 ? t`Atualizar ${et}` : t`Atualizar`}</button>`;
+    }).join("");
+    const fresh = !!freshRef && tags.some((tg) => sameRef(tg, freshRef));
+    return `<tr ${fresh ? "data-fresh" : ""} class="border-t border-line/70 ${armed ? "bg-bad/10" : fresh ? "bg-accent/10" : ""} transition-[background-color] motion-reduce:transition-none max-sm:block max-sm:py-3">
     <th scope="row" class="py-2.5 pl-4 pr-6 max-sm:block max-sm:p-0 max-sm:px-4 text-left font-normal align-top">
       <div class="font-mono text-data font-semibold text-fg-strong [overflow-wrap:anywhere]">${title}</div>
       ${err ? `<div class="mt-1 [contain:inline-size] max-sm:[contain:none] text-xs text-bad-fg">${hint ? `<p class="font-sans">${hint}</p>` : ""}
         <pre class="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-bad-soft">${esc(err)}</pre></div>` : ""}</th>
     ${cells.map((c, i) => `<td class="py-2.5 pr-4 max-sm:block max-sm:p-0 max-sm:px-4 align-top font-mono text-xs leading-5 text-muted [overflow-wrap:anywhere]"><span class="sm:sr-only">${cols[i]}: </span>${c}</td>`).join("")}
-    <td class="py-2 pr-4 max-sm:block max-sm:p-0 max-sm:px-4 max-sm:pt-2 align-top"><div class="flex justify-end max-sm:justify-start items-center gap-1.5">${!canRm ? "" : held ? `<button data-id="${esc(id)}" data-a="rm" aria-disabled="true" aria-label="${t`Remover (indisponível: em uso por ${held})`}"
-      title="${k === "networks" ? t`Em uso por ${held}: pare o container antes` : t`Em uso por ${held}: remova o container antes`}" class="${BTN} text-muted cursor-not-allowed">${t`Remover…`}</button>` : `<button data-id="${esc(id)}" data-a="rm" data-k="${k}" data-r="${esc(r)}" ${objBusy ? 'aria-disabled="true"' : ""} ${armed ? 'aria-expanded="true"' : ""}
+    <td class="py-2 pr-4 max-sm:block max-sm:p-0 max-sm:px-4 max-sm:pt-2 align-top"><div class="flex flex-wrap justify-end max-sm:justify-start items-center gap-1.5">${pullBtns}${!canRm ? "" : held2 ? `<button data-id="${esc(id)}" data-a="rm" aria-disabled="true" aria-label="${t`Remover (indisponível: em uso por ${held2})`}"
+      title="${k === "networks" ? t`Em uso por ${held2}: pare o container antes` : t`Em uso por ${held2}: remova o container antes`}" class="${BTN} text-muted cursor-not-allowed">${t`Remover…`}</button>` : `<button data-id="${esc(id)}" data-a="rm" data-k="${k}" data-r="${esc(r)}" ${objBusy ? 'aria-disabled="true"' : ""} ${armed ? 'aria-expanded="true"' : ""}
       onclick="rmObj(this.dataset.k, this.dataset.r)" aria-label="${t`Remover ${esc(what)}`}"
       class="${BTN} ${cls}">${objBusy === id ? t`Removendo…` : t`Remover…`}</button>`}</div></td></tr>`;
   }
@@ -13385,6 +14304,86 @@ ${WIDE.matches ? "" : `
       if (html !== objHtml[k]) $2(`#obj-${k}-list`).innerHTML = objHtml[k] = html;
       $2(`#obj-${k}-n`).textContent = Array.isArray(v2) ? ` · ${v2.length}` : "";
     }
+  }
+  var pulls = /* @__PURE__ */ new Map();
+  var freshRef = "";
+  var imageOf = (ref) => Array.isArray(objs.images) ? objs.images.find((i) => i.Tags.some((tg) => sameRef(tg, ref))) : void 0;
+  function pullHint() {
+    const v2 = $2("#pull-q").value.trim();
+    $2("#pull-hint").textContent = !v2 ? "" : !imageOk(v2) ? t`Imagem inválida: use repo[:tag] ou repo@sha256:…, com o caminho em minúsculas.` : withTag(v2) !== v2 ? t`(tag latest)` : "";
+  }
+  async function pullImage(typed = $2("#pull-q").value.trim()) {
+    pullHint();
+    const ref = withTag(typed);
+    if (!typed || !imageOk(typed) || pulls.get(ref)?.code === null) return;
+    const p = { what: `docker pull ${ref}`, text: "", code: null, before: imageOf(ref)?.ID ?? null };
+    pulls.set(ref, p);
+    renderPulls();
+    render();
+    $2("#shown").textContent = t`Baixando ${ref}…`;
+    let msg = "";
+    try {
+      const r = await T.ndjson("/api/pull", { image: ref }, (l) => addOut(`pull:${ref}`, p, l + "\n"));
+      if (r.status >= 400) {
+        p.code = -2;
+        msg = String(r.error);
+      } else p.code = r.code;
+    } catch {
+      p.code = -1;
+      msg = t`sem resposta do servidor do Stivo.`;
+    }
+    await loadObjects("images");
+    if (p.code === 0) {
+      const out = pullOutcome(p.before, imageOf(ref)?.ID ?? null);
+      const old = out === "updated" && Array.isArray(objs.images) ? objs.images.find((i) => i.ID === p.before)?.Containers ?? [] : [];
+      toast({
+        new: t`Baixada: ${ref}.`,
+        missing: t`Baixada: ${ref}.`,
+        same: t`${ref} já estava em dia.`,
+        updated: t`Atualizada: ${ref}. A versão anterior ficou sem tag.`
+      }[out] + (old.length ? " " + t`${old.join(", ")} continuam com a versão anterior até serem recriados.` : ""), true);
+      pulls.delete(ref);
+      freshRef = ref;
+      setTimeout(() => {
+        if (freshRef === ref) {
+          freshRef = "";
+          render();
+        }
+      }, 4e3);
+      if ($2("#pull-q").value.trim() === typed) {
+        $2("#pull-q").value = "";
+        pullHint();
+      }
+    } else {
+      msg ||= p.text;
+      toast(t`Não deu para baixar ${ref}. ${errHint(msg) || msg.trim().split("\n").at(-1) || t`Erro sem mensagem.`}`);
+      if (p.code === -2) pulls.delete(ref);
+    }
+    renderPulls();
+    render();
+  }
+  function closePull(ref) {
+    pulls.delete(ref);
+    renderPulls();
+    $2("#pull-q").focus();
+  }
+  function renderPulls() {
+    $2("#pulls").innerHTML = [...pulls].map(([ref, p]) => {
+      const running = p.code === null, er2 = esc(ref);
+      const state = running ? t`baixando…` : p.code === -1 ? t`sem resposta do servidor` : t`falhou (código ${p.code})`;
+      return `<div class="rounded-lg ring-1 ring-line bg-raised/40 p-3"><div class="flex items-center gap-2 font-mono text-xs ${running ? "text-fg-soft" : "text-bad-fg"}">
+      <span>docker pull ${er2} · ${state}</span>${running ? "" : `<button data-r="${er2}" onclick="closePull(this.dataset.r)" aria-label="${t`Fechar a saída do docker pull ${er2}`}"
+        title="${t`Fechar`}" class="ml-auto grid place-items-center shrink-0 w-9 coarse:w-11 ${BTN} text-fg hover:bg-hover">${X_ICON}</button>`}</div>
+      <pre data-out="pull:${er2}" tabindex="0" aria-label="${t`Saída do docker pull ${er2}`}"
+        class="mt-1.5 max-h-64 overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] rounded bg-canvas p-2 font-mono text-xs text-fg-soft ring-1 ring-line focus-visible:outline-2 focus-visible:outline-accent"></pre></div>`;
+    }).join("");
+    pulls.forEach((p, ref) => {
+      const pre = outPre(`pull:${ref}`);
+      if (pre) {
+        pre.textContent = p.text;
+        pre.scrollTop = pre.scrollHeight;
+      }
+    });
   }
   async function rmObj(k, r, sure = false) {
     const list = objs[k], o2 = Array.isArray(list) ? list.find((o3) => objRef(k, o3) === r) : void 0;
@@ -13399,7 +14398,7 @@ ${WIDE.matches ? "" : `
     $2("#shown").textContent = t`Removendo ${one} ${name}…`;
     let ok = false;
     try {
-      const res = await api(`/api/rm/${rm}/${encodeURIComponent(r)}`, { method: "POST" }), msg = await res.json();
+      const res = await T.request("POST", `/api/rm/${rm}/${encodeURIComponent(r)}`), msg = await res.json();
       ok = res.ok;
       if (ok) toast(`${label} ${name} ${done}.`, true);
       else {
@@ -13407,11 +14406,56 @@ ${WIDE.matches ? "" : `
         toast(t`Não deu para remover ${one} ${name}. ${errHint(msg) || t`O erro ficou na lista.`}`);
       }
     } catch {
-      toast(t`Sem resposta do servidor do Docker GUI.`);
+      toast(t`Sem resposta do servidor do Stivo.`);
     }
     objBusy = "";
     await loadTab();
     if (ok) (document.querySelector(`[data-id="${near}"][data-a="rm"]`) || $2("#tab-" + k)).focus();
+  }
+  async function openPrefs() {
+    const p = await T.prefs.get(), sel2 = (k) => $2(`#pref-${k}`);
+    const ctx = sel2("context");
+    ctx.replaceChildren(ctx.options[0], ...p.contexts.map((c) => Object.assign(document.createElement("option"), { value: c, textContent: c })));
+    sel2("cli").value = p.cli ?? "";
+    ctx.value = p.context && p.contexts.includes(p.context) ? p.context : "";
+    sel2("lang").value = p.lang ?? "";
+    $2("#pref-notify").checked = p.notifications;
+    const auto = $2("#pref-autostart");
+    auto.checked = auto.defaultChecked = p.autostart;
+    prefsContext();
+    $2("#prefs-msg").textContent = "";
+    $2("#prefs").showModal();
+    sel2("cli").focus();
+  }
+  function prefsContext() {
+    $2("#pref-context-row").hidden = $2("#pref-cli").value === "podman";
+  }
+  async function savePrefs(e) {
+    e.preventDefault();
+    const v2 = (k) => $2(`#pref-${k}`).value || null, go2 = $2("#prefs-go");
+    if (go2.getAttribute("aria-disabled") === "true") return;
+    go2.setAttribute("aria-disabled", "true");
+    const auto = $2("#pref-autostart");
+    const err = await T.prefs.set({
+      cli: v2("cli"),
+      context: v2("cli") === "podman" ? null : v2("context"),
+      lang: v2("lang"),
+      notifications: $2("#pref-notify").checked,
+      autostart: auto.checked
+    });
+    go2.removeAttribute("aria-disabled");
+    if (err) {
+      $2("#prefs-msg").textContent = err;
+      auto.checked = auto.defaultChecked;
+    }
+  }
+  $2("#cp-form").addEventListener("submit", cpGo);
+  $2("#cp").addEventListener("close", cpClosed);
+  if (T.prefs) {
+    $2("#prefs-open").hidden = false;
+    T.prefs.onOpen(() => void openPrefs());
+    $2("#prefs-form").addEventListener("submit", savePrefs);
+    $2("#pref-cli").addEventListener("change", prefsContext);
   }
   Object.assign(window, {
     ackFail,
@@ -13422,14 +14466,20 @@ ${WIDE.matches ? "" : `
     bulkAct,
     clearFilters,
     clearSel,
+    closeOut,
+    closePull,
     composeAct,
     copyAddr,
+    copyCp,
+    copyDiff,
     copyExec,
     copyLogs,
+    copyProbe,
     disarm,
     downloadLogs,
     filterBy,
     followClick,
+    loadDiff,
     loadHealth,
     loadHistory,
     loadInspect,
@@ -13437,13 +14487,19 @@ ${WIDE.matches ? "" : `
     loadTop,
     logPick,
     menuPick,
+    openCp,
     openCreate,
+    openPrefs,
+    openProcs,
     openShell,
     pickTab,
     placeMenu,
+    projectDir,
     projectLogs,
+    pullImage,
     prune,
     refreshLogs,
+    reloadHealth,
     rmObj,
     serviceAct,
     runToastAction,
@@ -13454,7 +14510,9 @@ ${WIDE.matches ? "" : `
   });
   $2("#dlg").addEventListener("close", afterClose);
   $2("#shell").addEventListener("close", closeShell);
-  $2("#shell").addEventListener("cancel", (e) => e.preventDefault());
+  $2("#shell").addEventListener("cancel", (e) => {
+    if (sess?.live && $2("#shell-box").contains(document.activeElement)) e.preventDefault();
+  });
   var docks = new ResizeObserver(() => {
     const b2 = $2("#bulk").offsetHeight, d = $2("#armdock").offsetHeight, root = document.documentElement.style;
     root.setProperty("--bulk", `${b2 && b2 + 8}px`);
@@ -13467,13 +14525,28 @@ ${WIDE.matches ? "" : `
   $2("#run-public").addEventListener("change", createLabel);
   $2("#create").addEventListener("close", () => $2("#new").focus());
   $2("#q").oninput = render;
-  $2("#lf").oninput = paint;
+  var lfTimer;
+  $2("#lf").oninput = () => {
+    clearTimeout(lfTimer);
+    lfTimer = setTimeout(paint, 120);
+  };
   $2("#lf").addEventListener("keydown", (e) => {
     const f = e.target;
     if (e.key === "Escape" && f.value) {
       e.preventDefault();
+      clearTimeout(lfTimer);
       f.value = "";
       paint();
+    }
+  });
+  $2("#pull-q").oninput = pullHint;
+  $2("#diff-q").oninput = paintDiff;
+  $2("#diff-q").addEventListener("keydown", (e) => {
+    const f = e.target;
+    if (e.key === "Escape" && f.value) {
+      e.preventDefault();
+      f.value = "";
+      paintDiff();
     }
   });
   document.addEventListener("visibilitychange", () => {

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Iniciar com o sistema (src-tauri/src/autostart.rs): desinstalar apaga o valor Stivo do HKCU\...\Run de quem
+     desinstala; atualizar (UPGRADINGPRODUCTCODE) mantém. O Component vazio existe só para o tauri.conf.json
+     referenciar (componentRefs), o que traz o fragmento inteiro para o MSI -->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <DirectoryRef Id="TARGETDIR">
+      <Component Id="AutostartCleanup" Guid="5d6c0f3e-2b8a-4a51-9a3e-7c1f4e2d9b60" KeyPath="yes" />
+    </DirectoryRef>
+    <CustomAction Id="RemoveAutostart" Directory="TARGETDIR" Execute="immediate" Impersonate="yes" Return="ignore"
+      ExeCommand='"[SystemFolder]reg.exe" delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v Stivo /f' />
+    <InstallExecuteSequence>
+      <Custom Action="RemoveAutostart" After="InstallFinalize">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
+    </InstallExecuteSequence>
+  </Fragment>
+</Wix>

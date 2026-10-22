@@ -1,0 +1,40 @@
+{
+  "desc": "saída dos probes do healthcheck",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "{\"Status\": \"unhealthy\", \"FailingStreak\": 3, \"Log\": [{\"Start\": \"2026-10-21T13:00:00.123456789Z\", \"End\": \"2026-10-21T13:00:00.456789012Z\", \"ExitCode\": 1, \"Output\": \"curl: (7) falhou\\n\"}]}\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "inspect",
+        "--format",
+        "{{json .State.Health}}",
+        "0123456789ab"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/health/0123456789ab",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "Status": "unhealthy",
+      "FailingStreak": 3,
+      "Log": [
+        {
+          "Start": "2026-10-21T13:00:00.123456789Z",
+          "End": "2026-10-21T13:00:00.456789012Z",
+          "ExitCode": 1,
+          "Output": "curl: (7) falhou\n"
+        }
+      ]
+    }
+  }
+}

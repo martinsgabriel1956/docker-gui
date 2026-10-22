@@ -1,0 +1,30 @@
+{
+  "desc": "RAM total no podman info: host.memTotal",
+  "lang": "pt",
+  "cli": [
+    "podman"
+  ],
+  "calls": [
+    {
+      "stdout": "{\"host\": {\"memTotal\": 8221675520}, \"version\": {\"Version\": \"5.4.0\"}}\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "info",
+        "--format",
+        "{{json .}}"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/info",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "MemTotal": 8221675520
+    }
+  }
+}

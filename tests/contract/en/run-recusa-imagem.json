@@ -1,0 +1,19 @@
+{
+  "desc": "mensagem em inglês",
+  "lang": "en",
+  "cli": [
+    "docker"
+  ],
+  "calls": [],
+  "request": {
+    "method": "POST",
+    "path": "/api/run",
+    "body": {
+      "image": "-x"
+    }
+  },
+  "response": {
+    "status": 400,
+    "body": "invalid image: use repo[:tag] or repo@sha256:…"
+  }
+}

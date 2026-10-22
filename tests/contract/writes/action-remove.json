@@ -1,0 +1,28 @@
+{
+  "desc": "remove: docker rm -f <id>",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "0123456789ab\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "rm",
+        "-f",
+        "0123456789ab"
+      ]
+    }
+  ],
+  "request": {
+    "method": "POST",
+    "path": "/api/remove/0123456789ab",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": ""
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "desc": "container removido entre o ps e o inspect: 500 com o stderr",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [
+    {
+      "stdout": "{\"ID\": \"sha256:f00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafebeef\", \"Repository\": \"nginx\", \"Tag\": \"1.27\", \"Size\": \"187MB\", \"CreatedAt\": \"2026-09-18 00:00:00 +0000 UTC\"}\n{\"ID\": \"sha256:f00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafef00dfeedcafebeef\", \"Repository\": \"nginx\", \"Tag\": \"latest\", \"Size\": \"187MB\", \"CreatedAt\": \"2026-09-18 00:00:00 +0000 UTC\"}\n{\"ID\": \"sha256:1111111111111111111111111111111111111111111111111111111111111111\", \"Repository\": \"<none>\", \"Tag\": \"<none>\", \"Size\": \"5MB\", \"CreatedAt\": \"data estranha\"}\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "image",
+        "ls",
+        "--no-trunc",
+        "--format",
+        "{{json .}}"
+      ]
+    },
+    {
+      "stdout": "0123456789abfull\n",
+      "stderr": "",
+      "code": 0,
+      "args": [
+        "ps",
+        "-a",
+        "-q",
+        "--no-trunc"
+      ]
+    },
+    {
+      "stdout": "",
+      "stderr": "Error: No such container: xyz\n",
+      "code": 1,
+      "args": [
+        "container",
+        "inspect",
+        "0123456789abfull"
+      ]
+    }
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/api/images",
+    "body": null
+  },
+  "response": {
+    "status": 500,
+    "body": "Error: No such container: xyz"
+  }
+}

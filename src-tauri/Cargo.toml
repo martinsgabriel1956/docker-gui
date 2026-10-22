@@ -1,0 +1,53 @@
+[package]
+name = "stivo"
+version = "0.1.0"
+description = "Stivo: containers Docker e Podman, com a lista ao vivo, logs, compose e terminal"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[lib]
+name = "stivo_lib"
+
+[build-dependencies]
+tauri-build = { version = "=2.7.3", features = [] }
+
+[dependencies]
+# fixo no minor, como no Paddock: a 2.13 pode mudar o que o protocolo próprio e a bandeja expõem
+# tray-icon e image-png: a bandeja, com o ícone desenhado pela página (PNG)
+tauri = { version = "=2.12.4", features = ["tray-icon", "image-png"] }
+tauri-plugin-single-instance = "=2.5.4"
+tauri-plugin-window-state = "=2.5.0"
+tauri-plugin-log = "=2.10.1"
+# o "Abrir pasta" do projeto compose: chamado só pelo Rust (ipc::open_dir); nenhuma permissão dele vai para a página
+tauri-plugin-opener = "=2.7.2"
+# o "Salvar como" do baixar arquivo: chamado só pelo Rust (ipc::cp_save); nenhuma permissão dele vai para a página
+tauri-plugin-dialog = "=2.8.3"
+notify-rust = "=4.18.2"
+stivo-core = { path = "core" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+tokio = { version = "=1.54.0", features = ["sync", "rt-multi-thread", "macros"] }
+futures-util = "=0.3.34"
+log = "=0.4.34"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# a mesma versão que o tauri já usa: só para ajustar a memória do WebKitGTK (cache e aceleração)
+webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
+libc = "=0.2.191"
+
+[target.'cfg(windows)'.dependencies]
+# o "Iniciar com o sistema" no HKCU\...\Run: a mesma versão que o Tauri já traz
+winreg = "=0.56.0"
+
+[workspace]
+# core: o equivalente ao backend do docker_gui.py, sem Tauri (cargo test e o harness dos testes não precisam do WebKit)
+members = ["core"]
+resolver = "3"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

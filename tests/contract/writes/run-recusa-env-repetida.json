@@ -1,0 +1,23 @@
+{
+  "desc": "run recusado (env-repetida): 400 sem chamar o docker",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [],
+  "request": {
+    "method": "POST",
+    "path": "/api/run",
+    "body": {
+      "image": "nginx",
+      "env": [
+        "A=1",
+        "A=2"
+      ]
+    }
+  },
+  "response": {
+    "status": 400,
+    "body": "variável repetida: A"
+  }
+}

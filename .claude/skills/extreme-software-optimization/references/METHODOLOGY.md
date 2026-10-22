@@ -27,13 +27,14 @@ cat baseline.json | jq '.results[0].times | sort |
 
 ```markdown
 ## Baseline (DATE)
-| Metric | Value |
-|--------|-------|
-| p50 | X ms |
-| p95 | X ms |
-| p99 | X ms |
-| Peak memory | X MB |
-| Tests | PASS |
+
+| Metric      | Value |
+| ----------- | ----- |
+| p50         | X ms  |
+| p95         | X ms  |
+| p99         | X ms  |
+| Peak memory | X MB  |
+| Tests       | PASS  |
 ```
 
 ---
@@ -72,11 +73,11 @@ strace -T -e read,write,open,close ./binary <args> 2>&1 | head -1000
 ### B4. Hotspot Table
 
 ```markdown
-| Rank | Location | % Time | Category |
-|------|----------|--------|----------|
-| 1 | `file.rs:123` | 35% | CPU |
-| 2 | `file.rs:456` | 22% | Alloc |
-| 3 | `file.rs:789` | 15% | I/O |
+| Rank | Location      | % Time | Category |
+| ---- | ------------- | ------ | -------- |
+| 1    | `file.rs:123` | 35%    | CPU      |
+| 2    | `file.rs:456` | 22%    | Alloc    |
+| 3    | `file.rs:789` | 15%    | I/O      |
 ```
 
 ---
@@ -95,6 +96,7 @@ sha256sum golden_outputs/* > golden_checksums.txt
 ### C2. Invariants
 
 Document:
+
 1. **Ordering:** Results sorted by [field]
 2. **Tie-breaking:** Equal items ordered by [secondary]
 3. **Floating-point:** IEEE 754, no NaN
@@ -129,10 +131,12 @@ proptest! {
 ## Change: [description]
 
 ### What Changes
+
 - Before: [code/behavior]
 - After: [code/behavior]
 
 ### Proof
+
 1. **I/O Equivalence:** Same inputs → same outputs because [reason]
 2. **Ordering:** Preserved because [reason or N/A]
 3. **Tie-breaking:** Unchanged because [reason or N/A]
@@ -140,6 +144,7 @@ proptest! {
 5. **RNG:** [unchanged/N/A]
 
 ### Verification
+
 - [ ] `sha256sum -c golden_checksums.txt`
 - [ ] `cargo test`
 - [ ] `diff <(./old input) <(./new input)`
@@ -147,11 +152,11 @@ proptest! {
 
 ### Common Proofs
 
-| Pattern | Proof |
-|---------|-------|
-| Memoization | Pure function, same results cached |
-| Index lookup | Same data, different access pattern |
-| Batching | Same operations, collected in order |
+| Pattern         | Proof                                   |
+| --------------- | --------------------------------------- |
+| Memoization     | Pure function, same results cached      |
+| Index lookup    | Same data, different access pattern     |
+| Batching        | Same operations, collected in order     |
 | Parallelization | Commutative/associative OR sorted merge |
 
 ---
@@ -170,11 +175,11 @@ Effort (1-5): 5=>1 day, 3=hours, 1=minutes
 
 ### Matrix
 
-| Opportunity | Impact | Conf | Effort | Score |
-|-------------|--------|------|--------|-------|
-| HashMap lookup | 4 | 5 | 2 | 10.0 |
-| Memoize `expensive_fn` | 3 | 4 | 2 | 6.0 |
-| Batch queries | 3 | 3 | 3 | 3.0 |
+| Opportunity            | Impact | Conf | Effort | Score |
+| ---------------------- | ------ | ---- | ------ | ----- |
+| HashMap lookup         | 4      | 5    | 2      | 10.0  |
+| Memoize `expensive_fn` | 3      | 4    | 2      | 6.0   |
+| Batch queries          | 3      | 3    | 3      | 3.0   |
 
 **Rule:** Only implement Score ≥ 2.0
 
@@ -201,6 +206,7 @@ git diff --stat  # Minimal files
 
 ```markdown
 ## Rollback
+
 - Command: `git revert <sha>`
 - Risk: None / Low / Medium
 - Post-rollback tests: [list]
@@ -251,6 +257,7 @@ fn critical_function(input: &Input) -> Output {
 ## Iteration Protocol
 
 After each cycle:
+
 1. **Re-baseline** → new metrics
 2. **Re-profile** → new hotspots (bottlenecks shift)
 3. **Update matrix** → recalculate scores
@@ -258,10 +265,11 @@ After each cycle:
 
 ```markdown
 ## History
-| Round | Change | p95 Before | p95 After | Δ |
-|-------|--------|------------|-----------|---|
-| 1 | HashMap | 50ms | 35ms | -30% |
-| 2 | Memoize | 35ms | 28ms | -20% |
+
+| Round | Change  | p95 Before | p95 After | Δ    |
+| ----- | ------- | ---------- | --------- | ---- |
+| 1     | HashMap | 50ms       | 35ms      | -30% |
+| 2     | Memoize | 35ms       | 28ms      | -20% |
 ```
 
 ---

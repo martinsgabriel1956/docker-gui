@@ -1,0 +1,22 @@
+{
+  "desc": "run recusado (env-nul): 400 sem chamar o docker",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [],
+  "request": {
+    "method": "POST",
+    "path": "/api/run",
+    "body": {
+      "image": "nginx",
+      "env": [
+        "A=x\u0000y"
+      ]
+    }
+  },
+  "response": {
+    "status": 400,
+    "body": "A: valor com NUL ou maior que 4096 caracteres"
+  }
+}

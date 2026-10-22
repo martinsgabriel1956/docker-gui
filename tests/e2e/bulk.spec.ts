@@ -93,7 +93,7 @@ test('seleção sobrevive ao redesenho e sai junto com o container que sumiu', a
 test('falha parcial: aviso agregado, erro na linha e "Iniciar de novo" com Z', async ({ page, gui }) => {
   const err = 'Error response from daemon: cannot stop container: permission denied';
   await gui.open({ containers: [ctr('api'), ctr('web'), ctr('worker', { fail: { stop: err } }), stopped('cron')] });
-  await page.locator('body').click({ position: { x: 5, y: 5 } });
+  await page.locator('#all').focus();  // o a vale com o foco na lista
   await page.keyboard.press('a');
   await bar(page).getByRole('button', { name: 'Parar 3 selecionados' }).click();  // cron já está parado: fica de fora
   await expect(toast(page)).toContainText(`2 parados, 1 falhou: worker: ${err}.`);
@@ -119,7 +119,7 @@ test('marcar a primeira caixa não mexe na tabela: a barra flutua embaixo', asyn
 
 test('Remover em lote em 2 passos, com quantos vão ser apagados', async ({ page, gui }) => {
   await gui.open({ containers: [stopped('cron'), stopped('velho'), ctr('web')] });
-  await page.locator('body').click({ position: { x: 5, y: 5 } });
+  await page.locator('#all').focus();  // o a vale com o foco na lista
   await page.keyboard.press('a');
   const remove = bar(page).getByRole('button', { name: 'Remover 2 selecionados' });
   const confirm = bar(page).getByRole('button', { name: 'Confirmar remoção de 2 containers' });

@@ -1,0 +1,17 @@
+{
+  "desc": "query que não é tail nem since: 404",
+  "lang": "pt",
+  "cli": [
+    "docker"
+  ],
+  "calls": [],
+  "request": {
+    "method": "GET",
+    "path": "/api/logs/0123456789ab?foo=1",
+    "body": null
+  },
+  "response": {
+    "status": 404,
+    "body": "not found"
+  }
+}
