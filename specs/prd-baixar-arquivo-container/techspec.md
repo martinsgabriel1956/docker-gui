@@ -153,3 +153,11 @@ Nada de caminho nem de nome de container no log. `log::warn!` só para prazo est
 ## Histórico
 
 **2026-10-21**. Documento criado. O limite de 100 MB foi decidido aqui, e o PRD foi atualizado junto (RF3.1).
+
+**2026-10-22**. Durante o sdd-tasks:
+- O caminho é conferido por código nas duas versões (começa com `/`, sem NUL, até 4096 caracteres), não pela regex `CP_PATH_RE`: no Rust, a classe Unicode repetida 4095 vezes passa do limite de tamanho do `regex`.
+- O `docker cp` pronto do 413 é montado pela página (ela tem o nome do container e o CLI); o corpo do 413 é só a mensagem.
+- O `saveBlob` fica no `transport-web.ts`; o `downloadLogs` continua como está.
+- Cancelar na web não mata o `docker cp` na hora: o servidor lê tudo antes de responder. Os 100 MB e os 120 s limitam o processo, como no desktop.
+- O smoke do desktop não ganha o `cp_save`: ele dirige o app só pelo X, e trocar o diálogo por uma variável de ambiente deixaria no binário de release um jeito de gravar sem a escolha da pessoa (RF2.3). O `cp_save` entra no checklist manual da release.
+- O container que sumiu ganha um 404 próprio ("o container não existe mais"), conferido antes do caminho que não existe.
