@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-cp-save"
+description = "Enables the cp_save command without any pre-configured scope."
+commands.allow = ["cp_save"]
+
+[[permission]]
+identifier = "deny-cp-save"
+description = "Denies the cp_save command without any pre-configured scope."
+commands.deny = ["cp_save"]

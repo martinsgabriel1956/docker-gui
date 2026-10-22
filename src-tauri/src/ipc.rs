@@ -250,3 +250,44 @@ pub async fn open_dir(
         format!("{} {dir}", say("Não consegui abrir a pasta:", "Could not open the folder:"))
     })
 }
+
+#[derive(Serialize)]
+pub struct CpSaved {
+    saved: bool,
+    name: String,
+}
+
+/// "Baixar arquivo…": o mesmo cp_out da versão web, e o arquivo vai para onde a pessoa escolher na janela "Salvar
+/// como" do sistema (nada é gravado sem essa escolha). saved: false se ela cancelou. Err: {status, body}, como o api
+#[tauri::command]
+pub async fn cp_save(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    path: String,
+) -> Result<CpSaved, ApiReply> {
+    use tauri_plugin_dialog::DialogExt;
+    if !validate::ID_RE.is_match(&id) {
+        return Err(ApiReply { status: 404, body: "not found".into() });
+    }
+    let ctx = state.ctx();
+    let f = stivo_core::cp::cp_out(&ctx, &id, &path).await.map_err(|r| ApiReply { status: r.status, body: r.body })?;
+    let name = f.name.clone();
+    let mut dialog = app.dialog().file().set_file_name(&f.name);
+    if let Some(w) = app.get_webview_window("main") {
+        dialog = dialog.set_parent(&w);
+    }
+    let en = ctx.lang == stivo_core::Lang::En;
+    // o diálogo bloqueia: fora da thread da janela
+    let saved = tauri::async_runtime::spawn_blocking(move || {
+        let Some(dest) = dialog.blocking_save_file().and_then(|p| p.into_path().ok()) else { return Ok(false) };
+        std::fs::write(dest, f.data).map(|_| true).map_err(|e| {
+            log::warn!("baixar arquivo: não gravou ({})", e.kind()); // sem o caminho (a regra de log do projeto)
+            format!("{} {}", if en { "Could not save the file:" } else { "Não consegui gravar o arquivo:" }, e.kind())
+        })
+    })
+    .await
+    .map_err(|e| ApiReply { status: 500, body: e.to_string().into() })?
+    .map_err(|e| ApiReply { status: 500, body: e.into() })?;
+    Ok(CpSaved { saved, name })
+}

@@ -102,6 +102,8 @@ export const T: Transport = {
     onOpen: open => void listen('open-prefs', open),
   },
   openDir: (project, dir) => invoke('open_dir', {project, dir}).then(() => null, e => String(e)),
-  // provisório até o cp_save
-  cpOut: async () => ({ok: false, status: 501, error: 'not implemented'}),
+  // o diálogo "Salvar como" é do Rust; o signal só faz a página parar de esperar (o docker cp vai até o fim)
+  cpOut: (id, path) => invoke<{saved: boolean; name: string}>('cp_save', {id, path}).then(
+    r => ({ok: true as const, ...r}),
+    e => { const r = refusal(e); return {ok: false as const, status: r.status, error: String(r.body)}; }),
 };

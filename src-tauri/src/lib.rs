@@ -81,6 +81,7 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Warn)
@@ -102,6 +103,7 @@ pub fn run() {
             ipc::prefs_get,
             ipc::prefs_set,
             ipc::open_dir,
+            ipc::cp_save,
         ])
         .setup(move |app| {
             let prefs = app.path().app_config_dir().map(|d| Prefs::load(&d)).unwrap_or_default();

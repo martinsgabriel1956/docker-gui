@@ -16,6 +16,7 @@
     "allow-notify",
     "allow-prefs-get",
     "allow-prefs-set",
-    "allow-open-dir"
+    "allow-open-dir",
+    "allow-cp-save"
   ]
 }
