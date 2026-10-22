@@ -102,4 +102,6 @@ export const T: Transport = {
     onOpen: open => void listen('open-prefs', open),
   },
   openDir: (project, dir) => invoke('open_dir', {project, dir}).then(() => null, e => String(e)),
+  // provisório até o cp_save
+  cpOut: async () => ({ok: false, status: 501, error: 'not implemented'}),
 };

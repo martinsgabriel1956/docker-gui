@@ -1,5 +1,5 @@
 // Transporte da versão web: o servidor do docker_gui.py em localhost, com o token da execução
-import type {Closer, NdjsonResult, StreamHandlers, Term, TermHandlers, Transport} from './transport';
+import type {Closer, CpResult, NdjsonResult, StreamHandlers, Term, TermHandlers, Transport} from './transport';
 
 // token da execução: chega no #t=... do link que o servidor abre/imprime. Fica no localStorage desta origem
 // (que inclui a porta, ao contrário de cookie) para novas abas funcionarem, e sai da URL no primeiro render.
@@ -60,12 +60,28 @@ function terminal(id: string, on: TermHandlers): Term {
   };
 }
 
+// o download do navegador a partir de bytes que já estão na aba
+function saveBlob(name: string, blob: Blob) {
+  const a = Object.assign(document.createElement('a'), {href: URL.createObjectURL(blob), download: name});
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href));
+}
+
+// baixar arquivo: fetch com o token no header (um link direto poria o token no histórico de downloads); até 100 MB
+// na memória da aba
+async function cpOut(id: string, path: string, signal: AbortSignal): Promise<CpResult> {
+  const r = await fetch(`/api/cp/${id}?${new URLSearchParams({path})}`, {headers: {'X-Docker-GUI-Token': TOKEN}, signal});
+  if (!r.ok) return {ok: false, status: r.status, error: String(await r.json())};
+  const name = decodeURIComponent(/filename\*=UTF-8''([^;]+)/.exec(r.headers.get('Content-Disposition') ?? '')?.[1] ?? 'arquivo');
+  saveBlob(name, await r.blob());
+  return {ok: true, saved: true, name};
+}
+
 // favicon com a contagem da faixa de atenção
 const icon = document.head.appendChild(Object.assign(document.createElement('link'), {rel: 'icon'}));
 
 export const T: Transport = {
   desktop: false,
-  request, stream, ndjson, terminal,
+  request, stream, ndjson, terminal, cpOut,
   attention(_badge, svg) {
     const href = 'data:image/svg+xml,' + encodeURIComponent(svg);
     if (icon.getAttribute('href') !== href) icon.href = href;  // trocar o href a cada poll faz a aba piscar

@@ -277,3 +277,51 @@ test('s faz a ação principal da linha em foco', async ({ page, gui }) => {
   await expect(toast(page)).toContainText('web parado.');
   await expect(page.getByRole('button', { name: 'Iniciar web' })).toBeVisible();
 });
+
+const downloaded = async (d: import('@playwright/test').Download) => {
+  const chunks: Buffer[] = [];
+  for await (const chunk of await d.createReadStream()) chunks.push(chunk as Buffer);
+  return Buffer.concat(chunks);
+};
+const openCp = async (page: import('@playwright/test').Page, name: string) => {
+  await menu(page, name).click();
+  await page.getByRole('button', { name: 'Baixar arquivo…' }).click();
+  return page.getByLabel('Caminho no container');
+};
+
+test('Baixar arquivo: um arquivo de container parado, com o nome dele, e o caminho fica para a próxima', async ({ page, gui }) => {
+  await gui.open({ containers: [stopped('web', { files: { '/var/log/nginx/error.log': 'upstream timed out\n' } })] });
+  const field = await openCp(page, 'web');
+  await field.fill('/var/log/nginx/error.log');
+  const [d] = await Promise.all([page.waitForEvent('download'), field.press('Enter')]);
+  expect(d.suggestedFilename()).toBe('error.log');
+  expect((await downloaded(d)).toString()).toBe('upstream timed out\n');
+  await expect(toast(page)).toHaveText('Baixado: error.log');
+  await expect(page.locator('#cp')).toBeHidden();
+  await expect(await openCp(page, 'web')).toHaveValue('/var/log/nginx/error.log');
+  await expect(page.locator('#cp-recent option')).toHaveCount(1);
+});
+
+test('Baixar arquivo: uma pasta chega como .tar', async ({ page, gui }) => {
+  await gui.open({ containers: [ctr('api', { files: { '/app/reports/a.txt': 'a', '/app/reports/b.txt': 'b' } })] });
+  const field = await openCp(page, 'api');
+  await field.fill('/app/reports/');
+  const [d] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: 'Baixar arquivo', exact: true }).click()]);
+  expect(d.suggestedFilename()).toBe('reports.tar');
+  expect((await downloaded(d)).includes('reports/a.txt')).toBe(true);
+});
+
+test('Baixar arquivo: caminho relativo é recusado no campo, e o que não existe diz que não existe', async ({ page, gui }) => {
+  await gui.open({ containers: [ctr('api', { files: { '/app/x': 'x' } })] });
+  const field = await openCp(page, 'api');
+  await field.fill('app/x');
+  await field.press('Enter');
+  await expect(field).toHaveAttribute('aria-invalid', 'true');
+  await expect(page.locator('#cp-err')).toHaveText('Use o caminho absoluto, começando com /.');
+  await field.fill('/nao/existe');
+  await field.press('Enter');
+  await expect(page.locator('#cp-msg')).toHaveText('/nao/existe não existe no container');
+  await expect(field).not.toHaveAttribute('aria-invalid', 'true');
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#cp')).toBeHidden();
+});

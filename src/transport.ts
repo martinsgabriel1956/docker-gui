@@ -12,6 +12,9 @@ export interface StreamHandlers { open?(): void; data(line: string): void; end()
 export interface TermHandlers { open(): void; data(b: Uint8Array): void; notice(text: string): void; close(): void }
 export interface Term { send(data: string): void; resize(cols: number, rows: number): void; close(): void }
 export interface NdjsonResult { status: number; code: number; error?: unknown }
+// baixar arquivo do container: na web o arquivo vem pela memória da aba e sai como download; no desktop, a janela
+// "Salvar como" do sistema (saved: false se a pessoa cancelou). O signal cancela a espera
+export type CpResult = {ok: true; saved: boolean; name: string} | {ok: false; status: number; error: string};
 // preferências do app desktop (a versão web usa as flags e as variáveis de ambiente). null = o padrão de hoje
 export interface Prefs { cli: string | null; context: string | null; lang: string | null; notifications: boolean; autostart: boolean }
 export interface DesktopPrefs {
@@ -35,4 +38,5 @@ export interface Transport {
   prefs?: DesktopPrefs;
   // "Abrir pasta" do projeto compose: só no desktop (a web copia o caminho). A mensagem de erro, ou null
   openDir?(project: string, dir: string): Promise<string | null>;
+  cpOut(id: string, path: string, signal: AbortSignal): Promise<CpResult>;
 }

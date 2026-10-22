@@ -95,7 +95,7 @@ test('dá para agir no container sem sair dos logs', async ({ page, gui }) => {
   // Reiniciar à vista e primeiro (o ciclo), depois a principal; o resto no "⋯"
   await expect(acts.getByRole('button').filter({ visible: true })).toHaveText(['Reiniciar', 'Parar']);
   await acts.locator('summary').click();
-  await expect(acts.getByRole('button').filter({ visible: true })).toHaveText(['Reiniciar', 'Parar', 'Copiar docker exec']);
+  await expect(acts.getByRole('button').filter({ visible: true })).toHaveText(['Reiniciar', 'Parar', 'Copiar docker exec', 'Baixar arquivo…']);
   await page.keyboard.press('Escape');  // fecha só o menu, não o modal
   await expect(acts.locator('summary')).toBeFocused();
   await expect(page.locator('#dlg')).toBeVisible();

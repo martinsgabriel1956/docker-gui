@@ -31,6 +31,7 @@ export type Container = {
   events?: Record<string, unknown>[];  // linhas do `docker events` que o histórico devolve
   top?: string;  // saída do `docker top`
   diff?: string;  // saída do `docker diff`
+  files?: Record<string, string>;  // o que o `docker cp` acha: {caminho: texto}; uma pasta é um prefixo com /
 };
 export type DiskUsage = { Type: string; TotalCount: string; Active: string; Size: string; Reclaimable: string };
 // linhas reais do `docker image ls --no-trunc` (uma por tag), `volume ls` e `network ls --no-trunc`, em '{{json .}}'

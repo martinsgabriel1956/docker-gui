@@ -352,6 +352,32 @@
   </form>
 </dialog>
 
+<dialog id="cp" aria-labelledby="cp-title" class="m-auto w-[min(520px,95vw)] rounded-lg bg-raised text-fg-soft ring-1 ring-line-strong backdrop:bg-black/70 p-0">
+  <form id="cp-form" novalidate>
+    <div class="px-4 py-3 border-b border-line flex items-start gap-3">
+      <div class="mr-auto min-w-0">
+        <h2 id="cp-title" class="text-lg font-semibold text-fg-strong">Baixar arquivo</h2>
+        <p id="cp-name" class="text-sm mt-0.5 font-mono text-muted truncate"></p>
+      </div>
+      <button type="button" onclick="cp.close()" aria-label="Fechar" class="shrink-0 grid place-items-center size-8 coarse:size-11 rounded text-muted hover:text-fg-strong hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent">
+        <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="size-4"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
+    </div>
+    <div class="px-4 py-4 text-sm">
+      <label for="cp-path" class="block font-medium text-fg-strong">Caminho no container</label>
+      <input id="cp-path" list="cp-recent" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="/var/log/nginx/error.log" aria-describedby="cp-hint cp-err"
+        class="mt-1 w-full rounded bg-canvas ring-1 ring-line px-3 py-2 coarse:py-3 font-mono text-fg-strong placeholder:font-sans placeholder:text-muted focus:ring-accent aria-invalid:ring-bad aria-invalid:focus:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+      <datalist id="cp-recent"></datalist>
+      <p id="cp-hint" class="mt-1 max-w-[70ch] text-xs text-muted">Caminho absoluto, começando com /. Uma pasta chega como .tar. Até 100 MB.</p>
+      <p id="cp-err" class="empty:hidden mt-1 text-xs text-bad-fg"></p>
+    </div>
+    <div id="cp-msg" role="alert" class="empty:hidden mx-4 mb-3 max-h-40 overflow-auto rounded-lg ring-1 ring-bad/40 bg-bad/10 px-3 py-2 text-sm text-bad-soft [overflow-wrap:anywhere]"></div>
+    <div class="px-4 py-3 border-t border-line flex justify-end gap-2">
+      <button type="button" onclick="cp.close()" class="px-3 py-1.5 coarse:min-h-11 coarse:px-4 rounded text-sm font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Cancelar</button>
+      <button id="cp-go" type="submit" class="px-3 py-1.5 coarse:min-h-11 coarse:px-4 rounded text-sm font-medium ring-1 ring-accent/40 bg-accent/15 text-accent-fg hover:bg-accent/25 aria-disabled:opacity-60 aria-disabled:cursor-wait focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Baixar arquivo</button>
+    </div>
+  </form>
+</dialog>
+
 <div id="toast" role="status" aria-live="polite" class="fixed bottom-[calc(1rem+var(--dock,0px))] left-1/2 -translate-x-1/2 w-max max-w-[min(28rem,calc(100vw-2rem))] z-40"></div>
 
 <script>
@@ -458,6 +484,17 @@
     "Copiar a saída do probe das {0}": "Copy the output of the {0} probe",
     "Copiar caminho da pasta": "Copy folder path",
     "Copiar docker exec": "Copy docker exec",
+    "Baixar arquivo…": "Download file…",
+    "Baixar arquivo": "Download file",
+    "Caminho no container": "Path in the container",
+    "/var/log/nginx/error.log": "/var/log/nginx/error.log",
+    "Caminho absoluto, começando com /. Uma pasta chega como .tar. Até 100 MB.": "Absolute path, starting with /. A folder arrives as a .tar. Up to 100 MB.",
+    "Use o caminho absoluto, começando com /.": "Use the absolute path, starting with /.",
+    "Sem resposta do servidor.": "No response from the server.",
+    "Pelo terminal:": "From the terminal:",
+    "Baixado: {0}": "Downloaded: {0}",
+    "Baixando arquivo…": "Downloading file…",
+    "<caminho>": "<path>",
     "Copiar {0}:{1}": "Copy {0}:{1}",
     "Copiar {0}:{1} (porta {2}/{3} do container)": "Copy {0}:{1} (container port {2}/{3})",
     "Cria e inicia com": "Creates and starts with",
@@ -1560,7 +1597,9 @@
       set: (prefs) => invoke("prefs_set", { prefs }).then(() => null, (e) => String(e)),
       onOpen: (open) => void listen("open-prefs", open)
     },
-    openDir: (project2, dir) => invoke("open_dir", { project: project2, dir }).then(() => null, (e) => String(e))
+    openDir: (project2, dir) => invoke("open_dir", { project: project2, dir }).then(() => null, (e) => String(e)),
+    // provisório até o cp_save
+    cpOut: async () => ({ ok: false, status: 501, error: "not implemented" })
   };
 
   // node_modules/@xterm/xterm/lib/xterm.mjs
@@ -11574,6 +11613,7 @@ ${h2.join(`
       c.State === "running" && ["pause", t`Pausar`],
       c.State === "running" && ["shell", t`Abrir terminal`],
       c.State === "running" && ["exec", t`Copiar docker exec`],
+      ["cp", t`Baixar arquivo…`],
       removable(c) ? ["remove", t`Remover…`] : ["noremove", t`Pare antes de remover`]
     ].filter((x) => !!x);
     const menu = !more.length ? slot("w-9") : menuBox(
@@ -11581,8 +11621,8 @@ ${h2.join(`
       t`Mais ações para ${esc(c.Names)}`,
       !!b2 || armed,
       more.map(([a, text]) => a === "noremove" ? `<button data-id="${c.ID}" data-a="m-noremove" aria-disabled="true" aria-label="${t`Remover (indisponível: pare o container antes)`}" title="${t`O docker só remove container parado (sem -f)`}"
-      class="${MENU_ITEM} text-muted cursor-not-allowed hover:bg-transparent">${text}</button>` : `<button data-id="${c.ID}" data-a="m-${a}" ${b2 || (a === "srestart" || a === "sbuild") && composing.has(p) ? 'aria-disabled="true"' : ""} onclick="menuPick(this); ${a === "exec" ? `copyExec('${c.ID}')` : a === "shell" ? `openShell('${c.ID}')` : a === "srestart" || a === "sbuild" ? `serviceAct('${a.slice(1)}','${c.ID}')` : `act('${a}','${c.ID}')`}"
-      ${a === "srestart" ? `title="${t`Reinicia todas as réplicas do serviço ${esc(svc)}`}"` : a === "sbuild" ? `title="${t`Reconstrói a imagem e recria o serviço ${esc(svc)} (b)`}"` : ""}
+      class="${MENU_ITEM} text-muted cursor-not-allowed hover:bg-transparent">${text}</button>` : `<button data-id="${c.ID}" data-a="m-${a}" ${b2 || (a === "srestart" || a === "sbuild") && composing.has(p) ? 'aria-disabled="true"' : ""} onclick="menuPick(this); ${a === "exec" ? `copyExec('${c.ID}')` : a === "shell" ? `openShell('${c.ID}')` : a === "cp" ? `openCp('${c.ID}')` : a === "srestart" || a === "sbuild" ? `serviceAct('${a.slice(1)}','${c.ID}')` : `act('${a}','${c.ID}')`}"
+      ${a === "srestart" ? `title="${t`Reinicia todas as réplicas do serviço ${esc(svc)}`}"` : a === "cp" ? `title="${esc(cpCmd(c.Names))}"` : a === "sbuild" ? `title="${t`Reconstrói a imagem e recria o serviço ${esc(svc)} (b)`}"` : ""}
       class="${MENU_ITEM} ${a === "remove" ? "text-bad-fg" : a === "srestart" || a === "sbuild" ? "font-mono text-xs text-fg" : "text-fg"}">${text}</button>`).join("")
     );
     const healthBox = hasHealth(c) && !b2 ? `<details data-keep="health" class="mt-1 text-xs [contain:inline-size]" ontoggle="this.open && loadHealth('${c.ID}')">
@@ -12162,11 +12202,15 @@ ${WIDE.matches ? "" : `
     const again2 = mark && c.State === "running" && !b2 ? `<span class="text-muted"> · ${esc(mark.label)}</span>` : "";
     $2("#dlg-status").innerHTML = `<span class="${tn2[1]}">${b2 ? busyText(c, b2) : esc(st2[0])}</span>${st2[1] && !b2 ? `<span class="text-muted"> · ${st2[1]}</span>` : ""}${again2}${b2 ? "" : errHtml(c) + depHtml(blockers(c, data), holds(c, data), false) + memHtml(c, false)}${h2 ? `<div id="dlg-health" class="mt-2 text-xs">${healthHtml(c.ID, h2)}</div>` : ""}${s15 && u ? `<div id="dlg-usage" class="mt-1 text-xs text-muted">${usageLine(s15, u, hs2)}</div>` : ""}`;
     const prim = PRIMARY[c.State], sec = SECONDARY[c.State];
-    const more = [sec && sec !== "restart" && [sec, LABEL[sec]], c.State === "running" && ["exec", t`Copiar docker exec`]].filter((x) => !!x);
+    const more = [
+      sec && sec !== "restart" && [sec, LABEL[sec]],
+      c.State === "running" && ["exec", t`Copiar docker exec`],
+      ["cp", t`Baixar arquivo…`]
+    ].filter((x) => !!x);
     $2("#dlg-acts").innerHTML = (sec === "restart" ? `<button data-id="dlg" data-a="restart" ${b2 ? 'aria-disabled="true"' : ""} aria-label="${t`Reiniciar ${esc(c.Names)}`}" title="${t`Reiniciar (r)`}"
       onclick="act('restart', '${c.ID}')" class="inline-flex items-center gap-1.5 ${BTN} text-fg hover:bg-hover">${RESTART_ICON}${t`Reiniciar`}</button>` : "") + (prim ? `<button data-id="dlg" data-a="${prim}" ${b2 ? 'aria-disabled="true"' : ""} aria-label="${LABEL[prim]} ${esc(c.Names)}" onclick="act('${prim}', '${c.ID}')"
-      class="${BTN} ${prim === "start" ? "text-ok-fg hover:bg-ok/10" : "text-fg hover:bg-hover"}">${LABEL[prim]}</button>` : "") + (more.length ? menuBox("dlg", t`Mais ações para ${esc(c.Names)} nos logs`, !!b2, more.map(([a, text]) => `<button data-id="dlg" data-a="m-${a}" ${b2 ? 'aria-disabled="true"' : ""} onclick="menuPick(this); ${a === "exec" ? `copyExec('${c.ID}')` : `act('${a}', '${c.ID}')`}"
-        class="${MENU_ITEM} text-fg">${text}</button>`).join("")) : "");
+      class="${BTN} ${prim === "start" ? "text-ok-fg hover:bg-ok/10" : "text-fg hover:bg-hover"}">${LABEL[prim]}</button>` : "") + (more.length ? menuBox("dlg", t`Mais ações para ${esc(c.Names)} nos logs`, !!b2, more.map(([a, text]) => `<button data-id="dlg" data-a="m-${a}" ${b2 ? 'aria-disabled="true"' : ""} onclick="menuPick(this); ${a === "exec" ? `copyExec('${c.ID}')` : a === "cp" ? `openCp('${c.ID}')` : `act('${a}', '${c.ID}')`}"
+        ${a === "cp" ? `title="${esc(cpCmd(c.Names))}"` : ""} class="${MENU_ITEM} text-fg">${text}</button>`).join("")) : "");
   }
   var TAILS = ["500", "2000", "10000", "all"];
   var LIVE_TAILS = 3;
@@ -12634,6 +12678,74 @@ ${WIDE.matches ? "" : `
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href));
   }
+  var CP_KEY = "docker-gui-cp";
+  var cpAll = () => {
+    try {
+      return JSON.parse(localStorage.getItem(CP_KEY) || "{}");
+    } catch {
+      return {};
+    }
+  };
+  var cpFor = null;
+  var cpAbort = null;
+  function cpCmd(name, path) {
+    const p = path === void 0 ? t`<caminho>` : /^[\w./@%+=:,-]+$/.test(path) ? path : `'${path.replace(/'/g, `'\\''`)}'`;
+    return `${document.documentElement.dataset.cli} cp ${name}:${p} .`;
+  }
+  function openCp(id) {
+    cpFor = data.find((c) => c.ID === id) ?? null;
+    if (!cpFor) return;
+    const recent = cpAll()[cpFor.Names] ?? [], input = $2("#cp-path");
+    $2("#cp-name").textContent = cpFor.Names;
+    $2("#cp-recent").replaceChildren(...recent.map((p) => Object.assign(document.createElement("option"), { value: p })));
+    input.value = recent[0] ?? "";
+    input.removeAttribute("aria-invalid");
+    $2("#cp-err").textContent = $2("#cp-msg").textContent = "";
+    $2("#cp").showModal();
+    input.select();
+  }
+  async function cpGo(e) {
+    e.preventDefault();
+    const input = $2("#cp-path"), path = input.value.trim(), c = cpFor, go2 = $2("#cp-go");
+    if (!c || cpAbort) return;
+    if (!path.startsWith("/")) {
+      input.setAttribute("aria-invalid", "true");
+      $2("#cp-err").textContent = t`Use o caminho absoluto, começando com /.`;
+      return input.focus();
+    }
+    input.removeAttribute("aria-invalid");
+    $2("#cp-err").textContent = $2("#cp-msg").textContent = "";
+    const abort = cpAbort = new AbortController();
+    go2.setAttribute("aria-disabled", "true");
+    go2.textContent = t`Baixando arquivo…`;
+    const r = await T.cpOut(c.ID, path, abort.signal).catch(() => ({ ok: false, status: 0, error: t`Sem resposta do servidor.` }));
+    cpAbort = null;
+    go2.removeAttribute("aria-disabled");
+    go2.textContent = t`Baixar arquivo`;
+    if (abort.signal.aborted) return;
+    if (!r.ok) {
+      $2("#cp-msg").innerHTML = esc(r.error) + (r.status === 413 ? `<span class="block mt-1">${t`Pelo terminal:`}
+      <button type="button" onclick="copyCp()" class="ml-1 font-medium underline underline-offset-4 rounded hover:text-fg-strong focus-visible:outline-2 focus-visible:outline-accent">${t`Copiar`}</button></span>
+      <code class="block mt-0.5 font-mono text-xs [overflow-wrap:anywhere]">${esc(cpCmd(c.Names, path))}</code>` : "");
+      return;
+    }
+    try {
+      const all = cpAll();
+      all[c.Names] = [path, ...(all[c.Names] ?? []).filter((p) => p !== path)].slice(0, 5);
+      localStorage.setItem(CP_KEY, JSON.stringify(all));
+    } catch {
+    }
+    $2("#cp").close();
+    if (r.saved) toast(t`Baixado: ${r.name}`, true);
+  }
+  function cpClosed() {
+    cpAbort?.abort();
+    cpAbort = null;
+  }
+  function copyCp() {
+    const cmd = cpCmd(cpFor.Names, $2("#cp-path").value.trim());
+    navigator.clipboard.writeText(cmd).then(() => toast(t`Copiado: ${cmd}`, true), () => toast(t`Não consegui copiar. O comando é: ${cmd}`));
+  }
   function afterClose() {
     toggleFollow(false);
     for (const k of ["insp", "hist", "procs", "diff"]) {
@@ -13061,6 +13173,8 @@ ${WIDE.matches ? "" : `
       auto.checked = auto.defaultChecked;
     }
   }
+  $2("#cp-form").addEventListener("submit", cpGo);
+  $2("#cp").addEventListener("close", cpClosed);
   if (T.prefs) {
     $2("#prefs-open").hidden = false;
     T.prefs.onOpen(() => void openPrefs());
@@ -13080,6 +13194,7 @@ ${WIDE.matches ? "" : `
     closePull,
     composeAct,
     copyAddr,
+    copyCp,
     copyDiff,
     copyExec,
     copyLogs,
@@ -13096,6 +13211,7 @@ ${WIDE.matches ? "" : `
     loadTop,
     logPick,
     menuPick,
+    openCp,
     openCreate,
     openPrefs,
     openProcs,

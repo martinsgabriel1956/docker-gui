@@ -351,6 +351,32 @@
   </form>
 </dialog>
 
+<dialog id="cp" aria-labelledby="cp-title" class="m-auto w-[min(520px,95vw)] rounded-lg bg-raised text-fg-soft ring-1 ring-line-strong backdrop:bg-black/70 p-0">
+  <form id="cp-form" novalidate>
+    <div class="px-4 py-3 border-b border-line flex items-start gap-3">
+      <div class="mr-auto min-w-0">
+        <h2 id="cp-title" class="text-lg font-semibold text-fg-strong">Baixar arquivo</h2>
+        <p id="cp-name" class="text-sm mt-0.5 font-mono text-muted truncate"></p>
+      </div>
+      <button type="button" onclick="cp.close()" aria-label="Fechar" class="shrink-0 grid place-items-center size-8 coarse:size-11 rounded text-muted hover:text-fg-strong hover:bg-hover focus-visible:outline-2 focus-visible:outline-accent">
+        <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="size-4"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
+    </div>
+    <div class="px-4 py-4 text-sm">
+      <label for="cp-path" class="block font-medium text-fg-strong">Caminho no container</label>
+      <input id="cp-path" list="cp-recent" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="/var/log/nginx/error.log" aria-describedby="cp-hint cp-err"
+        class="mt-1 w-full rounded bg-canvas ring-1 ring-line px-3 py-2 coarse:py-3 font-mono text-fg-strong placeholder:font-sans placeholder:text-muted focus:ring-accent aria-invalid:ring-bad aria-invalid:focus:ring-bad focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+      <datalist id="cp-recent"></datalist>
+      <p id="cp-hint" class="mt-1 max-w-[70ch] text-xs text-muted">Caminho absoluto, começando com /. Uma pasta chega como .tar. Até 100 MB.</p>
+      <p id="cp-err" class="empty:hidden mt-1 text-xs text-bad-fg"></p>
+    </div>
+    <div id="cp-msg" role="alert" class="empty:hidden mx-4 mb-3 max-h-40 overflow-auto rounded-lg ring-1 ring-bad/40 bg-bad/10 px-3 py-2 text-sm text-bad-soft [overflow-wrap:anywhere]"></div>
+    <div class="px-4 py-3 border-t border-line flex justify-end gap-2">
+      <button type="button" onclick="cp.close()" class="px-3 py-1.5 coarse:min-h-11 coarse:px-4 rounded text-sm font-medium ring-1 ring-line-strong/80 text-fg hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Cancelar</button>
+      <button id="cp-go" type="submit" class="px-3 py-1.5 coarse:min-h-11 coarse:px-4 rounded text-sm font-medium ring-1 ring-accent/40 bg-accent/15 text-accent-fg hover:bg-accent/25 aria-disabled:opacity-60 aria-disabled:cursor-wait focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">Baixar arquivo</button>
+    </div>
+  </form>
+</dialog>
+
 <div id="toast" role="status" aria-live="polite" class="fixed bottom-[calc(1rem+var(--dock,0px))] left-1/2 -translate-x-1/2 w-max max-w-[min(28rem,calc(100vw-2rem))] z-40"></div>
 
 <script>

@@ -7,7 +7,7 @@ import {
 } from './format';
 import {LOCALE, t, translatePage} from './i18n';
 import {T} from '#transport';
-import type {Closer, Term} from './transport';
+import type {Closer, CpResult, Term} from './transport';
 import {Terminal} from '@xterm/xterm';
 import {FitAddon} from '@xterm/addon-fit';
 import XTERM_CSS from '@xterm/xterm/css/xterm.css';  // string (build.py usa --loader:.css=text): nada de CDN
@@ -20,7 +20,7 @@ const api = (path: string) => T.request('GET', path);
 
 type Action = 'start' | 'stop' | 'restart' | 'pause' | 'unpause' | 'remove';
 type RowAction = Action | 'logs';
-type MenuAction = Action | 'exec' | 'shell' | 'srestart' | 'sbuild' | 'noremove';
+type MenuAction = Action | 'exec' | 'shell' | 'srestart' | 'sbuild' | 'noremove' | 'cp';
 type ProblemKind = 'docker' | 'perm' | 'server' | 'auth';
 // [título, dica (HTML confiável), detalhe técnico, tipo]
 type Problem = [title: string, hint: string, detail: unknown, kind: ProblemKind];
@@ -561,12 +561,12 @@ function rowHtml(c: Container, withProject: boolean, bl: Blocker[], hd: Containe
   const more = [sec && sec !== 'restart' && [sec, LABEL[sec]], svc && ['srestart', `compose restart ${esc(svc)}`],
                 svc && ['sbuild', `compose up --build ${esc(svc)}`], c.State === 'running' && ['pause', t`Pausar`],
                 c.State === 'running' && ['shell', t`Abrir terminal`], c.State === 'running' && ['exec', t`Copiar docker exec`],
-                removable(c) ? ['remove', t`Remover…`] : ['noremove', t`Pare antes de remover`]].filter((x): x is [MenuAction, string] => !!x);
+                ['cp', t`Baixar arquivo…`], removable(c) ? ['remove', t`Remover…`] : ['noremove', t`Pare antes de remover`]].filter((x): x is [MenuAction, string] => !!x);
   const menu = !more.length ? slot('w-9') : menuBox(c.ID, t`Mais ações para ${esc(c.Names)}`, !!b || armed,
     more.map(([a, text]) => a === 'noremove' ? `<button data-id="${c.ID}" data-a="m-noremove" aria-disabled="true" aria-label="${t`Remover (indisponível: pare o container antes)`}" title="${t`O docker só remove container parado (sem -f)`}"
-      class="${MENU_ITEM} text-muted cursor-not-allowed hover:bg-transparent">${text}</button>` : `<button data-id="${c.ID}" data-a="m-${a}" ${b || ((a === 'srestart' || a === 'sbuild') && composing.has(p)) ? 'aria-disabled="true"' : ''} onclick="menuPick(this); ${a === 'exec' ? `copyExec('${c.ID}')` : a === 'shell' ? `openShell('${c.ID}')`
+      class="${MENU_ITEM} text-muted cursor-not-allowed hover:bg-transparent">${text}</button>` : `<button data-id="${c.ID}" data-a="m-${a}" ${b || ((a === 'srestart' || a === 'sbuild') && composing.has(p)) ? 'aria-disabled="true"' : ''} onclick="menuPick(this); ${a === 'exec' ? `copyExec('${c.ID}')` : a === 'shell' ? `openShell('${c.ID}')` : a === 'cp' ? `openCp('${c.ID}')`
       : a === 'srestart' || a === 'sbuild' ? `serviceAct('${a.slice(1)}','${c.ID}')` : `act('${a}','${c.ID}')`}"
-      ${a === 'srestart' ? `title="${t`Reinicia todas as réplicas do serviço ${esc(svc)}`}"` : a === 'sbuild' ? `title="${t`Reconstrói a imagem e recria o serviço ${esc(svc)} (b)`}"` : ''}
+      ${a === 'srestart' ? `title="${t`Reinicia todas as réplicas do serviço ${esc(svc)}`}"` : a === 'cp' ? `title="${esc(cpCmd(c.Names))}"` : a === 'sbuild' ? `title="${t`Reconstrói a imagem e recria o serviço ${esc(svc)} (b)`}"` : ''}
       class="${MENU_ITEM} ${a === 'remove' ? 'text-bad-fg' : a === 'srestart' || a === 'sbuild' ? 'font-mono text-xs text-fg' : 'text-fg'}">${text}</button>`).join(''));
   // [contain:inline-size]: o healthcheck aberto quebra dentro da coluna, sem alargá-la (a tabela inteira se mexia)
   const healthBox = hasHealth(c) && !b ? `<details data-keep="health" class="mt-1 text-xs [contain:inline-size]" ontoggle="this.open && loadHealth('${c.ID}')">
@@ -1232,13 +1232,14 @@ function renderDlg() {
   // Reiniciar à vista e primeiro (é o ciclo: reiniciar e ver o log novo), depois a ação principal; o resto no "⋯"
   // (remover fica na lista, onde a confirmação aparece)
   const prim = PRIMARY[c.State], sec = SECONDARY[c.State];
-  const more = [sec && sec !== 'restart' && [sec, LABEL[sec]], c.State === 'running' && ['exec', t`Copiar docker exec`]].filter((x): x is [string, string] => !!x);
+  const more = [sec && sec !== 'restart' && [sec, LABEL[sec]], c.State === 'running' && ['exec', t`Copiar docker exec`],
+                ['cp', t`Baixar arquivo…`]].filter((x): x is [string, string] => !!x);
   $('#dlg-acts').innerHTML = (sec === 'restart' ? `<button data-id="dlg" data-a="restart" ${b ? 'aria-disabled="true"' : ''} aria-label="${t`Reiniciar ${esc(c.Names)}`}" title="${t`Reiniciar (r)`}"
       onclick="act('restart', '${c.ID}')" class="inline-flex items-center gap-1.5 ${BTN} text-fg hover:bg-hover">${RESTART_ICON}${t`Reiniciar`}</button>` : '') + (prim ? `<button data-id="dlg" data-a="${prim}" ${b ? 'aria-disabled="true"' : ''} aria-label="${LABEL[prim]} ${esc(c.Names)}" onclick="act('${prim}', '${c.ID}')"
       class="${BTN} ${prim === 'start' ? 'text-ok-fg hover:bg-ok/10' : 'text-fg hover:bg-hover'}">${LABEL[prim]}</button>` : '')
     + (more.length ? menuBox('dlg', t`Mais ações para ${esc(c.Names)} nos logs`, !!b, more.map(([a, text]) =>
-      `<button data-id="dlg" data-a="m-${a}" ${b ? 'aria-disabled="true"' : ''} onclick="menuPick(this); ${a === 'exec' ? `copyExec('${c.ID}')` : `act('${a}', '${c.ID}')`}"
-        class="${MENU_ITEM} text-fg">${text}</button>`).join('')) : '');
+      `<button data-id="dlg" data-a="m-${a}" ${b ? 'aria-disabled="true"' : ''} onclick="menuPick(this); ${a === 'exec' ? `copyExec('${c.ID}')` : a === 'cp' ? `openCp('${c.ID}')` : `act('${a}', '${c.ID}')`}"
+        ${a === 'cp' ? `title="${esc(cpCmd(c.Names))}"` : ''} class="${MENU_ITEM} text-fg">${text}</button>`).join('')) : '');
 }
 
 // histórico que o "Carregar mais" vai pedindo; o servidor só aceita estes (LOG_TAIL no docker_gui.py)
@@ -1719,6 +1720,70 @@ function downloadLogs() {
   a.click(); setTimeout(() => URL.revokeObjectURL(a.href));
 }
 
+// baixar arquivo do container (docker cp): os últimos caminhos por nome de container (recriado, continua o mesmo)
+const CP_KEY = 'docker-gui-cp';
+const cpAll = (): Record<string, string[]> => { try { return JSON.parse(localStorage.getItem(CP_KEY) || '{}'); } catch { return {}; } };
+let cpFor: Container | null = null, cpAbort: AbortController | null = null;
+// o comando equivalente, com o caminho entre aspas se precisar (o do 413); sem caminho, o do title do item.
+// function, não const: a lista pode ser desenhada antes desta linha rodar
+function cpCmd(name: string, path?: string) {
+  const p = path === undefined ? t`<caminho>` : /^[\w./@%+=:,-]+$/.test(path) ? path : `'${path.replace(/'/g, `'\\''`)}'`;
+  return `${document.documentElement.dataset.cli} cp ${name}:${p} .`;
+}
+
+function openCp(id: string) {
+  cpFor = data.find(c => c.ID === id) ?? null;
+  if (!cpFor) return;
+  const recent = cpAll()[cpFor.Names] ?? [], input = $<HTMLInputElement>('#cp-path');
+  $('#cp-name').textContent = cpFor.Names;
+  $('#cp-recent').replaceChildren(...recent.map(p => Object.assign(document.createElement('option'), {value: p})));
+  input.value = recent[0] ?? '';
+  input.removeAttribute('aria-invalid');
+  $('#cp-err').textContent = $('#cp-msg').textContent = '';
+  $<HTMLDialogElement>('#cp').showModal();
+  input.select();
+}
+
+async function cpGo(e: SubmitEvent) {
+  e.preventDefault();
+  const input = $<HTMLInputElement>('#cp-path'), path = input.value.trim(), c = cpFor, go = $('#cp-go');
+  if (!c || cpAbort) return;
+  if (!path.startsWith('/')) {  // o servidor confere de novo
+    input.setAttribute('aria-invalid', 'true');
+    $('#cp-err').textContent = t`Use o caminho absoluto, começando com /.`;
+    return input.focus();
+  }
+  input.removeAttribute('aria-invalid');
+  $('#cp-err').textContent = $('#cp-msg').textContent = '';
+  const abort = cpAbort = new AbortController();
+  go.setAttribute('aria-disabled', 'true'); go.textContent = t`Baixando arquivo…`;
+  const r = await T.cpOut(c.ID, path, abort.signal)
+    .catch((): CpResult => ({ok: false, status: 0, error: t`Sem resposta do servidor.`}));
+  cpAbort = null;
+  go.removeAttribute('aria-disabled'); go.textContent = t`Baixar arquivo`;
+  if (abort.signal.aborted) return;  // cancelou: nada a dizer
+  if (!r.ok) {
+    // o comando numa linha própria: quebrar no meio do nome do container confunde
+    $('#cp-msg').innerHTML = esc(r.error) + (r.status === 413 ? `<span class="block mt-1">${t`Pelo terminal:`}
+      <button type="button" onclick="copyCp()" class="ml-1 font-medium underline underline-offset-4 rounded hover:text-fg-strong focus-visible:outline-2 focus-visible:outline-accent">${t`Copiar`}</button></span>
+      <code class="block mt-0.5 font-mono text-xs [overflow-wrap:anywhere]">${esc(cpCmd(c.Names, path))}</code>` : '');
+    return;
+  }
+  try {
+    const all = cpAll();
+    all[c.Names] = [path, ...(all[c.Names] ?? []).filter(p => p !== path)].slice(0, 5);
+    localStorage.setItem(CP_KEY, JSON.stringify(all));
+  } catch { /* aba privada: vale só agora */ }
+  $<HTMLDialogElement>('#cp').close();
+  if (r.saved) toast(t`Baixado: ${r.name}`, true);
+}
+// fechar (×, Cancelar ou Esc) no meio do download cancela
+function cpClosed() { cpAbort?.abort(); cpAbort = null; }
+function copyCp() {
+  const cmd = cpCmd(cpFor!.Names, $<HTMLInputElement>('#cp-path').value.trim());
+  navigator.clipboard.writeText(cmd).then(() => toast(t`Copiado: ${cmd}`, true), () => toast(t`Não consegui copiar. O comando é: ${cmd}`));
+}
+
 // roda no × direto e também no evento close (Esc); chamar duas vezes não faz mal
 function afterClose() {
   toggleFollow(false);
@@ -2145,6 +2210,8 @@ async function savePrefs(e: SubmitEvent) {
   // com erro nada mudou (nem o início automático): a caixa volta ao que o sistema tem (RF1.4)
   if (err) { $('#prefs-msg').textContent = err; auto.checked = auto.defaultChecked; }
 }
+$('#cp-form').addEventListener('submit', cpGo);
+$('#cp').addEventListener('close', cpClosed);
 if (T.prefs) {
   $('#prefs-open').hidden = false;
   T.prefs.onOpen(() => void openPrefs());
@@ -2153,8 +2220,8 @@ if (T.prefs) {
 }
 
 Object.assign(window, {
-  ackFail, act, afterClose, askNotify, confirmArm, bulkAct, clearFilters, clearSel, closeOut, closePull, composeAct, copyAddr, copyDiff, copyExec, copyLogs, copyProbe, disarm, downloadLogs,
-  filterBy, followClick, loadDiff, loadHealth, loadHistory, loadInspect, loadMore, loadTop, logPick, menuPick, openCreate, openPrefs, openProcs, openShell, pickTab, placeMenu, projectDir, projectLogs, pullImage,
+  ackFail, act, afterClose, askNotify, confirmArm, bulkAct, clearFilters, clearSel, closeOut, closePull, composeAct, copyAddr, copyCp, copyDiff, copyExec, copyLogs, copyProbe, disarm, downloadLogs,
+  filterBy, followClick, loadDiff, loadHealth, loadHistory, loadInspect, loadMore, loadTop, logPick, menuPick, openCp, openCreate, openPrefs, openProcs, openShell, pickTab, placeMenu, projectDir, projectLogs, pullImage,
   prune, refreshLogs, reloadHealth, rmObj, serviceAct, runToastAction, selectAll, sinceChange, stackAct, toggleSel,
 });
 
