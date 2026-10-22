@@ -5,22 +5,22 @@
 Duas implementações pequenas, uma por versão, decididas no front pelo `T.desktop` e escondidas com daemon remoto (`REMOTE`):
 
 - **Web:** "Copiar caminho da pasta" é só front: copia o `workingDir(c)` que a página já tem e já mostra. Não há rota nova.
-- **Desktop:** "Abrir pasta" chama um comando Tauri novo, `open_dir(project, dir)`. O comando confere a pasta contra os labels com o `compose_base` do núcleo (a mesma conferência do `up` e do `down`), recusa daemon remoto e pasta que não existe, e abre a pasta com o `tauri-plugin-opener`, chamado só pelo Rust. A página não ganha nenhuma permissão do plugin.
+- **Desktop:** "Abrir pasta" chama um comando Tauri novo, `open_dir(project, dir)`. O comando confere a pasta contra os labels com o `compose_project` do núcleo (um embrulho público do `compose_base`) (a mesma conferência do `up` e do `down`), recusa daemon remoto e pasta que não existe, e abre a pasta com o `tauri-plugin-opener`, chamado só pelo Rust. A página não ganha nenhuma permissão do plugin.
 
 ## Arquitetura
 
 ### Visão de componentes
 
-- **`src/transport.ts`**: o `Transport` ganha `openDir?(project, dir): Promise<{ok: true} | {ok: false; error: string}>`, que só existe no desktop.
-- **`src/transport-desktop.ts`**: `openDir` = `invoke('open_dir', {project, dir})`.
-- **`src/app.ts`**, no `groupHead`, menu "⋯" do projeto (`groups`, linhas 605 a 607):
+- **`src/transport.ts`**: o `Transport` ganha `openDir?(project, dir): Promise<string | null>` (a mensagem de erro, ou `null`), que só existe no desktop, no estilo do `prefs.set`.
+- **`src/transport-desktop.ts`**: `openDir` = `invoke('open_dir', {project, dir}).then(() => null, e => String(e))`.
+- **`src/app.ts`**, no `groupHead`, menu "⋯" do projeto (`dirItem`, um grupo próprio antes do `down`), com a ação `projectDir(p)`:
   - com `REMOTE` ou sem `dir`, o item não aparece;
   - com `T.openDir`, o item é "Abrir pasta";
   - sem ele, é "Copiar caminho da pasta" (`navigator.clipboard.writeText(dir)` e o aviso "Caminho copiado").
   - O `title` do item é o caminho (RF1.5).
 - **`src-tauri/src/ipc.rs`**: o comando `open_dir`, que:
   - recusa se o `where_` do contexto for remoto;
-  - confere o par com `stivo_core::router::compose_base(ctx, project, dir, None)` (hoje privado; passa a `pub(crate)` com um wrapper público mínimo);
+  - confere o par com `stivo_core::router::compose_project(ctx, project, dir)`, que embrulha o `compose_base` (`pub(crate)`, devolve o argv do compose);
   - confere `Path::new(dir).is_dir()`;
   - chama `app.opener().open_path(dir, None::<&str>)`.
 - **`src-tauri/capabilities/main.json`**: acrescenta só `allow-open-dir`. Nenhuma permissão `opener:*` vai para a janela.
@@ -33,12 +33,13 @@ Duas implementações pequenas, uma por versão, decididas no front pelo `T.desk
 ```rust
 #[tauri::command]
 async fn open_dir(app: AppHandle, state: State<'_, AppState>, project: String, dir: String) -> Result<(), String>;
-// Err(texto traduzido): "daemon remoto", "projeto compose não encontrado" (o 404 do compose_base),
-// "A pasta não existe mais: <dir>", ou o erro do opener
+// Err(texto em pt ou en, escrito no próprio app): "O daemon é remoto…", "projeto compose não encontrado" (o 404 do
+// compose_base, traduzido pelo núcleo), "A pasta não existe mais: <dir>" ou "Não consegui abrir a pasta: <dir>"
+pub async fn compose_project(ctx: &Ctx, project: &str, dir: &str) -> Result<(), Response>;   // stivo_core::router
 ```
 
 ```ts
-openDir?(project: string, dir: string): Promise<{ok: true} | {ok: false; error: string}>;
+openDir?(project: string, dir: string): Promise<string | null>;
 ```
 
 ### Modelos de dado
@@ -56,16 +57,16 @@ Nenhum. Na web não há rota (só clipboard). No desktop é um comando da IPC fo
 
 ## Estratégia de teste
 
-- **Unitário Rust**: a validação do `open_dir`, com o opener trocado por uma função injetada. Casos: remoto é recusado; par que não está nos labels é recusado sem chamar o opener; pasta inexistente é recusada; caso feliz chama o opener com o `dir` exato.
+- **Unitário Rust** (núcleo): o `compose_project` com um `Runner` falso: o par dos labels passa; outra pasta ou outro projeto dá 404.
+- **Unitário front** (`tests/transport-desktop.test.js`): o `openDir` chama o `open_dir` e devolve `null` ou a mensagem.
 - **E2E web** (`tests/e2e/compose.spec.ts`): o menu do projeto tem "Copiar caminho da pasta", e o clipboard recebe o `working_dir` da fixture `shop()`. Com contexto remoto, o item não aparece. Roda nos dois backends; no harness, que serve a página web, o item também é o de copiar.
-- **Smoke do desktop**: troca o opener por um script falso (`$PATH` com um `xdg-open` que grava o argumento) e confere o argumento depois do clique pela IPC.
+- **Desktop**: sem smoke. O `e2e/desktop-smoke.sh` dirige a janela só pelo X, e chegar ao item do menu por coordenada seria frágil. A chamada ao opener (a recusa do remoto e da pasta inexistente são poucas linhas em volta dela) entra no checklist manual da release, no Linux e no Windows (techspec do desktop).
 
 ## Sequenciamento
 
-1. O item de copiar na web (só front) e o E2E.
-2. O plugin, o comando `open_dir` com os testes e a capability.
-3. O `T.openDir` e o item do desktop.
-4. Smoke.
+1. O `compose_project` no núcleo, com o teste.
+2. O plugin, o comando `open_dir`, a capability e o `T.openDir`.
+3. O item no menu nas duas versões, o E2E da web e o README.
 
 ## Observabilidade
 
@@ -97,11 +98,12 @@ Nenhum. Na web não há rota (só clipboard). No desktop é um comando da IPC fo
 
 ### Arquivos relevantes
 
-- `src/app.ts`: `groupHead` (580 a 625), `REMOTE` (266) e `copyExec` (811, como modelo).
-- `src/transport.ts` e `src/transport-desktop.ts`.
-- `src-tauri/src/ipc.rs`, `src-tauri/src/lib.rs`, `src-tauri/Cargo.toml` e `src-tauri/capabilities/main.json`.
-- `src-tauri/core/src/router.rs`: `compose_base` (430 a 459) e `src-tauri/core/src/page.rs` (`where_`).
-- `tests/e2e/compose.spec.ts` e `e2e/desktop-smoke.sh`.
+- `src/app.ts`: `groupHead` (`dirItem`), `projectDir` (antes do `svcs`) e o export para `window`.
+- `src/transport.ts` e `src/transport-desktop.ts` (`openDir`).
+- `src-tauri/src/ipc.rs` (`open_dir`), `src-tauri/src/lib.rs` (plugin e handler), `src-tauri/build.rs` (`COMMANDS`), `src-tauri/Cargo.toml`/`Cargo.lock` e `src-tauri/capabilities/main.json` (e o que o build gera em `gen/schemas/` e `permissions/autogenerated/`).
+- `src-tauri/core/src/router.rs`: `compose_project` (com teste), junto do `compose_base`; `src-tauri/core/src/page.rs` (`where_`).
+- `README.md` e o checklist manual no techspec do desktop.
+- `tests/e2e/compose.spec.ts` e `tests/transport-desktop.test.js`.
 
 ## Histórico
 
@@ -111,3 +113,7 @@ Nenhum. Na web não há rota (só clipboard). No desktop é um comando da IPC fo
 - A conferência dos labels vira `stivo_core::router::compose_project` (público, com teste unitário), em vez de testar o `open_dir` com o opener injetado.
 - O smoke do desktop não ganha o caso da pasta: ele dirige a janela só pelo X, e o item do menu por coordenada seria frágil. A chamada ao opener entra no checklist manual da release.
 - As mensagens do `open_dir` ficam no app, em pt e en, como as do `prefs.rs`.
+
+**2026-10-22**. Reconciliação do sdd-review:
+- O documento passa a descrever o que foi construído: o `compose_project`, o `openDir` devolvendo a mensagem ou `null` (como o `prefs.set`), as mensagens do `open_dir` escritas no app, os testes e a falta de smoke.
+- O `log::warn!` da falha do opener deixou de imprimir o erro dele, que traz o caminho (a regra de log do projeto e a seção de observabilidade deste documento).
