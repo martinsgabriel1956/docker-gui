@@ -10,4 +10,4 @@ Uma linha por feature: PRD, techspec e status.
 - [Mudanças no filesystem](prd-diff-container/prd.md) — o `docker diff` do container no modal de logs, com filtro. status: implementado ([techspec](prd-diff-container/techspec.md))
 - [Abrir a pasta do projeto](prd-abrir-pasta-projeto/prd.md) — abre a pasta do projeto compose no gerenciador de arquivos (desktop) ou copia o caminho (web). status: implementado ([techspec](prd-abrir-pasta-projeto/techspec.md))
 - [Baixar e atualizar imagens](prd-pull-imagens/prd.md) — `docker pull` pela aba Imagens: baixar pelo nome e atualizar uma tag existente. status: implementado ([techspec](prd-pull-imagens/techspec.md))
-- [Baixar arquivo do container](prd-baixar-arquivo-container/prd.md) — baixa um arquivo ou uma pasta (`.tar`) de dentro do container, também parado. status: em techspec ([techspec](prd-baixar-arquivo-container/techspec.md))
+- [Baixar arquivo do container](prd-baixar-arquivo-container/prd.md) — baixa um arquivo ou uma pasta (`.tar`) de dentro do container, também parado. status: implementado ([techspec](prd-baixar-arquivo-container/techspec.md))

@@ -64,6 +64,7 @@ async fn cp_out_max(ctx: &Ctx, id: &str, path: &str, max: usize) -> Result<CpFil
     };
     match tokio::time::timeout(ACTION_TIMEOUT, work).await {
         Err(_) => {
+            log::warn!("baixar arquivo: o docker cp passou do prazo"); // sem caminho nem container
             let secs = ACTION_TIMEOUT.as_secs().to_string();
             let msg = "{cli} {cmd} não respondeu em {timeout}s. O daemon está travado?";
             Err(reply(500, trf(ctx.lang, msg, &[("cli", &ctx.cli[0]), ("cmd", "cp"), ("timeout", &secs)])))

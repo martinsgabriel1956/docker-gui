@@ -25,12 +25,12 @@ O limite de 100 MB vale para as duas versões.
   - O `api` da IPC devolve 404 para essa rota (o desktop usa o `cp_save`).
 - **`src-tauri/src/ipc.rs`**: o comando `cp_save(id, path)`, que chama `stivo_core::cp::cp_out` e depois `app.dialog().file().set_file_name(name).blocking_save_file()` (numa task de bloqueio). Devolve `{saved: true}`, `{saved: false}` (a pessoa cancelou) ou um erro.
 - **`src/transport.ts`**: o `Transport` ganha `cpOut(id, path, signal): Promise<CpResult>`.
-  - Web: `fetch` com o header do token e `AbortSignal`; status 200 vira `blob()` com o nome do `Content-Disposition` e o `saveBlob`; outro status vira o JSON de erro.
+  - Web: `fetch` com o header do token e `AbortSignal`; status 200 vira `blob()` com o nome do `Content-Disposition` e o `saveBlob` (no próprio `transport-web.ts`); outro status vira o JSON de erro.
   - Desktop: `invoke('cp_save')`. O `signal` só faz a página parar de esperar.
 - **`src/app.ts`**:
   - item "Baixar arquivo…" no menu "⋯" do container (`more`, 491 a 494) e no menu do modal (1150 a 1156);
   - um `<dialog id="cp">` pequeno, com o campo do caminho, um `<datalist>` com os últimos caminhos, os botões Baixar e Cancelar, e o estado "Baixando…";
-  - o `saveBlob(name, blob)` sai do `downloadLogs`, que passa a usá-lo.
+  - no 413, a página monta o `docker cp` pronto (nome do container, caminho e o CLI do `data-cli`), com Copiar.
 - **`localStorage`**: `docker-gui-cp`, com até 5 caminhos por nome de container (por nome, porque o container recriado continua sendo "o mesmo"). Leitura e escrita em try/catch, como as outras chaves.
 
 ## Design de implementação
@@ -39,7 +39,7 @@ O limite de 100 MB vale para as duas versões.
 
 ```py
 MAX_CP = 100 * 1024 * 1024
-CP_PATH_RE = re.compile(r"/[^\x00]{0,4095}")    # absoluto, sem NUL, até 4 KB
+def cp_name(path: str, folder: bool) -> str      # o nome saneado; pasta ganha .tar
 def cp_out(cid: str, path: str) -> tuple[int, str, bytes | str]:  # (200, nome, dados) | (4xx/500, "", mensagem)
 ```
 
@@ -62,9 +62,11 @@ cpOut(id: string, path: string, signal: AbortSignal): Promise<CpResult>;
 - **Nome do arquivo**: o `basename` do caminho no container. A raiz `/` vira `root`. Uma pasta ganha `.tar`. O nome é saneado para o sistema de arquivos e para o cabeçalho: `/`, `\` e caracteres de controle viram `_`.
 - **Erros**:
   - `400`: caminho inválido;
+  - `404`: "o container não existe mais", a partir do stderr `No such container` (Docker) ou `no such container` (Podman), conferido antes do próximo, porque o do Podman também traz "no such file or directory";
   - `404`: "não existe", a partir do stderr `Could not find the file` (Docker) ou `no such file or directory` (Podman);
-  - `413`: "acima de 100 MB", com o `docker cp` pronto no corpo para a página mostrar;
-  - `500`: outros, com o stderr.
+  - `413`: "acima de 100 MB" (só a mensagem; o `docker cp` pronto é montado pela página);
+  - `500`: prazo estourado, saída que não é tar (inclusive vazia) e o resto, com o stderr inteiro.
+  - O caminho válido é conferido por código nas duas versões: começa com `/`, sem NUL, até 4096 caracteres.
   - Todos com o texto pelo `tr`.
 
 ### Endpoints de API
@@ -96,7 +98,7 @@ cpOut(id: string, path: string, signal: AbortSignal): Promise<CpResult>;
   - caminho inexistente mostra a mensagem;
   - o caminho usado aparece no `datalist` na vez seguinte.
   - Roda nos dois backends (o harness serve o `Reply::File`).
-- **Smoke do desktop**: o `cp_save` com o diálogo trocado por um caminho fixo (variável de ambiente só do binário de teste) e a conferência do arquivo gravado.
+- **Desktop**: sem smoke do `cp_save` (ver o Histórico): o diálogo "Salvar como" e a gravação entram no checklist manual da release, no Linux e no Windows (no [techspec do desktop](../prd-desktop-tauri/techspec.md)).
 
 ## Sequenciamento
 
@@ -104,7 +106,7 @@ cpOut(id: string, path: string, signal: AbortSignal): Promise<CpResult>;
 2. A rota, o `send_bytes`, o `Reply::File` e o harness.
 3. O docker falso com `cp`.
 4. Front: `cpOut` na web, `saveBlob`, o diálogo, o menu e o `localStorage`. E2E.
-5. Desktop: plugin, `cp_save` e `cpOut` no `transport-desktop`. Smoke.
+5. Desktop: plugin, `cp_save` e `cpOut` no `transport-desktop`. Checklist manual.
 
 ## Observabilidade
 
@@ -117,7 +119,7 @@ Nada de caminho nem de nome de container no log. `log::warn!` só para prazo est
 - **Ler até o limite e só então responder**, em vez de transmitir em stream. Com 100 MB de teto, a resposta sai com status certo (o 413 antes de qualquer byte) e o `Content-Length` exato, e o tar é aberto com o `tarfile`/`tar` sem truque de stream. Isso custa até 100 MB de RAM durante um download, o que é aceitável para um uso pontual.
 - **Web por `fetch` e `Blob`, não por link direto com o token na query.** O link gravaria a URL com o token no histórico de downloads do navegador. O `fetch` mantém o token no header, como todas as outras rotas, e o limite de 100 MB cabe na memória da aba.
 - **Uma implementação no núcleo, duas entregas.** O desktop usa a mesma `cp_out` e só troca o fim: grava pelo diálogo, sem passar os bytes pela IPC até a página e de volta.
-- **Cancelar** na web aborta o `fetch`, e a conexão fechada faz o servidor matar o `docker cp` na próxima escrita. No desktop, a página para de esperar e descarta o resultado. O `docker cp` termina sozinho, limitado pelos 100 MB e pelos 120 s. *(ponytail: o cancelamento não mata o processo no desktop; se isso pesar, o `cp_save` ganha um id e um `cp_cancel`.)*
+- **Cancelar** na web aborta o `fetch`; no desktop, a página para de esperar e descarta o resultado. Nos dois, o `docker cp` termina sozinho, limitado pelos 100 MB e pelos 120 s: o servidor lê tudo antes de responder, e a escrita numa conexão que fechou é ignorada. *(ponytail: o cancelamento não mata o processo no desktop; se isso pesar, o `cp_save` ganha um id e um `cp_cancel`.)*
 - **Dependências novas**: `tar` no núcleo Rust (o Python usa o `tarfile` da biblioteca padrão) e `tauri-plugin-dialog` no app. As duas com versão fixa.
 
 ### Riscos conhecidos
@@ -161,3 +163,10 @@ Nada de caminho nem de nome de container no log. `log::warn!` só para prazo est
 - Cancelar na web não mata o `docker cp` na hora: o servidor lê tudo antes de responder. Os 100 MB e os 120 s limitam o processo, como no desktop.
 - O smoke do desktop não ganha o `cp_save`: ele dirige o app só pelo X, e trocar o diálogo por uma variável de ambiente deixaria no binário de release um jeito de gravar sem a escolha da pessoa (RF2.3). O `cp_save` entra no checklist manual da release.
 - O container que sumiu ganha um 404 próprio ("o container não existe mais"), conferido antes do caminho que não existe.
+
+**2026-10-22**. Reconciliação depois da implementação:
+- O tar é aberto sem tentar descompressão (`mode="r:"` no Python; o crate `tar` não descomprime): o `docker cp` sempre entrega tar puro.
+- Saída vazia (o `docker cp` sai bem sem escrever o tar) é 500 nas duas versões; no Rust, o `entries()` vazio não vira uma pasta vazia.
+- Os textos do botão do diálogo são "Baixar arquivo" e "Baixando arquivo…": "Baixar" e "Baixando…" já são as chaves do pull de imagens ("Pull" e "Pulling…" em inglês).
+- O corpo deste documento passa a descrever o que o código faz (os erros, o `saveBlob`, o cancelamento e o teste do desktop), no lugar de remeter só ao Histórico.
+- Faltava o `log::warn!` do prazo estourado no `cp.rs` (Observabilidade); entrou nesta reconciliação.

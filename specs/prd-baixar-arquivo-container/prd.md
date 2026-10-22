@@ -18,7 +18,7 @@ A feature baixa um arquivo, ou uma pasta, de dentro do container, a partir do ca
 - Como dev, eu quero baixar uma pasta (`/app/reports`) inteira, que chega como um `.tar`, para abrir os relatórios no meu editor.
 - Como dev com um container que caiu, eu quero baixar o arquivo mesmo com ele parado, porque é justamente esse que estou investigando.
 - **Borda:** o caminho não existe. A mensagem diz que não existe, com o caminho.
-- **Borda:** o arquivo é maior que o limite. A mensagem diz o tamanho e o limite e sugere o `docker cp` pelo terminal, com o comando pronto para copiar.
+- **Borda:** o arquivo é maior que o limite. A mensagem diz que ele passa do limite e sugere o `docker cp` pelo terminal, com o comando pronto para copiar.
 - **Borda:** o caminho é um link simbólico. Baixa o arquivo para onde o link aponta, dentro do container.
 - **Borda:** daemon remoto. Funciona: o arquivo vem do container lá, e o aviso de contexto continua como hoje.
 - **Borda:** container que não existe mais (removido no meio). Mensagem de erro, sem download parcial.
@@ -42,8 +42,8 @@ A feature baixa um arquivo, ou uma pasta, de dentro do container, a partir do ca
 
 ### 3. Limites e erros
 
-1. **RF3.1** Um limite de 100 MB protege a página e o app. Acima dele, a recusa vem antes de transferir, quando o tamanho é conhecido, e a mensagem traz o `docker cp` pronto.
-2. **RF3.2** Erros traduzidos: caminho não existe, sem permissão, container sumiu, tamanho acima do limite. O erro do docker fica no "ver erro".
+1. **RF3.1** Um limite de 100 MB protege a página e o app. Acima dele, a recusa vem antes de qualquer byte chegar à página ou ao disco, e a mensagem traz o `docker cp` pronto.
+2. **RF3.2** Erros traduzidos: caminho não existe, container sumiu, tamanho acima do limite. Os outros (sem permissão, entre eles) mostram o erro do docker inteiro.
 3. **RF3.3** Um download em andamento mostra que está acontecendo e pode ser cancelado.
 
 ## Experiência do usuário
@@ -74,3 +74,7 @@ A feature baixa um arquivo, ou uma pasta, de dentro do container, a partir do ca
 **2026-10-21**. Documento criado. Decisões: caminho digitado; pasta sai como `.tar`; funciona com o container parado; limite de tamanho com o `docker cp` sugerido.
 
 **2026-10-21**. RF3.1: o limite passa a ser 100 MB, nas duas versões. Na web o arquivo passa pela memória da aba (o token fica no header, sem link direto com o token na URL), e o techspec fixou o valor por isso.
+
+**2026-10-22**. RF3.2, revisto na implementação: são traduzidos o caminho que não existe, o container que sumiu e o tamanho acima do limite. "Sem permissão" não ganhou texto próprio: com o Docker, o `docker cp` lê pelo daemon, como root, e o stderr desse caso varia entre Docker e Podman. Ele e os demais erros aparecem no diálogo com o stderr do docker inteiro, sem um "ver erro" para abrir.
+
+**2026-10-22**. RF3.1 e a borda do arquivo grande, revistos na implementação: o tamanho não é conhecido antes (o `docker cp` não o informa, e a leitura para no limite). A mensagem diz que passa de 100 MB, sem o tamanho exato, e a recusa vem antes de qualquer byte chegar à página ou ao disco.
