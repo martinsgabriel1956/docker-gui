@@ -22,7 +22,7 @@ O estado real é lido do sistema a cada `prefs_get` (não fica no `prefs.json`).
 - **Front**: `src/page.html` ganha a caixa `#pref-autostart` na tela de preferências, junto das notificações. O `src/app.ts` (`openPrefs`/`savePrefs`) a lê e envia, e `src/transport.ts` acrescenta o campo aos tipos `DesktopPrefs` e `Prefs`.
 - **Instaladores do Windows**:
   - NSIS: `src-tauri/windows/hooks.nsh` (`NSIS_HOOK_POSTUNINSTALL`), em `bundle.windows.nsis.installerHooks`.
-  - WiX: `src-tauri/windows/autostart.wxs` (custom action `reg delete … /f` com `Return="ignore"`, condicionada a `REMOVE="ALL"`), em `bundle.windows.wix.fragmentPaths` e `componentRefs`/`customActionRefs`.
+  - WiX: `src-tauri/windows/autostart.wxs` (custom action `reg delete … /f` com `Return="ignore"`, condicionada a `REMOVE="ALL"`), em `bundle.windows.wix.fragmentPaths` e `componentRefs` (ver o Histórico).
 
 ## Design de implementação
 
@@ -127,3 +127,11 @@ Nenhum. Só comandos Tauri que já existem (`prefs_get` e `prefs_set`).
 ## Histórico
 
 **2026-10-21**. Documento criado.
+
+**2026-10-22**. Durante o sdd-tasks:
+- O ramo do Windows do `autostart.rs` entra junto com o do Linux (mesmo módulo); os instaladores ficam numa task própria.
+- O WiX do Tauri não tem `customActionRefs`: o fragmento ganha um `Component` vazio, referenciado em `componentRefs`, que traz o fragmento inteiro (com a custom action) para o MSI.
+- Atualizar mantém a escolha (RF3.2): o hook do NSIS só apaga fora do `$UpdateMode`, e a custom action do MSI roda com `REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE`.
+- O smoke não liga a opção pela IPC (ele dirige o app só pelo X): gravar e apagar o arquivo fica no teste unitário; o smoke cobre o `--autostart`.
+- O checklist manual do Windows fica numa seção nova do `packaging/README.md`.
+- Se o `prefs_set` falhar, a caixa volta ao estado de quando a tela abriu: nenhum erro acontece depois de o início automático mudar.
