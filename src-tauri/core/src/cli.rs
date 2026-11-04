@@ -36,10 +36,19 @@ pub trait Runner: Send + Sync {
     }
 }
 
+/// O AppRun do AppImage exporta as bibliotecas e o Python de dentro dele, e o docker herdaria tudo: o CLI e os helpers
+/// dele têm que ver os do sistema. A WebView precisa dessas variáveis, então elas saem só de quem o app lança
+pub fn appimage_env() -> &'static [&'static str] {
+    if std::env::var_os("APPIMAGE").is_some() { &["LD_LIBRARY_PATH", "PYTHONHOME", "PYTHONPATH"] } else { &[] }
+}
+
 /// tokio::process::Command do CLI, sem janela de console no Windows e morto se o handle cair
 pub fn command(cli: &[String], args: &[String]) -> tokio::process::Command {
     let mut c = tokio::process::Command::new(&cli[0]);
     c.args(&cli[1..]).args(args).stdin(Stdio::null()).kill_on_drop(true);
+    for v in appimage_env() {
+        c.env_remove(v);
+    }
     #[cfg(windows)]
     c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: sem isso cada consulta pisca um console
     c

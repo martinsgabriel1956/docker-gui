@@ -125,7 +125,8 @@ jobs:
       fail-fast: false
       matrix:
         # 22.04: o .deb nasce com a glibc e o WebKitGTK mais antigos que o app aceita
-        os: [ubuntu-22.04, windows-latest]
+        # macos-latest é Apple Silicon; macos-15-intel, os Macs Intel
+        os: [ubuntu-22.04, windows-latest, macos-latest, macos-15-intel]
     defaults:
       run:
         shell: bash
@@ -149,12 +150,19 @@ jobs:
       - run: npm ci
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml -p stivo --all-targets -- -D warnings
       - run: cargo test --manifest-path src-tauri/Cargo.toml -p stivo
-      - run: npx tauri build --bundles ${{ runner.os == 'Linux' && 'deb,rpm' || 'msi,nsis' }}
+      - run: npx tauri build --bundles ${{ runner.os == 'Linux' && 'deb,rpm,appimage' || runner.os == 'Windows' && 'msi,nsis' || 'dmg' }}
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"  # sem FUSE no runner: o linuxdeploy se extrai e roda
       # teto do PRD: cada instalador com até 20 MB
       - run: scripts/size.sh
       # janela, fechar que esconde, notificação em até 5 s e instância única, num X e num D-Bus próprios
       - if: runner.os == 'Linux'
         run: e2e/desktop-smoke.sh src-tauri/target/release/stivo
+      # o AppRun do AppImage mexe no ambiente que o docker herda: o mesmo smoke, agora de dentro dele
+      - if: runner.os == 'Linux'
+        run: e2e/desktop-smoke.sh src-tauri/target/release/bundle/appimage/*.AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
       - uses: actions/upload-artifact@v4
         with:
           name: stivo-${{ matrix.os }}
@@ -163,4 +171,6 @@ jobs:
             src-tauri/target/release/bundle/rpm/*.rpm
             src-tauri/target/release/bundle/msi/*.msi
             src-tauri/target/release/bundle/nsis/*-setup.exe
+            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/appimage/*.AppImage
           retention-days: 14

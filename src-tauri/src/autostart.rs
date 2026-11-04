@@ -33,14 +33,31 @@ fn entry() -> io::Result<String> {
     ))
 }
 
+// macOS: um LaunchAgent do usuário, que o launchd lê ao entrar na conta
+#[cfg(target_os = "macos")]
+fn file() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(std::path::Path::new(&home).join("Library/LaunchAgents/io.github.martinsgabriel1956.Stivo.plist"))
+}
+
+// ponytail: o caminho vai sem o escape do XML (&, <); o current_exe é /Applications/Stivo.app/... no .dmg
+#[cfg(target_os = "macos")]
+fn entry() -> io::Result<String> {
+    let exe = std::env::current_exe()?;
+    let exe = exe.display();
+    Ok(format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>io.github.martinsgabriel1956.Stivo</string>\n<key>ProgramArguments</key><array><string>{exe}</string><string>{ARG}</string></array>\n<key>RunAtLoad</key><true/>\n</dict></plist>\n"
+    ))
+}
+
 /// só a entrada que o app grava conta: desligada pelo GNOME ou apontando para outro executável é desligada (RF1.3)
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub fn enabled() -> bool {
     let (Some(f), Ok(want)) = (file(), entry()) else { return false };
     std::fs::read_to_string(f).is_ok_and(|have| have == want)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub fn set(on: bool) -> io::Result<()> {
     let f = file().ok_or_else(|| io::Error::other("sem HOME"))?;
     if !on {
@@ -94,6 +111,29 @@ mod tests {
         std::fs::remove_file(&file).unwrap(); // apagado por fora (painel do GNOME): a tela mostra desligado
         assert!(!enabled());
         set(true).unwrap();
+        set(false).unwrap();
+        assert!(!file.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn macos_agent_follows_the_file() {
+        let dir = std::env::temp_dir().join(format!("stivo-autostart-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // SAFETY: o único teste do crate que lê ou escreve esta variável
+        unsafe { std::env::set_var("HOME", &dir) };
+        assert!(!enabled());
+        set(false).unwrap(); // desligar o que não existe é Ok
+        set(true).unwrap();
+        assert!(enabled());
+        let file = file().unwrap();
+        let lint = std::process::Command::new("plutil").arg("-lint").arg(&file).status().unwrap();
+        assert!(lint.success(), "plist inválido");
         set(false).unwrap();
         assert!(!file.exists());
         let _ = std::fs::remove_dir_all(&dir);

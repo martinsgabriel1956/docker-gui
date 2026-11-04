@@ -8,7 +8,7 @@
 #   5. aberto pelo login (--autostart), fica só na bandeja; o login de novo não traz a janela, abrir sem ele traz.
 # O mesmo método do Paddock: o tauri-driver precisaria do WebKitWebDriver, que a distribuição não empacota.
 #
-# Precisa de Xvfb, xdotool, dbus-run-session e python3 com gi (Gio). Uso: e2e/desktop-smoke.sh [binário]
+# Precisa de Xvfb, xdotool, dbus-run-session e python3 com gi (Gio). Uso: e2e/desktop-smoke.sh [binário ou .AppImage]
 # (padrão: src-tauri/target/debug/stivo; o de release em src-tauri/target/release/stivo)
 set -euo pipefail
 export LC_ALL=C
@@ -31,6 +31,13 @@ cleanup() {
 }
 trap cleanup EXIT
 fail() { echo "FALHOU: $*" >&2; echo "--- log do app:" >&2; tail -30 "$work/app.log" "$work/auto.log" >&2 2>/dev/null || true; exit 1; }
+# os processos do Stivo deste teste, e não o que o usuário tem aberto (no AppImage, o argv é só "stivo")
+stivos() {
+  local p
+  for p in $(pgrep -x stivo); do grep -qz '^STIVO_SMOKE_INNER=1$' "/proc/$p/environ" 2>/dev/null && echo "$p"; done
+  return 0
+}
+no_stivo() { [ -z "$(stivos)" ]; }
 wait_for() {  # wait_for <segundos> <comando...>
   local until=$(( $(date +%s) + $1 )); shift
   until "$@" >/dev/null 2>&1; do [ "$(date +%s)" -lt "$until" ] || return 1; sleep 0.2; done
@@ -81,18 +88,18 @@ echo "ok: a bandeja mostra 1"
 
 run >>"$work/app.log" 2>&1 || true  # a segunda instância avisa a primeira e sai
 wait_for 10 visible || fail "abrir de novo não trouxe a janela de volta"
-[ "$(pgrep -fc "^$bin")" -eq 1 ] || fail "ficou mais de um processo do Stivo"
+[ "$(stivos | wc -l)" -eq 1 ] || fail "ficou mais de um processo do Stivo"
 echo "ok: abrir de novo trouxe a janela, sem segundo processo"
 
-pkill -f "^$bin"  # o $app é o subshell do run: o Stivo é o filho dele
-wait_for 10 sh -c "! pgrep -f '^$bin'" || fail "o Stivo não saiu"
+kill $(stivos)  # o $app é o subshell do run: o Stivo é o filho dele
+wait_for 10 no_stivo || fail "o Stivo não saiu"
 run --autostart >"$work/auto.log" 2>&1 & app=$!; pids+=($app)
 wait_for 15 grep -q "bandeja: 1" "$work/auto.log" || fail "aberto com --autostart, a página não mandou a contagem"
 visible >/dev/null && fail "aberto com --autostart, a janela apareceu"
 run --autostart >>"$work/auto.log" 2>&1 || true
 sleep 1
 visible >/dev/null && fail "a segunda execução com --autostart trouxe a janela"
-[ "$(pgrep -fc "^$bin")" -eq 1 ] || fail "ficou mais de um processo do Stivo"
+[ "$(stivos | wc -l)" -eq 1 ] || fail "ficou mais de um processo do Stivo"
 run >>"$work/auto.log" 2>&1 || true
 wait_for 10 visible || fail "abrir sem --autostart não trouxe a janela"
 echo "ok: --autostart abre só na bandeja, e abrir sem ele traz a janela"

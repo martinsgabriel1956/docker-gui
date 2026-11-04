@@ -39,15 +39,15 @@ A saída do `podman ps` tem outro formato (`Names` em lista, portas como objetos
 
 ## App desktop
 
-O Stivo também vem como app instalável para Linux (`.deb` e `.rpm`) e Windows (`.msi` e `.exe`), com as mesmas features da página. A diferença:
+O Stivo também vem como app instalável para Linux (`.deb`, `.rpm` e AppImage), Windows (`.msi` e `.exe`) e macOS (`.dmg`), com as mesmas features da página. A diferença:
 
-- **Não precisa de Python.** O instalador tem uns 3 MB e usa a WebView do sistema (o WebKitGTK no Linux, o WebView2 no Windows); do lado de fora, só o `docker` (ou o `podman`).
+- **Não precisa de Python.** O instalador tem uns 3 MB e usa a WebView do sistema (o WebKitGTK no Linux, o WebView2 no Windows, o WebKit no macOS); do lado de fora, só o `docker` (ou o `podman`).
 - **Fica na bandeja.** Fechar a janela não encerra o app: ele continua vigiando os containers, o ícone da bandeja mostra quantos precisam de atenção e a notificação do sistema avisa quando um entra na faixa (com as mesmas regras da página: só quem entra, uma notificação para vários juntos). Para sair, use Sair no menu da bandeja. Abrir o Stivo de novo traz a janela de volta.
 - **Nenhuma porta aberta.** A janela fala com o núcleo pela IPC do app, sem servidor em `localhost` e sem token.
 - **Preferências** no cabeçalho e no menu da bandeja: CLI (Docker ou Podman), contexto do docker, idioma, notificações e iniciar com o sistema (abre na bandeja ao entrar na conta). Valem na hora.
 - **Terminal com TTY também no Windows** (ConPTY), sem o `script` dentro do container.
 
-No GNOME, a bandeja depende da extensão [AppIndicator](https://extensions.gnome.org/extension/615/appindicator-support/): sem ela o ícone não aparece (o app continua rodando, e abrir o Stivo de novo traz a janela). No Windows, como o instalador não é assinado, o SmartScreen avisa na primeira execução ("Mais informações" → "Executar assim mesmo").
+No GNOME, a bandeja depende da extensão [AppIndicator](https://extensions.gnome.org/extension/615/appindicator-support/): sem ela o ícone não aparece (o app continua rodando, e abrir o Stivo de novo traz a janela). No Windows, como o instalador não é assinado, o SmartScreen avisa na primeira execução ("Mais informações" → "Executar assim mesmo"). No macOS o app também não é assinado pela Apple: depois de arrastar para Aplicativos, rode `xattr -cr /Applications/Stivo.app` uma vez, senão o sistema diz que ele está danificado. O AppImage traz o WebKitGTK dentro, por isso passa de 3 MB.
 
 Os instaladores saem em cada [release](https://github.com/martinsgabriel1956/docker-gui/releases).
 
