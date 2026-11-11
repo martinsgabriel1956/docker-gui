@@ -47,6 +47,9 @@
         ]
       }
     },
+    "macOS": {
+      "signingIdentity": "-"
+    },
     "linux": {
       "rpm": {
         "depends": [

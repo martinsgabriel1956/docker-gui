@@ -38,6 +38,9 @@ pub fn open(
     cmd.args(&cli[1..]);
     cmd.args(["exec", "-it", id]);
     cmd.args(SHELL);
+    for v in crate::cli::appimage_env() {
+        cmd.env_remove(v);
+    }
     let child = pair.slave.spawn_command(cmd).map_err(err)?;
     drop(pair.slave); // sem nenhum lado escravo aberto aqui, o read dá EOF quando o exec termina
     let mut reader = pair.master.try_clone_reader().map_err(err)?;

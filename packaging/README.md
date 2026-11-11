@@ -1,6 +1,6 @@
 # Pacotes do Stivo desktop
 
-Os instaladores saem do `release.yml` em cada tag `v*` (`.deb`, `.rpm`, `.msi`, `.exe` e o `SHA256SUMS`). Os canais
+Os instaladores saem do `release.yml` em cada tag `v*` (`.deb`, `.rpm`, AppImage, `.msi`, `.exe`, `.dmg` e o `SHA256SUMS`). Os canais
 abaixo só apontam para eles; publicar é com a sua conta em cada um.
 
 ## AUR (`stivo-bin`)

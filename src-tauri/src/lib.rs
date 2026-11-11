@@ -128,6 +128,13 @@ pub fn run() {
                 background::on_close(window, api);
             }
         })
-        .run(tauri::generate_context!())
-        .expect("erro ao abrir o Stivo");
+        .build(tauri::generate_context!())
+        .expect("erro ao abrir o Stivo")
+        .run(|_app, _event| {
+            // no macOS, abrir o Stivo de novo é clicar no Dock: quem cuida é o sistema, não a instância única
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                background::show_main(_app);
+            }
+        });
 }
